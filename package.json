@@ -1,0 +1,31 @@
+{
+  "name": "pi-telegram-plus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Full Telegram control of pi coding agent — commands, menus, interactive UI, model management, and more",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "marked": "^18.0.4"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

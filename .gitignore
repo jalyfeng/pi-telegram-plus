@@ -1,0 +1,49 @@
+# ── Dependencies ────────────────────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ── Package lock (keep out of version control for library projects) ─────
+package-lock.json
+
+# ── pi coding agent ─────────────────────────────────────────────────────
+.pi/
+
+# ── Environment & secrets ───────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Build output ────────────────────────────────────────────────────────
+dist/
+build/
+*.tsbuildinfo
+
+# ── Test & coverage ─────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+
+# ── IDE / Editor ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-*
+
+# ── OS garbage ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+
+# ── Logs & temp files ───────────────────────────────────────────────────
+*.log
+npm-debug.log*
+*.tmp
+*.temp
+
+# ── Misc ────────────────────────────────────────────────────────────────
+*.tgz
+*.d.ts
+
