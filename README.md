@@ -1,5 +1,11 @@
 # pi-telegram-plus
 
+<p>
+  <a href="https://www.npmjs.com/package/pi-telegram-plus"><img src="https://img.shields.io/npm/v/pi-telegram-plus?style=flat-square&logo=npm" alt="npm" /></a>
+  <a href="https://github.com/jalyfeng/pi-telegram-plus"><img src="https://img.shields.io/github/license/jalyfeng/pi-telegram-plus?style=flat-square" alt="license" /></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D22.19.0-339933?style=flat-square&logo=node.js" alt="node" />
+</p>
+
 **Full Telegram control of [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — commands, interactive UI, model/session management, file transfer, and real-time streaming output, all from Telegram.**
 
 `pi-telegram-plus` is a pi extension that turns Telegram into a full-featured remote control surface for the pi coding agent. It's not just a notification bot — it mirrors the core pi TUI experience into Telegram, with interactive menus, inline keyboards, file attachments, and live agent output rendering.
@@ -112,24 +118,22 @@ Full interactive UI components built on inline keyboards:
 - [pi coding agent](https://github.com/earendil-works/pi-coding-agent) installed globally
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
-### Setup
+### Installation
 
-1. **Clone or create the extension directory:**
+**Install via npm (recommended):**
 
 ```bash
-git clone <repo-url> pi-telegram-plus
+pi install npm:pi-telegram-plus
+```
+
+**Or install from source:**
+
+```bash
+git clone https://github.com/jalyfeng/pi-telegram-plus.git
 cd pi-telegram-plus
 npm install
-```
-
-2. **Configure pi to load the extension:**
-
-```bash
-# Inside the pi-telegram-plus directory
 pi packages add .
 ```
-
-This registers the extension via `.pi/settings.json`.
 
 3. **Start pi and configure your Telegram bot:**
 

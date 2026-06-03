@@ -1,21 +1,43 @@
 {
+  "$schema": "https://json.schemastore.org/package",
   "name": "pi-telegram-plus",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.0.1",
   "description": "Full Telegram control of pi coding agent — commands, menus, interactive UI, model management, and more",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "telegram",
+    "coding-agent",
+    "remote-control"
+  ],
+  "license": "MIT",
+  "author": "jalyfeng",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
+  "files": [
+    "index.ts",
+    "lib/**/*.ts",
+    "!lib/__tests__/",
+    "pi-host.d.ts"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm test && npm run typecheck"
   },
   "pi": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "image": "https://pi.dev/logo-auto.svg",
+    "video": ""
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jalyfeng/pi-telegram-plus"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
