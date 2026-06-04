@@ -31,6 +31,7 @@ const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = 
   { command: "thinking", description: "Show or change thinking level" },
   { command: "stop", description: "Stop the current agent turn" },
   { command: "debug", description: "Show debug information" },
+  { command: "status", description: "Show runtime snapshot (workspace, model, context, messages)" },
   // tg-* commands visible in the Telegram bot menu.
   // tg-bind-cwd / tg-unbind-cwd are workspace-management commands that
   // require local cwd context and do not belong in the bot command list.

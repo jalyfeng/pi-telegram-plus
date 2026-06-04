@@ -1,8 +1,83 @@
 import { existsSync } from "node:fs";
 import type { CommandRegistry } from "./register.ts";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { escapeHtml } from "../html.ts";
-import type { CapturedAgentSession } from "../types.ts";
+import type { CapturedAgentSession, TelegramTransport } from "../types.ts";
+
+function formatFooterLikeTokenCount(value: number): string {
+  if (value < 1_000) return value.toString();
+  if (value < 10_000) return `${(value / 1_000).toFixed(1)}k`;
+  if (value < 1_000_000) return `${Math.round(value / 1_000)}k`;
+  if (value < 10_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  return `${Math.round(value / 1_000_000)}M`;
+}
+
+const STATUS_TEXT_LIMIT = 200;
+
+function truncateStatusText(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (value.length <= STATUS_TEXT_LIMIT) return value;
+  return `${value.slice(0, STATUS_TEXT_LIMIT - 1)}…`;
+}
+
+/**
+ * @internal Exported for tests; not part of the public module API.
+ * Keeps the rendered snapshot under Telegram's 4096-byte (and `splitTelegramText`'s
+ * 3600-byte single-chunk) limit by capping free-form text fields up front.
+ */
+export function buildStatusSnapshot(session: CapturedAgentSession): string {
+  const stats = session.getSessionStats();
+  const usage = session.getContextUsage();
+  const model = session.model;
+  const safeCwd = truncateStatusText(session.sessionManager.getCwd()) ?? "";
+  const safeSessionId = truncateStatusText(stats.sessionId) ?? "";
+  const safeSessionFile = truncateStatusText(stats.sessionFile);
+  const safeSessionName = truncateStatusText(session.sessionManager.getSessionName());
+  const contextWindow = usage?.contextWindow ?? 0;
+  const contextPercent = usage?.percent;
+
+  const stateBadge = session.isStreaming
+    ? "🟢 active"
+    : session.pendingMessageCount > 0
+      ? "🟡 queueing"
+      : "⚪ idle";
+
+  const contextDisplay = contextPercent === null || contextPercent === undefined
+    ? `?/${contextWindow}`
+    : `${contextPercent.toFixed(1)}%/${contextWindow}`;
+
+  // Labels are hard-coded, so escaping is unnecessary; only the value is dynamic.
+  const line = (label: string, value: string): string =>
+    `  <b>${label}</b>  ${escapeHtml(value)}`;
+
+  return [
+    "<b>🛰 TUI Status</b>",
+    "━━━━━━━━━━━━━━━━━━━━",
+    "<b>📂 Workspace</b>",
+    line("cwd", safeCwd),
+    line("session", safeSessionId + (safeSessionName ? ` • ${safeSessionName}` : "")),
+    line("file", safeSessionFile ?? "ephemeral"),
+    "",
+    "<b>🤖 Model</b>",
+    line("model", model ? `${model.provider}/${model.id}` : "(none)"),
+    line("thinking", session.thinkingLevel),
+    line("state", stateBadge),
+    line("queued", String(session.pendingMessageCount)),
+    "",
+    "<b>📊 Context &amp; Tokens</b>",
+    line("context", contextDisplay),
+    line("in", formatFooterLikeTokenCount(stats.tokens.input)),
+    line("out", formatFooterLikeTokenCount(stats.tokens.output)),
+    line("cache R", formatFooterLikeTokenCount(stats.tokens.cacheRead)),
+    line("cache W", formatFooterLikeTokenCount(stats.tokens.cacheWrite)),
+    line("total", formatFooterLikeTokenCount(stats.tokens.total)),
+    line("cost", `$${stats.cost.toFixed(4)}`),
+    "",
+    "<b>💬 Messages</b>",
+    line("user", String(stats.userMessages)),
+    line("assistant", String(stats.assistantMessages)),
+    line("tool calls", String(stats.toolCalls)),
+  ].join("\n");
+}
 
 /**
  * All command handlers capture ctx.ui at entry and use the captured reference.
@@ -10,7 +85,13 @@ import type { CapturedAgentSession } from "../types.ts";
  */
 export function registerInfoCommands(
   registry: CommandRegistry,
-  deps: { getSession: () => CapturedAgentSession | undefined },
+  deps: {
+    getSession: () => CapturedAgentSession | undefined;
+    /** Optional transport for direct sends (bypasses ui.notify wrapping). */
+    getTransport?: () => TelegramTransport | undefined;
+    /** Optional active chat id used for direct sends. */
+    getActiveChatId?: () => number | undefined;
+  },
 ): void {
   // ── /copy ──────────────────────────────────────────────────────────────
   registry.registerCommand("copy", {
@@ -24,6 +105,31 @@ export function registerInfoCommands(
       }
       const text = session.getLastAssistantText();
       ui.notify(text ? text : "No assistant message to copy.", "info");
+    },
+  });
+
+  // ── /status ───────────────────────────────────────────────────────────
+  registry.registerCommand("status", {
+    description: "Show runtime snapshot (workspace, model, context, messages)",
+    handler: async (_args, ctx) => {
+      const ui = ctx.ui;
+      const session = deps.getSession();
+      if (!session) {
+        ui.notify("No active session", "error");
+        return;
+      }
+
+      const html = buildStatusSnapshot(session);
+      const transport = deps.getTransport?.();
+      const chatId = deps.getActiveChatId?.();
+      if (transport && chatId !== undefined) {
+        await transport.sendText(chatId, html).catch(() => {
+          // Fall back to the standard notify path if the direct send fails.
+          ui.notify(html.replace(/<[^>]+>/g, ""), "info");
+        });
+        return;
+      }
+      ui.notify(html, "info");
     },
   });
 

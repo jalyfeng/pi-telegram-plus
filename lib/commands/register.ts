@@ -1,4 +1,4 @@
-import type { CapturedAgentSession } from "../types.ts";
+import type { CapturedAgentSession, TelegramTransport } from "../types.ts";
 import { registerModelCommands } from "./model.ts";
 import { registerSessionCommands } from "./session.ts";
 import { registerAuthCommands } from "./auth.ts";
@@ -29,12 +29,24 @@ export type TgConfigDeps = SessionDeps & {
   persistConfig: (c: import("../types.ts").TelegramConfig) => Promise<void>;
 };
 
-export function registerAllCommands(registry: CommandRegistry, sessionDeps: SessionDeps, sessionNameDeps: SessionNameDeps, tgConfigDeps?: TgConfigDeps): void {
+/** Optional deps for commands that need to send preformatted HTML directly. */
+export type InfoDeps = {
+  getTransport?: () => TelegramTransport | undefined;
+  getActiveChatId?: () => number | undefined;
+};
+
+export function registerAllCommands(
+  registry: CommandRegistry,
+  sessionDeps: SessionDeps,
+  sessionNameDeps: SessionNameDeps,
+  tgConfigDeps?: TgConfigDeps,
+  infoDeps?: InfoDeps,
+): void {
   registerSettingsCommands(registry, sessionDeps);
   registerModelCommands(registry, sessionDeps);
   registerSessionCommands(registry, sessionNameDeps);
   registerAuthCommands(registry, sessionDeps);
-  registerInfoCommands(registry, sessionDeps);
+  registerInfoCommands(registry, { ...sessionDeps, ...(infoDeps ?? {}) });
   registerLifecycleCommands(registry);
   if (tgConfigDeps) registerTgConfigCommands(registry, tgConfigDeps);
 }

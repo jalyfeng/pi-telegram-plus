@@ -97,6 +97,7 @@ Full interactive UI components built on inline keyboards:
 | `/cwd` | Show current working directory |
 | `/cd` | Switch pi working directory |
 | `/stop` | Abort the current agent turn |
+| `/status` | Show runtime snapshot (workspace, model, context, messages) |
 | `/debug` | Show debug info (model, thinking, streaming, entries) |
 | `/settings` | Open settings menu |
 | `/copy` | Copy last assistant text |
@@ -273,7 +274,7 @@ pi-telegram-plus/
     │   ├── model.ts             # /model, /scoped-models, /thinking
     │   ├── session.ts           # /new, /fork, /clone, /tree, /resume, /cd, /cwd, /name, /session
     │   ├── auth.ts              # /login (OAuth + API key), /logout
-    │   ├── info.ts              # /copy, /export, /import, /share, /changelog, /hotkeys, /debug
+    │   ├── info.ts              # /copy, /export, /import, /share, /status, /changelog, /hotkeys, /debug
     │   ├── lifecycle.ts         # /compact, /reload, /stop, /quit
     │   ├── settings.ts          # /settings menu
     │   ├── tg-config.ts         # /tg-config

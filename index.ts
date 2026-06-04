@@ -125,7 +125,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     "tg-bind-cwd", "tg-unbind-cwd", "tg-list",
     // other pi-telegram-plus custom commands (TUI-only command list excludes /import, which is now
     // a built-in pi command; keep Telegram handler registration only.
-    "cwd", "cd", "thinking", "stop", "debug",
+    "cwd", "cd", "status", "thinking", "stop", "debug",
   ]);
 
   registerAllCommands({
@@ -135,7 +135,10 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
         pi.registerCommand(name, { description: options.description, handler: options.handler });
       }
     },
-  }, sessionDeps, sessionNameDeps, tgConfigDeps);
+  }, sessionDeps, sessionNameDeps, tgConfigDeps, {
+    getTransport: () => transport,
+    getActiveChatId: () => config.activeChatId,
+  });
 
   registerTelegramCommands({
     registerCommand: (name: string, options: { description?: string; handler: TelegramCommandHandler }) => {
