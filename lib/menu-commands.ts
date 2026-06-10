@@ -35,11 +35,11 @@ const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = 
   // tg-* commands visible in the Telegram bot menu.
   // tg-bind-cwd / tg-unbind-cwd are workspace-management commands that
   // require local cwd context and do not belong in the bot command list.
-  { command: "tg-setup", description: "Configure Telegram bot token" },
-  { command: "tg-connect", description: "Enable/start Telegram connection" },
-  { command: "tg-disconnect", description: "Disable/stop Telegram connection" },
-  { command: "tg-config", description: "Configure Telegram message rendering" },
-  { command: "tg-list", description: "List Telegram bot bindings" },
+  { command: "tg_global_setup", description: "Configure global Telegram bot token" },
+  { command: "tg_global_connect", description: "Enable/start global Telegram bot" },
+  { command: "tg_global_disconnect", description: "Disable/stop global Telegram bot" },
+  { command: "tg_config", description: "Configure Telegram message rendering" },
+  { command: "tg_list", description: "List Telegram bot bindings" },
 ];
 
 const toTelegramCommandName = (name: string): string | undefined => {

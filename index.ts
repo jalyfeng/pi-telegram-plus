@@ -88,7 +88,11 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     refreshStatus();
   };
 
-  const isTelegramEnabled = (): boolean => config.telegramEnabled ?? resolvedConfig?.scope !== "global";
+  const isTelegramEnabled = (): boolean => {
+    if (config.telegramEnabled !== undefined) return config.telegramEnabled;
+    // Default: workspace binding implies intent to use; global requires explicit enable.
+    return resolvedConfig?.scope === "workspace";
+  };
 
   const transport = createTelegramTransport(() => config);
   const ui = createTelegramUiRuntime({
@@ -121,8 +125,8 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
   // Pi built-in commands (model, session, new, etc.) are already registered by pi core.
   const TUI_VISIBLE_COMMANDS = new Set([
     // tg-* commands
-    "tg-setup", "tg-connect", "tg-disconnect", "tg-config",
-    "tg-bind-cwd", "tg-unbind-cwd", "tg-list",
+    "tg-global-setup", "tg-global-connect", "tg-global-disconnect", "tg-config",
+    "tg-bind-cwd", "tg-unbind-cwd", "tg-cwd-connect", "tg-cwd-disconnect", "tg-list",
     // other pi-telegram-plus custom commands (TUI-only command list excludes /import, which is now
     // a built-in pi command; keep Telegram handler registration only.
     "cwd", "cd", "status", "thinking", "stop", "debug",
@@ -303,7 +307,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     } catch (error) {
       switchResolvedConfig({ store: { version: 2, global: {}, workspaces: [] }, scope: "global", config: {} });
       getActiveSession()?.extensionRunner.getUIContext().notify(
-        `Telegram config is not v2 yet. Run /tg-setup to recreate it. ${error instanceof Error ? error.message : String(error)}`,
+        `Telegram config is not v2 yet. Run /tg-global-setup to recreate it. ${error instanceof Error ? error.message : String(error)}`,
         "error",
       );
     }

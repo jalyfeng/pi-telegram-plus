@@ -48,7 +48,7 @@ async function withTelegramConfigLock<T>(run: () => Promise<T>): Promise<T> {
 
 function assertV2Store(value: unknown): TelegramConfigStore {
   if (!value || typeof value !== "object" || (value as { version?: unknown }).version !== 2) {
-    throw new Error("Unsupported Telegram config format. Please recreate ~/.pi/agent/tg.json as version 2 or run /tg-setup.");
+    throw new Error("Unsupported Telegram config format. Please recreate ~/.pi/agent/tg.json as version 2 or run /tg-global-setup.");
   }
   const store = value as TelegramConfigStore;
   return {
@@ -167,5 +167,17 @@ export async function unbindWorkspaceTelegramConfig(cwd: string): Promise<Resolv
       await writeTelegramConfigStore(store);
     }
     return resolveTelegramConfigStore(store, cwd);
+  });
+}
+
+/**
+ * Update only the global section of the Telegram config store.
+ * Merges with existing global config and preserves lastUpdateId monotonically.
+ */
+export async function writeGlobalTelegramConfig(config: TelegramConfig): Promise<void> {
+  await withTelegramConfigLock(async () => {
+    const store = await readTelegramConfigStore();
+    store.global = mergeTelegramConfigForWrite(store.global, config);
+    await writeTelegramConfigStore(store);
   });
 }

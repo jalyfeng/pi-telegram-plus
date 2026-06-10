@@ -201,15 +201,18 @@ export function registerTelegramRenderer(
   };
 
   pi.on("agent_start", async () => {
+    try {
     sentInlineEvents.clear();
     toolArgs.clear();
     toolUpdateAt.clear();
     const turn = deps.getActiveTurn();
     if (!turn) return;
     if (turn.replaceMessageId !== undefined) await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Working…</b>");
+    } catch { /* suppressed */ }
   });
 
   pi.on("tool_execution_start", async (event) => {
+    try {
     const level = renderLevel(deps.getConfig(), "tool");
     if (level === "hidden") return;
     toolArgs.set(event.toolCallId, event.args);
@@ -218,9 +221,11 @@ export function registerTelegramRenderer(
       : `🔧 ${event.toolName} started
 ${stringifyShort(event.args, 1200)}`;
     await sendInlineEvent(inline);
+    } catch { /* suppressed */ }
   });
 
   pi.on("tool_execution_update", async (event) => {
+    try {
     const level = renderLevel(deps.getConfig(), "tool");
     if (level !== "full") return;
     const now = Date.now();
@@ -231,9 +236,11 @@ ${stringifyShort(event.args, 1200)}`;
     if (!partial || partial === "{}") return;
     await sendInlineEvent(`🔄 ${event.toolName} update
 ${partial}`);
+    } catch { /* suppressed */ }
   });
 
   pi.on("tool_execution_end", async (event) => {
+    try {
     const level = renderLevel(deps.getConfig(), "tool");
     toolUpdateAt.delete(event.toolCallId);
     const args = toolArgs.get(event.toolCallId);
@@ -250,9 +257,11 @@ ${partial}`);
 ${result}`
         : `${status}: ${event.toolName}`);
     }
+    } catch { /* suppressed */ }
   });
 
   pi.on("message_end", async (event) => {
+    try {
     const message = event.message as AnyMessage;
     if (message.role !== "assistant") return;
     const config = deps.getConfig();
@@ -279,6 +288,7 @@ ${result}`
       await deps.transport.editText(turn.chatId, turn.replaceMessageId, `✅ <b>Output sent.</b>\n${noun}`);
       turn.replaceMessageId = undefined;
     }
+    } catch { /* suppressed */ }
   });
 
 }

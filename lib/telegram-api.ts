@@ -50,12 +50,17 @@ export async function telegramApi<T>(
   body: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    throw new Error(`Telegram API request failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const json = (await response.json()) as TelegramApiError & { result: T };
   if (!json.ok) throw new Error(json.description ?? `${method} failed`);
   return json.result;
@@ -72,10 +77,15 @@ export async function getTelegramFile(token: string, fileId: string, signal?: Ab
 
 export async function downloadTelegramFile(token: string, filePath: string, signal?: AbortSignal): Promise<Buffer> {
   const encodedPath = filePath.split("/").map((segment) => encodeURIComponent(segment)).join("/");
-  const response = await fetch(`https://api.telegram.org/file/bot${token}/${encodedPath}`, {
-    method: "GET",
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`https://api.telegram.org/file/bot${token}/${encodedPath}`, {
+      method: "GET",
+      signal,
+    });
+  } catch (error) {
+    throw new Error(`Telegram file download failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   if (!response.ok) {
     throw new Error(`Failed to download Telegram file: ${response.status}`);
   }
@@ -234,14 +244,19 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
             type: inferMimeTypeFromPath(path) ?? "application/octet-stream",
           });
           form.set("document", documentBlob, basename(path));
-          const response = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
-            method: "POST",
-            body: form,
-            signal,
-          });
-          const json = await response.json() as { ok: boolean; description?: string };
-          if (!json.ok) throw new Error(json.description ?? "sendDocument failed");
-          return;
+          try {
+            const response = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+              method: "POST",
+              body: form,
+              signal,
+            });
+            const json = await response.json() as { ok: boolean; description?: string };
+            if (!json.ok) throw new Error(json.description ?? "sendDocument failed");
+            return;
+          } catch (fetchError) {
+            if ((fetchError as any)?.name === "AbortError") throw fetchError;
+            throw new Error(`Telegram sendDocument failed: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`);
+          }
         } catch (error) {
           lastError = error;
           if (attempt >= maxRetries || signal?.aborted) throw error;
@@ -272,14 +287,19 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
             const bytes = Buffer.from(base64, "base64");
             form.set("photo", new Blob([bytes], { type: mime }), `image.${mime.split("/")[1] ?? "png"}`);
           }
-          const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
-            method: "POST",
-            body: form,
-            signal,
-          });
-          const json = await response.json() as { ok: boolean; description?: string };
-          if (!json.ok) throw new Error(json.description ?? "sendPhoto failed");
-          return;
+          try {
+            const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+              method: "POST",
+              body: form,
+              signal,
+            });
+            const json = await response.json() as { ok: boolean; description?: string };
+            if (!json.ok) throw new Error(json.description ?? "sendPhoto failed");
+            return;
+          } catch (fetchError) {
+            if ((fetchError as any)?.name === "AbortError") throw fetchError;
+            throw new Error(`Telegram sendPhoto failed: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`);
+          }
         } catch (error) {
           lastError = error;
           if (attempt >= maxRetries || signal?.aborted) throw error;
