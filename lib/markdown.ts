@@ -11,19 +11,23 @@ interface TelegramRendererContext {
 
 function inlineFromTokens(this: TelegramRendererContext, tokens?: unknown[], fallback = ""): string {
   if (Array.isArray(tokens) && tokens.length > 0) {
-    return this.parser.parseInline(tokens as unknown[]);
+    return this.parser.parseInline(tokens);
   }
   return escapeHtml(fallback);
 }
 
 function blockFromTokens(this: TelegramRendererContext, tokens?: unknown[], fallback = ""): string {
   if (Array.isArray(tokens) && tokens.length > 0) {
-    return this.parser.parse(tokens as unknown[]);
+    return this.parser.parse(tokens);
   }
   return escapeHtml(fallback);
 }
 
 const renderer = {
+  space(): string {
+    return '\n';
+  },
+
   heading(this: TelegramRendererContext, { tokens }: Tokens.Heading): string {
     return `<b>${inlineFromTokens.call(this, tokens)}</b>\n`;
   },
@@ -50,19 +54,28 @@ const renderer = {
 
   code(this: TelegramRendererContext, { text, lang }: Tokens.Code): string {
     const language = lang ? ` class="language-${escapeHtml(lang)}"` : "";
-    return `<pre><code${language}>${escapeHtml(text)}\n</code></pre>`;
+    return `<pre><code${language}>${escapeHtml(text)}</code></pre>\n`;
   },
 
   table(this: TelegramRendererContext, token: Tokens.Table): string {
-    const rows: string[] = [];
-    if (token.header.length > 0) {
-      rows.push(token.header.map((c) => inlineFromTokens.call(this, c.tokens, c.text)).join(" | "));
-      rows.push(token.header.map(() => "---").join("-+-"));
-    }
-    for (const row of token.rows) {
-      rows.push(row.map((c) => inlineFromTokens.call(this, c.tokens, c.text)).join(" | "));
-    }
-    return `<pre>${rows.join("\n")}</pre>\n`;
+    const headerCells = token.header.map((c) => inlineFromTokens.call(this, c.tokens, c.text));
+    const dataRows = token.rows.map((row) =>
+      row.map((c) => inlineFromTokens.call(this, c.tokens, c.text)),
+    );
+    const allRows = [headerCells, ...dataRows];
+
+    // Strip HTML tags when calculating width — <b>, <i>, etc. are invisible in the rendered output
+    const stripTags = (s: string) => s.replace(/<[^>]+>/g, "");
+    // Widest visible cell per column, minimum 3 so the separator line stays readable
+    const colWidths = allRows[0].map((_, i) =>
+      Math.max(3, ...allRows.map((r) => stripTags(r[i] ?? "").length)),
+    );
+    // Pad cell text to column width, accounting for inline HTML tags that don't contribute visible width
+    const pad = (val: string, width: number) => val + " ".repeat(Math.max(0, width - stripTags(val).length));
+    const fmtRow = (cells: string[]) => cells.map((v, i) => pad(v, colWidths[i])).join(" | ");
+    const sep = colWidths.map((w) => "-".repeat(w)).join(" | ");
+
+    return `<pre>${fmtRow(headerCells)}\n${sep}\n${dataRows.map(fmtRow).join("\n")}</pre>\n`;
   },
 
   list(this: TelegramRendererContext, token: Tokens.List): string {
@@ -79,7 +92,11 @@ const renderer = {
   },
 
   blockquote(this: TelegramRendererContext, { tokens }: Tokens.Blockquote): string {
-    return `<blockquote>${this.parser.parse(tokens as unknown[])}</blockquote>`;
+    return `<blockquote>${this.parser.parse(tokens as unknown[])}</blockquote>\n`;
+  },
+
+  hr(): string {
+    return '---';
   },
 
   image(this: TelegramRendererContext, { text, title }: Tokens.Image): string {

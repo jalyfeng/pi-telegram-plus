@@ -96,16 +96,19 @@ describe("markdownToTelegramHtml", () => {
     expect(result).toContain("&lt;div&gt;");
   });
 
-  it("converts tables to monospace pre block", () => {
+  it("converts tables to aligned monospace pre block", () => {
     const result = markdownToTelegramHtml("| Name | Value |\n| --- | --- |\n| Speed | Fast |\n| Memory | Low |");
     expect(result).toContain("<pre>");
-    expect(result).toContain("Name | Value");
-    expect(result).toContain("---+-");
-    expect(result).toContain("Speed | Fast");
+    expect(result).toContain("Name  "); // padded for alignment
+    expect(result).toContain("------ |");
+    expect(result).toContain("Speed");
+    expect(result).toContain("Fast");
+    expect(result).toContain("Memory");
+    expect(result).toContain("Low");
   });
 
   it("converts ordered and unordered lists to plain text lines", () => {
-    expect(markdownToTelegramHtml("1. First\n2. Second\n\n- Alpha\n- Beta")).toBe("1. First\n2. Second\n• Alpha\n• Beta");
+    expect(markdownToTelegramHtml("1. First\n2. Second\n\n- Alpha\n- Beta")).toBe("1. First\n2. Second\n\n• Alpha\n• Beta");
   });
 
   it("handles unclosed code block at end", () => {
