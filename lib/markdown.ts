@@ -73,7 +73,7 @@ const renderer = {
     // Pad cell text to column width, accounting for inline HTML tags that don't contribute visible width
     const pad = (val: string, width: number) => val + " ".repeat(Math.max(0, width - stripTags(val).length));
     const fmtRow = (cells: string[]) => cells.map((v, i) => pad(v, colWidths[i])).join(" | ");
-    const sep = colWidths.map((w) => "-".repeat(w)).join("-+-");
+    const sep = colWidths.map((w) => "-".repeat(w)).join(" | ");
 
     return `<pre>${fmtRow(headerCells)}\n${sep}\n${dataRows.map(fmtRow).join("\n")}</pre>\n`;
   },

@@ -100,7 +100,7 @@ describe("markdownToTelegramHtml", () => {
     const result = markdownToTelegramHtml("| Name | Value |\n| --- | --- |\n| Speed | Fast |\n| Memory | Low |");
     expect(result).toContain("<pre>");
     expect(result).toContain("Name  "); // padded for alignment
-    expect(result).toContain("-+-");
+    expect(result).toContain("------ |");
     expect(result).toContain("Speed");
     expect(result).toContain("Fast");
     expect(result).toContain("Memory");
