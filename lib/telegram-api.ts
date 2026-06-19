@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import type { TelegramButton, TelegramConfig, TelegramSentMessage, TelegramTransport, TelegramUpdate } from "./types.ts";
-import { stripHtml, splitTelegramText } from "./text-split.ts";
+import { stripHtml, splitTelegramHtml } from "./text-split.ts";
 
 type TelegramFileInfo = {
   file_id: string;
@@ -141,20 +141,36 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
     return token;
   };
 
+  /** Log why an HTML-format send failed before falling back to plain text.
+   *  Without this the renderer's failures were completely silent — a single
+   *  unsupported tag nuked the whole message's formatting and nobody noticed. */
+  const warnHtmlFallback = (label: string, err: unknown, preview: string) => {
+    const reason = err instanceof Error ? err.message : String(err);
+    const snippet = preview.replace(/\s+/g, " ").slice(0, 120);
+    console.warn(`[telegram-plus] HTML ${label} rejected (${reason}); falling back to plain text. Preview: ${snippet}`);
+  };
+
   return {
     async sendText(chatId, text) {
       const sent: TelegramSentMessage[] = [];
-      for (const chunk of splitTelegramText(text)) {
+      // Use the semantic HTML splitter so multi-message sends cut at block
+      // boundaries (every chunk is independently valid Telegram HTML) instead
+      // of the legacy byte splitter that could split mid-<pre>/<blockquote>
+      // and force a plain-text fallback.
+      for (const chunk of splitTelegramHtml(text)) {
         const body = {
           chat_id: chatId,
           text: chunk,
           parse_mode: "HTML",
         };
         const msg = await callApi<TelegramSentMessage>("sendMessage", body)
-          .catch(() => callApi<TelegramSentMessage>("sendMessage", {
-            chat_id: chatId,
-            text: stripHtml(chunk),
-          }));
+          .catch((err) => {
+            warnHtmlFallback("sendMessage", err, chunk);
+            return callApi<TelegramSentMessage>("sendMessage", {
+              chat_id: chatId,
+              text: stripHtml(chunk),
+            });
+          });
         sent.push(msg);
       }
       return sent;
@@ -164,48 +180,57 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
       // Button messages cannot be split without duplicating keyboards, so keep
       // title text short. The UI layer already truncates button labels.
       const reply_markup = buildInlineKeyboard(rows);
-      const first = splitTelegramText(text)[0];
+      const first = splitTelegramHtml(text)[0];
       return await callApi<TelegramSentMessage>("sendMessage", {
         chat_id: chatId,
         text: first,
         parse_mode: "HTML",
         reply_markup,
-      }).catch(() => callApi<TelegramSentMessage>("sendMessage", {
-        chat_id: chatId,
-        text: stripHtml(first),
-        reply_markup,
-      }));
+      }).catch((err) => {
+        warnHtmlFallback("sendButtons", err, first);
+        return callApi<TelegramSentMessage>("sendMessage", {
+          chat_id: chatId,
+          text: stripHtml(first),
+          reply_markup,
+        });
+      });
     },
 
     async editText(chatId, messageId, text) {
-      const first = splitTelegramText(text)[0];
+      const first = splitTelegramHtml(text)[0];
       await callApi("editMessageText", {
         chat_id: chatId,
         message_id: messageId,
         text: first,
         parse_mode: "HTML",
-      }).catch(() => callApi("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
-        text: stripHtml(first),
-      }).catch(() => undefined));
+      }).catch((err) => {
+        warnHtmlFallback("editMessageText", err, first);
+        return callApi("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: stripHtml(first),
+        }).catch(() => undefined);
+      });
     },
 
     async editButtons(chatId, messageId, text, rows) {
       const reply_markup = buildInlineKeyboard(rows);
-      const first = splitTelegramText(text)[0];
+      const first = splitTelegramHtml(text)[0];
       await callApi("editMessageText", {
         chat_id: chatId,
         message_id: messageId,
         text: first,
         parse_mode: "HTML",
         reply_markup,
-      }).catch(() => callApi("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
-        text: stripHtml(first),
-        reply_markup,
-      }).catch(() => undefined));
+      }).catch((err) => {
+        warnHtmlFallback("editButtons", err, first);
+        return callApi("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: stripHtml(first),
+          reply_markup,
+        }).catch(() => undefined);
+      });
     },
 
     async answerCallbackQuery(callbackQueryId, text) {

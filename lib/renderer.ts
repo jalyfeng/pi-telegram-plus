@@ -1,4 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { escapeHtml } from "./html.ts";
 import { markdownToTelegramHtml } from "./markdown.ts";
 import type { TelegramConfig, TelegramRenderLevel, TelegramTransport, TelegramTurn } from "./types.ts";
@@ -51,7 +54,9 @@ function contentToRenderParts(
         : `🔧 ${name}\n${stringifyShort(p.arguments ?? {}, 1200)}`);
     }
   }
-  return { body: body.filter(Boolean).join("\n"), inlineEvents };
+  // Multiple text parts (common when a turn interleaves text around tool calls)
+  // are separated by a blank line so paragraphs don't run together on mobile.
+  return { body: body.filter(Boolean).join("\n\n"), inlineEvents };
 }
 
 function contentImages(content: unknown): Array<{ data: string; mimeType?: string }> {
@@ -65,6 +70,33 @@ function contentImages(content: unknown): Array<{ data: string; mimeType?: strin
   });
 }
 
+/**
+ * Extract renderable text + image parts from a tool result. Tools return
+ * `{ content: (TextContent | ImageContent)[], details }`; we surface the
+ * actual output text (rendered as markdown) and any images, instead of the
+ * truncated JSON blob the previous `full` mode emitted.
+ *
+ * @internal Exported for tests; not part of the public module API.
+ */
+export function extractToolResultParts(result: unknown): {
+  body: string;
+  images: Array<{ data: string; mimeType?: string }>;
+} {
+  const content = (result as Record<string, any> | null | undefined)?.content;
+  const images = contentImages(content);
+  const body: string[] = [];
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      if (part && typeof part === "object" && part.type === "text" && typeof part.text === "string") {
+        body.push(part.text);
+      }
+    }
+  } else if (typeof result === "string") {
+    body.push(result);
+  }
+  return { body: body.filter(Boolean).join("\n\n"), images };
+}
+
 function stringifyShort(value: unknown, max = 900): string {
   let text: string;
   if (typeof value === "string") text = value;
@@ -73,6 +105,63 @@ function stringifyShort(value: unknown, max = 900): string {
     catch { text = String(value); }
   }
   return text.length <= max ? text : text.slice(0, max - 1) + "…";
+}
+
+// ── Oversized code block → file attachment (C1) ─────────────────────────────
+// A single fenced code block that won't fit in one Telegram message is sent
+// as a downloadable document instead of being split across many <pre> chunks
+// (which are painful to read on mobile). The fence is replaced in-body by a
+// short notice so the assistant's prose still reads coherently.
+
+const OVERSIZED_CODE_BYTES = 4000;
+
+const LANG_EXT: Record<string, string> = {
+  ts: ".ts", tsx: ".tsx", js: ".js", jsx: ".jsx", mjs: ".mjs", cjs: ".cjs",
+  py: ".py", python: ".py", rb: ".rb", ruby: ".rb", go: ".go", rs: ".rs", rust: ".rs", java: ".java", kt: ".kt", kotlin: ".kt",
+  c: ".c", h: ".h", cpp: ".cpp", cc: ".cc", hpp: ".hpp", cs: ".cs", php: ".php",
+  swift: ".swift", sh: ".sh", bash: ".sh", zsh: ".sh", fish: ".sh", ps1: ".ps1",
+  sql: ".sql", json: ".json", yml: ".yml", yaml: ".yaml", toml: ".toml",
+  xml: ".xml", html: ".html", htm: ".html", css: ".css", scss: ".scss",
+  md: ".md", markdown: ".md", txt: ".txt", text: ".txt", dockerfile: "Dockerfile",
+  makefile: "Makefile", graphql: ".graphql", lua: ".lua", r: ".r", dart: ".dart",
+  scala: ".scala", clj: ".clj", ex: ".ex", exs: ".exs", erl: ".erl", vim: ".vim",
+};
+
+function langToExt(lang: string): string {
+  const key = (lang || "").trim().toLowerCase();
+  return LANG_EXT[key] ?? ".txt";
+}
+
+/**
+ * Pull fenced code blocks > OVERSIZED_CODE_BYTES out of the markdown body,
+ * replacing each with a one-line notice. Returns the trimmed body and the
+ * extracted blocks (lang + raw content) for file attachment.
+ *
+ * @internal Exported for tests; not part of the public module API.
+ */
+export function extractOversizedCodeBlocks(body: string): {
+  body: string;
+  blocks: Array<{ lang: string; content: string; fileName: string }>;
+} {
+  const blocks: Array<{ lang: string; content: string; fileName: string }> = [];
+  const stripped = body.replace(/```([^\n]*)\n([\s\S]*?)\n```/g, (m, langRaw, content) => {
+    const lang = String(langRaw || "").trim();
+    const code = String(content);
+    if (Buffer.byteLength(code, "utf8") <= OVERSIZED_CODE_BYTES) return m;
+    const idx = blocks.length + 1;
+    const fileName = `code-${idx}${langToExt(lang)}`;
+    blocks.push({ lang, content: code, fileName });
+    const lines = code.split("\n").length;
+    return `\n\n📎 \`${lang || "code"} block (${lines} lines) — attached: ${fileName}\`\n\n`;
+  });
+  return { body: stripped, blocks };
+}
+
+async function writeTempCodeFile(fileName: string, content: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "pi-tg-code-"));
+  const filePath = join(dir, fileName);
+  await writeFile(filePath, content, "utf8");
+  return filePath;
 }
 
 function renderLevel(config: TelegramConfig, key: "tool" | "thinking"): TelegramRenderLevel {
@@ -247,15 +336,31 @@ ${partial}`);
     toolArgs.delete(event.toolCallId);
     if (level === "hidden") return;
     const status = event.isError ? "❌ Tool failed" : "✅ Tool finished";
-    const result = stringifyShort(event.result, event.isError ? 1800 : 900);
     if (level === "brief") {
       if (!event.isError) return;
       await sendInlineEvent(formatToolFailureBrief(event.toolName, event.result, args));
+      return;
+    }
+    // full mode: render the tool's actual output (text + images) as a
+    // persistent new message, so users who opt into `full` see complete
+    // content instead of a truncated JSON blob. Tool results are excluded
+    // from the "never fold" rule, so long ones use an expandable blockquote.
+    const parts = extractToolResultParts(event.result);
+    const header = `${event.isError ? "❌" : "✅"} <b>${escapeHtml(event.toolName)}</b>`;
+    if (parts.body.trim()) {
+      const rendered = markdownToTelegramHtml(parts.body);
+      const expandable = rendered.length > 600 || rendered.split("\n").length > 8;
+      const tag = expandable ? "<blockquote expandable>" : "<blockquote>";
+      await send(`${tag}${header}\n${rendered}</blockquote>`);
     } else {
-      await sendInlineEvent(result && result !== "{}"
-        ? `${status}: ${event.toolName}
-${result}`
-        : `${status}: ${event.toolName}`);
+      await sendInlineEvent(`${status}: ${event.toolName}`);
+    }
+    for (const image of parts.images) {
+      const chatIds = currentChats();
+      for (const chatId of chatIds) {
+        await deps.transport.sendChatAction(chatId, "upload_photo");
+        await deps.transport.sendPhoto(chatId, image.data, "image").catch(() => undefined);
+      }
     }
     } catch { /* suppressed */ }
   });
@@ -269,13 +374,31 @@ ${result}`
     const toolLevel = renderLevel(config, "tool");
     const rendered = contentToRenderParts(message.content, thinkingLevel, toolLevel);
     await sendInlineEvents(rendered.inlineEvents);
-    const body = rendered.body || message.errorMessage || "";
+    const rawBody = rendered.body || message.errorMessage || "";
+    // Pull oversized code blocks out of the body before rendering: they'd
+    // otherwise be split across many <pre> messages (painful on mobile). They
+    // are sent as downloadable files after the body.
+    const { body, blocks: codeFiles } = extractOversizedCodeBlocks(rawBody);
     const images = contentImages(message.content);
 
     const hasBody = body.trim().length > 0;
     if (hasBody) await sendToTurn(markdownToTelegramHtml(body), { final: true });
 
     const turn = deps.getActiveTurn();
+    if (codeFiles.length > 0) {
+      const chatIds = turn ? [turn.chatId] : currentChats();
+      for (const chatId of chatIds) {
+        for (const block of codeFiles) {
+          const filePath = await writeTempCodeFile(block.fileName, block.content).catch(() => undefined);
+          if (!filePath) continue;
+          await deps.transport.sendChatAction(chatId, "upload_document");
+          const lines = block.content.split("\n").length;
+          const caption = `📎 ${block.lang || "code"} block (${lines} lines)`;
+          await deps.transport.sendDocument(chatId, filePath, caption).catch(() => undefined);
+          await rm(filePath, { force: true }).catch(() => undefined);
+        }
+      }
+    }
     for (const image of images) {
       const chatIds = turn ? [turn.chatId] : currentChats();
       for (const chatId of chatIds) {

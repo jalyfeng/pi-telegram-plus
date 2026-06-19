@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stripHtml, takeUtf8Prefix, splitTelegramText } from "../text-split.ts";
+import { stripHtml, takeUtf8Prefix, splitTelegramText, splitTelegramHtml } from "../text-split.ts";
 
 describe("stripHtml", () => {
   it("removes HTML tags", () => {
@@ -91,6 +91,72 @@ describe("splitTelegramText", () => {
     expect(chunks.join("")).toBe(text);
     for (const chunk of chunks) {
       expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(4096);
+    }
+  });
+});
+
+describe("splitTelegramHtml", () => {
+  const MAX = 200; // small limit to force splitting in tests
+
+  it("returns single chunk when under limit", () => {
+    expect(splitTelegramHtml("hello", MAX)).toEqual(["hello"]);
+  });
+
+  it("never splits inside a <pre> block — every chunk has balanced <pre>/</pre>", () => {
+    // One huge <pre> that must split into multiple COMPLETE <pre> chunks.
+    const code = "line\n".repeat(60).trimEnd(); // ~300 bytes
+    const html = `<p>intro</p>
+
+<pre>${code}</pre>
+
+<p>outro</p>`.replace(/<p>|\u003c\/p>/g, ""); // plain paragraphs
+    const chunks = splitTelegramHtml(`intro\n\n<pre>${code}</pre>\n\noutro`, MAX);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      const opens = (chunk.match(/<pre>/g) || []).length;
+      const closes = (chunk.match(/<\/pre>/g) || []).length;
+      expect(opens).toBe(closes);
+      expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(MAX);
+    }
+  });
+
+  it("keeps <blockquote> balanced across splits", () => {
+    const inner = "word ".repeat(80).trim();
+    const html = `<blockquote>${inner}</blockquote>`;
+    const chunks = splitTelegramHtml(html, MAX);
+    for (const chunk of chunks) {
+      expect((chunk.match(/<blockquote/g) || []).length)
+        .toBe((chunk.match(/<\/blockquote>/g) || []).length);
+    }
+  });
+
+  it("splits card table between rows and repeats the header", () => {
+    const rows = Array.from({ length: 30 }, (_, i) => `<b>row${i}</b>  value${i}`).join("\n");
+    const html = `<b>H1</b>  <b>H2</b>\n──\n${rows}`;
+    const chunks = splitTelegramHtml(html, MAX);
+    expect(chunks.length).toBeGreaterThan(1);
+    // Every chunk must carry the header + separator (table stays readable).
+    for (const chunk of chunks) {
+      expect(chunk).toContain("<b>H1</b>");
+      expect(chunk).toContain("──");
+      expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(MAX);
+    }
+    // All rows preserved across chunks
+    const joined = chunks.join("\n");
+    for (let i = 0; i < 30; i++) expect(joined).toContain(`row${i}`);
+  });
+
+  it("preserves all content across chunks (reassembly invariant)", () => {
+    const html = [
+      "para one with some words here",
+      "<blockquote>a quoted block of text that is fairly long so it will need splitting</blockquote>",
+      "<pre>line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8</pre>",
+      "final paragraph tail",
+    ].join("\n\n");
+    const chunks = splitTelegramHtml(html, MAX);
+    // Every line of content appears somewhere
+    for (const needle of ["para one", "quoted block", "line1", "line8", "final paragraph"]) {
+      expect(chunks.some((c) => c.includes(needle))).toBe(true);
     }
   });
 });
