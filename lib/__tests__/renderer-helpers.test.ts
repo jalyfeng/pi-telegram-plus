@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractToolResultParts, extractOversizedCodeBlocks } from "../renderer.ts";
+import { extractToolResultParts, extractOversizedCodeBlocks, extractOversizedTables } from "../renderer.ts";
 
 describe("extractToolResultParts", () => {
   it("extracts text content parts joined by blank lines", () => {
@@ -120,5 +120,54 @@ describe("extractOversizedCodeBlocks", () => {
     const content = "a\nb\nc\n" + big;
     const { body: out } = extractOversizedCodeBlocks(fence("ts", content));
     expect(out).toContain("4 lines");
+  });
+});
+
+describe("extractOversizedTables", () => {
+  it("leaves small tables inline", () => {
+    const body = "intro\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+    const { body: out, blocks } = extractOversizedTables(body);
+    expect(blocks).toEqual([]);
+    expect(out).toBe(body);
+  });
+
+  it("extracts tables whose rendered HTML exceeds one message", () => {
+    // ~80 rows × 3 cols → rendered card HTML > 3600 bytes
+    const rows = Array.from({ length: 80 }, (_, i) => `| r${i} | ${"v".repeat(20)}${i} | ${"x".repeat(20)}${i} |`).join("\n");
+    const body = `| H1 | H2 | H3 |\n| --- | --- | --- |\n${rows}`;
+    const { body: out, blocks } = extractOversizedTables(body);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].fileName).toBe("table-1.md");
+    expect(blocks[0].cols).toBe(3);
+    expect(blocks[0].rows).toBe(80);
+    expect(out).toContain("attached: table-1.md");
+    // original table markdown removed from body
+    expect(out).not.toContain("| H1 |");
+  });
+
+  it("extracts a table with a huge single cell (transpose oversized)", () => {
+    const huge = "z".repeat(4000);
+    const body = `| K | V |\n| --- | --- |\n| a | ${huge} |`;
+    const { body: out, blocks } = extractOversizedTables(body);
+    expect(blocks).toHaveLength(1);
+    expect(out).toContain("attached: table-1.md");
+  });
+
+  it("handles multiple oversized tables with incrementing names", () => {
+    const rows = Array.from({ length: 80 }, (_, i) => `| r${i} | ${"v".repeat(30)} |`).join("\n");
+    const body = `# t1\n\n| A | B |\n| --- | --- |\n${rows}\n\n# t2\n\n| C | D |\n| --- | --- |\n${rows}`;
+    const { blocks } = extractOversizedTables(body);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].fileName).toBe("table-1.md");
+    expect(blocks[1].fileName).toBe("table-2.md");
+  });
+
+  it("keeps prose around the table", () => {
+    const rows = Array.from({ length: 80 }, (_, i) => `| r${i} | ${"v".repeat(30)} |`).join("\n");
+    const body = `before text\n\n| A | B |\n| --- | --- |\n${rows}\n\nafter text`;
+    const { body: out, blocks } = extractOversizedTables(body);
+    expect(blocks).toHaveLength(1);
+    expect(out).toContain("before text");
+    expect(out).toContain("after text");
   });
 });
