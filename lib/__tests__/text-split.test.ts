@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { stripHtml, takeUtf8Prefix, splitTelegramText, splitTelegramHtml } from "../text-split.ts";
+import { markdownToTelegramHtml } from "../markdown.ts";
 
 describe("stripHtml", () => {
   it("removes HTML tags", () => {
@@ -157,6 +158,61 @@ describe("splitTelegramHtml", () => {
     // Every line of content appears somewhere
     for (const needle of ["para one", "quoted block", "line1", "line8", "final paragraph"]) {
       expect(chunks.some((c) => c.includes(needle))).toBe(true);
+    }
+  });
+});
+describe("splitTelegramHtml — table consistency", () => {
+  const MAX = 3600;
+
+  it("box table: every split chunk is a complete mini-table with the header", () => {
+    // 2-col ASCII, cells short enough that naturalWidth<=40 -> box-drawing.
+    // Many rows so the rendered <pre> exceeds MAX and must split.
+    const rows = Array.from({ length: 200 }, (_, i) => `| r${i} | ${"v".repeat(15) }${i} |`).join("\n");
+    const md = `| A | B |\n| --- | --- |\n${rows}`;
+    const html = markdownToTelegramHtml(md);
+    // sanity: it is a box table
+    expect(html).toContain("<pre>");
+    expect(html).toContain("┌");
+    const chunks = splitTelegramHtml(html, MAX);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      // every chunk is a complete box table: top border, header row, separator, bottom border
+      expect(chunk).toContain("┌");
+      expect(chunk).toContain("├");
+      expect(chunk).toContain("└");
+      // header row content present in every chunk (consistency: no chunk loses the header)
+      expect(chunk).toContain("A");
+      expect(chunk).toContain("B");
+      // valid + within limit (never triggers a plain-text fallback)
+      expect((chunk.match(/<pre/g) || []).length).toBe((chunk.match(/<\/pre>/g) || []).length);
+      expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(MAX);
+    }
+  });
+
+  it("card table: every split chunk repeats the header row", () => {
+    // 3-col table (not 2, so not box) with naturalWidth <= 60 (so not transpose)
+    // but enough rows to exceed MAX and force a card split.
+    const rows = Array.from({ length: 150 }, (_, i) => `| r${i} | ${"v".repeat(15)}${i} | ${"x".repeat(15)}${i} |`).join("\n");
+    const md = `| A | B | C |\n| --- | --- | --- |\n${rows}`;
+    const html = markdownToTelegramHtml(md);
+    expect(html).not.toContain("<pre>"); // card, not box
+    const chunks = splitTelegramHtml(html, MAX);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk).toContain("<b>A</b>");
+      expect(chunk).toContain("──");
+      expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(MAX);
+    }
+  });
+
+  it("never produces a chunk over the hard 4096 limit (no fallback trigger)", () => {
+    // pathological: a single huge cell in a transpose table
+    const huge = "z".repeat(5000);
+    const md = `| id | name | type | size | owner | perm |\n| --- | --- | --- | --- | --- | --- |\n| 1 | ${huge} | file | 10 | me | rw |`;
+    const html = markdownToTelegramHtml(md);
+    const chunks = splitTelegramHtml(html, MAX);
+    for (const chunk of chunks) {
+      expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(4096);
     }
   });
 });

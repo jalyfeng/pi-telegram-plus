@@ -153,6 +153,11 @@ function isTableSeparator(line: string): boolean {
   return /^\s*\|?[\s:|-]*\|?\s*$/.test(line) && line.includes("-");
 }
 
+/** A markdown table row/header line: starts with a pipe (our agent always emits `| ... |`). */
+function isTableRow(line: string): boolean {
+  return /^\s*\|/.test(line);
+}
+
 function isPseudoTableRow(line: string): boolean {
   if (!line.includes("|")) return false;
   const pipeCount = (line.match(/\|/g) || []).length;
@@ -162,17 +167,34 @@ function isPseudoTableRow(line: string): boolean {
 }
 
 /** Count consecutive pseudo-table rows at `start`; 0 if it's a real table. */
-function pseudoTableRun(lines: string[], start: number): number {
+function pseudoTableRun(lines: string[], start: number, inRealTable: Uint8Array): number {
+  if (inRealTable[start]) return 0;
   if (!isPseudoTableRow(lines[start])) return 0;
-  // If the previous line is a table separator, `start` is the data-row section
-  // of a real markdown table (header + separator above) — leave for marked.
-  if (start >= 1 && isTableSeparator(lines[start - 1])) return 0;
   // If the next line is a markdown table separator, this is a real table —
   // leave it for marked's table tokenizer.
   if (start + 1 < lines.length && isTableSeparator(lines[start + 1])) return 0;
   let n = 1;
-  while (start + n < lines.length && isPseudoTableRow(lines[start + n])) n++;
+  while (start + n < lines.length && inRealTable[start + n] === 0 && isPseudoTableRow(lines[start + n])) n++;
   return n >= 2 ? n : 0;
+}
+
+/**
+ * Mark every line that belongs to a real markdown table (header + separator +
+ * its consecutive data rows). These must be left for marked's table tokenizer;
+ * otherwise the data rows after the first would be mis-detected as a
+ * pseudo-table (their preceding line is a data row, not a separator).
+ */
+function markRealTableLines(lines: string[]): Uint8Array {
+  const flags = new Uint8Array(lines.length);
+  for (let i = 0; i + 1 < lines.length; i++) {
+    if (isTableRow(lines[i]) && isTableSeparator(lines[i + 1])) {
+      flags[i] = 1;        // header
+      flags[i + 1] = 1;     // separator
+      let j = i + 2;
+      while (j < lines.length && isTableRow(lines[j])) { flags[j] = 1; j++; }
+    }
+  }
+  return flags;
 }
 
 /**
@@ -181,6 +203,7 @@ function pseudoTableRun(lines: string[], start: number): number {
  */
 function protectPseudoTables(md: string): string {
   const lines = md.split("\n");
+  const inRealTable = markRealTableLines(lines);
   const out: string[] = [];
   let inFence = false;
   let fenceChar = "";
@@ -197,7 +220,7 @@ function protectPseudoTables(md: string): string {
       continue;
     }
     if (inFence) { out.push(line); i++; continue; }
-    const run = pseudoTableRun(lines, i);
+    const run = pseudoTableRun(lines, i, inRealTable);
     if (run > 1) {
       out.push("```");
       for (let j = i; j < i + run; j++) out.push(lines[j]);

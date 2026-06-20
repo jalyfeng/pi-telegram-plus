@@ -124,7 +124,16 @@ function splitOversizedBlock(block: string, maxBytes: number): string[] {
     const [, preOpen, codeOpen, content, codeClose, preClose] = preMatch;
     const open = (preOpen ?? "") + (codeOpen ?? "");
     const close = (codeClose ?? "") + (preClose ?? "");
-    return packLines(content.replace(/\n$/, "").split("\n"), maxBytes, open, close);
+    const lines = content.replace(/\n$/, "").split("\n");
+    // Box-drawing table: content starts with the top border ┌ and ends with the
+    // bottom border └. Splitting mid-table would drop the header row in
+    // continuation chunks (inconsistent), so repeat top border + header row +
+    // separator at the start of every chunk and the bottom border at the end —
+    // each chunk renders as a complete, consistent mini-table.
+    if (lines[0]?.startsWith("┌") && lines[lines.length - 1]?.startsWith("└")) {
+      return splitBoxPreTable(lines, maxBytes, open, close);
+    }
+    return packLines(lines, maxBytes, open, close);
   }
   // <blockquote...>...</blockquote>: split inner content, re-wrap each piece.
   const bqMatch = /^(<blockquote[^>]*>)([\s\S]*)(<\/blockquote>)$/.exec(block);
@@ -143,8 +152,37 @@ function splitOversizedBlock(block: string, maxBytes: number): string[] {
     const pieces = packLines(rows, Math.max(50, maxBytes - headerOverhead), "", "");
     return pieces.map((p) => `${header}\n${p}`);
   }
+  // Transposed record (every line is `<b>label</b>: value`): keep each chunk's
+  // labels so a huge cell value is never separated from its column context.
+  if (lines.length > 0 && lines.every((l) => /^<b>.*<\/b>:/.test(l))) {
+    return splitTransposeRecord(lines, maxBytes);
+  }
   // Plain paragraph / list: byte-split at newline/space boundaries.
   return splitPlainBytes(block, maxBytes);
+}
+
+/** Split a transposed `label: value` record, repeating a label across a byte-
+ *  split huge value so every chunk keeps its column context (same style). */
+function splitTransposeRecord(lines: string[], maxBytes: number): string[] {
+  const chunks: string[] = [];
+  let cur = "";
+  for (const line of lines) {
+    if (byteLength(line) <= maxBytes) {
+      const candidate = cur ? `${cur}\n${line}` : line;
+      if (byteLength(candidate) > maxBytes && cur) { chunks.push(cur); cur = line; }
+      else cur = candidate;
+      continue;
+    }
+    // Huge value line: byte-split the value, repeating the `label:` prefix.
+    if (cur) { chunks.push(cur); cur = ""; }
+    const m = /^(<b>.*?<\/b>:)\s*/.exec(line);
+    const label = m ? m[1] : "";
+    const value = m ? line.slice(m[0].length) : line;
+    const valueBudget = Math.max(50, maxBytes - byteLength(label) - 1);
+    for (const piece of splitPlainBytes(value, valueBudget)) chunks.push(`${label} ${piece}`);
+  }
+  if (cur) chunks.push(cur);
+  return chunks.length ? chunks : [lines.join("\n")];
 }
 
 /** Pack string lines into chunks `open + lines + close`, each <= maxBytes. */
@@ -154,16 +192,69 @@ function packLines(lines: string[], maxBytes: number, open: string, close: strin
   const chunks: string[] = [];
   let cur = "";
   for (const line of lines) {
-    const candidate = cur ? `${cur}\n${line}` : line;
-    if (byteLength(candidate) > budget && cur) {
-      chunks.push(`${open}${cur}${close}`);
-      cur = line;
+    if (cur) {
+      const candidate = `${cur}\n${line}`;
+      if (byteLength(candidate) > budget) {
+        chunks.push(`${open}${cur}${close}`);
+        cur = "";
+      } else {
+        cur = candidate;
+        continue;
+      }
+    }
+    // cur is empty: start a new chunk with `line`. If the line alone exceeds
+    // budget, byte-split it as a last-resort guard so no chunk ever overflows
+    // maxBytes and triggers a per-chunk plain-text fallback (which would mix
+    // styles within the same table).
+    if (byteLength(line) > budget) {
+      for (const piece of splitPlainBytes(line, budget)) chunks.push(`${open}${piece}${close}`);
     } else {
-      cur = candidate;
+      cur = line;
     }
   }
   if (cur) chunks.push(`${open}${cur}${close}`);
   return chunks.length ? chunks : [`${open}${lines.join("\n")}${close}`];
+}
+
+/**
+ * Split an oversized box-drawing table (inside <pre>) so every chunk is a
+ * complete mini-table: top border + header row + separator + N data rows +
+ * bottom border. This keeps the same style and header context in every chunk
+ * (a naive line-split would drop the header row in continuation chunks).
+ */
+function splitBoxPreTable(lines: string[], maxBytes: number, open: string, close: string): string[] {
+  const topBorder = lines[0];
+  const headerRow = lines[1];
+  const separator = lines[2];
+  const bottomBorder = lines[lines.length - 1];
+  const dataRows = lines.slice(3, -1);
+  const header = [topBorder, headerRow, separator].join("\n");
+  const overhead = byteLength(open) + byteLength(close) + byteLength(header) + 1 + byteLength(bottomBorder) + 1;
+  const budget = Math.max(50, maxBytes - overhead);
+  const chunks: string[] = [];
+  let cur: string[] = [];
+  let curBytes = 0;
+  const flush = () => {
+    if (cur.length) {
+      chunks.push(`${open}${header}\n${cur.join("\n")}\n${bottomBorder}${close}`);
+      cur = []; curBytes = 0;
+    }
+  };
+  for (const row of dataRows) {
+    const rowBytes = byteLength(row) + 1;
+    if (curBytes + rowBytes > budget && cur.length) flush();
+    // Single row alone exceeds budget: byte-split it so no chunk overflows.
+    if (byteLength(row) > budget) {
+      flush();
+      for (const piece of splitPlainBytes(row, budget)) {
+        chunks.push(`${open}${header}\n${piece}\n${bottomBorder}${close}`);
+      }
+      continue;
+    }
+    cur.push(row); curBytes += rowBytes;
+  }
+  flush();
+  return chunks.length ? chunks : [`${open}${header}\n${dataRows.join("\n")}\n${bottomBorder}${close}`];
 }
 
 /** Byte-aware split at newline/space; fallback for plain text. */

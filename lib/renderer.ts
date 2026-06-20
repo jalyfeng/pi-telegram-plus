@@ -157,58 +157,6 @@ export function extractOversizedCodeBlocks(body: string): {
   return { body: stripped, blocks };
 }
 
-// ── Oversized table → file attachment ────────────────────────────────────────
-// A table whose rendered HTML would exceed one Telegram message is sent as a
-// downloadable .md file instead of being split across messages. Splitting a
-// table can render it inconsistently (box-drawing chunks lose the header row;
-// transposed cells get separated from their labels), so for the "same table
-// renders consistently as a whole" guarantee, oversized tables stay one unit.
-
-const OVERSIZED_TABLE_RENDERED_BYTES = 3600;
-
-const isTableRow = (line: string) => /^\s*\|/.test(line);
-const isTableSeparator = (line: string) =>
-  /^\s*\|?[\s:|-]*\|?\s*$/.test(line) && line.includes("-") && line.includes("|");
-
-/**
- * Extract markdown tables whose rendered HTML exceeds one message, replacing
- * each with a notice. Tables that fit inline are left untouched.
- *
- * @internal Exported for tests; not part of the public module API.
- */
-export function extractOversizedTables(body: string): {
-  body: string;
-  blocks: Array<{ content: string; fileName: string; rows: number; cols: number }>;
-} {
-  const blocks: Array<{ content: string; fileName: string; rows: number; cols: number }> = [];
-  const lines = body.split("\n");
-  const out: string[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (isTableRow(lines[i]) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
-      const start = i;
-      i += 2; // header + separator
-      while (i < lines.length && isTableRow(lines[i])) i++;
-      const tableMd = lines.slice(start, i).join("\n");
-      const rendered = markdownToTelegramHtml(tableMd);
-      const cols = Math.max(1, (tableMd.split("\n")[0].match(/\|/g) || []).length - 1);
-      const rows = tableMd.split("\n").length - 2;
-      if (Buffer.byteLength(rendered, "utf8") > OVERSIZED_TABLE_RENDERED_BYTES) {
-        const idx = blocks.length + 1;
-        const fileName = `table-${idx}.md`;
-        blocks.push({ content: tableMd, fileName, rows, cols });
-        out.push(`📎 table (${rows} rows × ${cols} cols) — attached: ${fileName}`);
-      } else {
-        out.push(tableMd);
-      }
-    } else {
-      out.push(lines[i]);
-      i++;
-    }
-  }
-  return { body: out.join("\n"), blocks };
-}
-
 async function writeTempCodeFile(fileName: string, content: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "pi-tg-code-"));
   const filePath = join(dir, fileName);
@@ -430,38 +378,22 @@ ${partial}`);
     // Pull oversized code blocks out of the body before rendering: they'd
     // otherwise be split across many <pre> messages (painful on mobile). They
     // are sent as downloadable files after the body.
-    const { body: bodyNoCode, blocks: codeFiles } = extractOversizedCodeBlocks(rawBody);
-    // Pull oversized tables too: a table split across messages can render
-    // inconsistently (box chunks lose the header row; transposed cells get
-    // separated from their labels), so oversized tables stay one file unit.
-    const { body, blocks: tableFiles } = extractOversizedTables(bodyNoCode);
+    const { body, blocks: codeFiles } = extractOversizedCodeBlocks(rawBody);
     const images = contentImages(message.content);
 
     const hasBody = body.trim().length > 0;
     if (hasBody) await sendToTurn(markdownToTelegramHtml(body), { final: true });
 
     const turn = deps.getActiveTurn();
-    const attachChatIds = turn ? [turn.chatId] : currentChats();
     if (codeFiles.length > 0) {
-      for (const chatId of attachChatIds) {
+      const chatIds = turn ? [turn.chatId] : currentChats();
+      for (const chatId of chatIds) {
         for (const block of codeFiles) {
           const filePath = await writeTempCodeFile(block.fileName, block.content).catch(() => undefined);
           if (!filePath) continue;
           await deps.transport.sendChatAction(chatId, "upload_document");
           const lines = block.content.split("\n").length;
           const caption = `📎 ${block.lang || "code"} block (${lines} lines)`;
-          await deps.transport.sendDocument(chatId, filePath, caption).catch(() => undefined);
-          await rm(filePath, { force: true }).catch(() => undefined);
-        }
-      }
-    }
-    if (tableFiles.length > 0) {
-      for (const chatId of attachChatIds) {
-        for (const block of tableFiles) {
-          const filePath = await writeTempCodeFile(block.fileName, block.content).catch(() => undefined);
-          if (!filePath) continue;
-          await deps.transport.sendChatAction(chatId, "upload_document");
-          const caption = `📎 table (${block.rows} rows × ${block.cols} cols)`;
           await deps.transport.sendDocument(chatId, filePath, caption).catch(() => undefined);
           await rm(filePath, { force: true }).catch(() => undefined);
         }
