@@ -99,6 +99,8 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     getSession: getActiveSession,
     transport,
   });
+  const unsubJuicesharpRpivAskUserQuestionPrompt = pi.events.on("rpiv:ask-user:prompt", (data: unknown) => { ui.setJuicesharpRpivAskUserQuestionData(data); });
+  const unsubAliouPiGuardrailsPrompt = pi.events.on("guardrails:action:prompted", (data: unknown) => { ui.setAliouPiGuardrailsData(data); });
 
   const heartbeat = createHeartbeat({
     getConfig: () => config,
@@ -293,6 +295,8 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
 
   function disposeRuntime(): void {
     void polling.stop();
+    unsubJuicesharpRpivAskUserQuestionPrompt();
+    unsubAliouPiGuardrailsPrompt();
     heartbeat.dispose();
     for (const turn of activeTurns.values()) activeTurns.delete(turn.chatId);
     ui.dispose();

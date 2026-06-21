@@ -16,6 +16,8 @@ export type TelegramUiRuntime = {
   resolveInput(chatId: number, value: string | boolean | undefined, replyToMessageId?: number, fromCallback?: boolean): { handled: boolean; promptMessageId?: number };
   isSensitiveInput(chatId: number, replyToMessageId?: number): boolean;
   hasPendingInput(chatId: number): boolean;
+  setJuicesharpRpivAskUserQuestionData(data: unknown): void;
+  setAliouPiGuardrailsData(data: unknown): void;
   dispose(): void;
 };
 
@@ -82,7 +84,21 @@ export function createTelegramUiRuntime(deps: {
   /** Track the currently active flow for each chat (for sendOrReplace lookups). */
   const activeFlowByChat = new Map<number, string>();
 
+  /**
+   * Captured ask_user_question payload, consumed by custom().
+   * Relies on @juicesharp/rpiv-ask-user-question emitting "rpiv:ask-user:prompt"
+   * BEFORE calling ctx.ui.custom(). Event fires synchronously in same execution;
+   * channel name and payload are immutable/append-only per their contract.
+   * Payload: { questions: [{ question, header, multiSelect, options: [{label, description, hasPreview}] }] }
+   */
+  let pendingJuicesharpRpivAskUserQuestionData: unknown = null;
+
+  /** Captured @aliou/pi-guardrails action:prompted payload, consumed by custom(). */
+  let pendingAliouPiGuardrailsData: unknown = null;
+
   return {
+    setJuicesharpRpivAskUserQuestionData(data: unknown) { pendingJuicesharpRpivAskUserQuestionData = data; },
+    setAliouPiGuardrailsData(data: unknown) { pendingAliouPiGuardrailsData = data; },
     create(chatId) {
       const base = deps.getSession()?.extensionRunner.getUIContext?.();
       return {
@@ -148,6 +164,115 @@ export function createTelegramUiRuntime(deps: {
             activeFlowByChat.delete(chatId);
             return undefined;
           }
+        },
+        custom: async <T>(_factory: any): Promise<T> => {
+          // 1. ask_user_question questionnaire
+          const juicesharpRpivAskUserQuestionData = pendingJuicesharpRpivAskUserQuestionData as any;
+          pendingJuicesharpRpivAskUserQuestionData = null;
+          if (juicesharpRpivAskUserQuestionData?.questions?.length) {
+            const answers: any[] = [];
+            for (let i = 0; i < juicesharpRpivAskUserQuestionData.questions.length; i++) {
+              const q = juicesharpRpivAskUserQuestionData.questions[i];
+              const multi = q.multiSelect;
+              const sel = new Set<number>();
+              let done = false;
+              while (!done) {
+                const flowId = beginFlow();
+                activeFlowByChat.set(chatId, flowId);
+                const rows: { text: string; value: string }[][] = [];
+                const btn = (l: string, v: string) => rows.push([{ text: truncateLabel(l), value: cb(flowId, v) }]);
+                if (multi) {
+                  for (let oi = 0; oi < q.options.length; oi++) btn(`${sel.has(oi) ? "✅" : "⬜"} ${q.options[oi].label}`, `t:${oi}`);
+                  btn("✅ Done", "done");
+                } else {
+                  for (let oi = 0; oi < q.options.length; oi++) btn(q.options[oi].label, `o:${oi}`);
+                  btn("✏️ Type something...", "other");
+                }
+                btn("💬 Chat about this", "chat");
+                const selText = multi && sel.size ? `\n<i>Selected: ${[...sel].map(i => escapeHtml(q.options[i].label)).join(", ")}</i>` : "";
+                const sent = await deps.transport.sendButtons(chatId, `<b>${escapeHtml(q.question)}</b>${selText}`, rows);
+                const val = await waitInput(chatId, flowId, false, !multi, sent.message_id);
+                activeFlowByChat.delete(chatId);
+                if (val === undefined || val === "chat") return { answers, cancelled: true } as T;
+                if (multi && typeof val === "string") {
+                  if (val.startsWith("t:")) { const oi = parseInt(val.slice(2), 10); if (!isNaN(oi)) { if (sel.has(oi)) sel.delete(oi); else sel.add(oi); } }
+                  else if (val === "done") { done = true; answers.push({ questionIndex: i, question: q.question, kind: "multi", answer: null, selected: [...sel].map(i => q.options[i].label) }); }
+                } else if (!multi) {
+                  if (typeof val === "string" && val.startsWith("o:")) {
+                    const oi = parseInt(val.slice(2), 10);
+                    if (!isNaN(oi) && oi < q.options.length) { answers.push({ questionIndex: i, question: q.question, kind: "option", answer: q.options[oi].label }); done = true; }
+                  } else if (val === "other") {
+                    const tf = beginFlow();
+                    activeFlowByChat.set(chatId, tf);
+                    const p = await deps.transport.sendButtons(chatId, `<b>${escapeHtml(q.question)}</b>\n\nType your answer:`, [[{ text: "Cancel", value: cb(tf, "cancel") }]]);
+                    const tv = await waitInput(chatId, tf, false, true, p.message_id);
+                    activeFlowByChat.delete(chatId);
+                    if (tv === undefined) continue;
+                    answers.push({ questionIndex: i, question: q.question, kind: "custom", answer: String(tv) });
+                    done = true;
+                  } else if (typeof val === "string") {
+                    answers.push({ questionIndex: i, question: q.question, kind: "custom", answer: val });
+                    done = true;
+                  }
+                }
+              }
+            }
+            return { answers, cancelled: false } as T;
+          }
+
+          // 2. guardrails prompts (path-access, permission-gate)
+          const aliouGuardrailsData = pendingAliouPiGuardrailsData as any;
+          pendingAliouPiGuardrailsData = null;
+          if (aliouGuardrailsData?.feature === "pathAccess" || aliouGuardrailsData?.feature === "permissionGate") {
+            const flowId = beginFlow();
+            activeFlowByChat.set(chatId, flowId);
+            const rows: { text: string; value: string }[][] = [];
+            const btn = (l: string, v: string) => rows.push([{ text: truncateLabel(l), value: cb(flowId, v) }]);
+
+            if (aliouGuardrailsData.feature === "pathAccess") {
+              const path = aliouGuardrailsData.action?.path || "";
+              const toolName = aliouGuardrailsData.context?.toolName || aliouGuardrailsData.action?.origin || "";
+              const command = aliouGuardrailsData.context?.input?.command || "";
+              const isDirTool = toolName === "ls" || toolName === "find";
+              const specificDesc = command && toolName === "bash" ? `\`bash\` → \`${escapeHtml(command)}\``
+                : `\`${escapeHtml(toolName)}\``;
+              if (isDirTool) {
+                btn("Allow once", "allow-dir-once");
+                btn("Allow directory this session", "allow-dir-session");
+                btn("Allow directory always", "allow-dir-always");
+              } else {
+                btn("Allow once", "allow-file-once");
+                btn("Allow file this session", "allow-file-session");
+                btn("Allow file always", "allow-file-always");
+                btn("Allow directory this session", "allow-dir-session");
+                btn("Allow directory always", "allow-dir-always");
+              }
+              btn("🚫 Deny", "deny");
+              const sent = await deps.transport.sendButtons(chatId,
+                `📁 <b>Outside Workspace Access</b>\n${specificDesc} targets a path outside the working directory.\n\n<code>${escapeHtml(path)}</code>\n\n${escapeHtml(aliouGuardrailsData.reason || "")}`,
+                rows);
+              const val = await waitInput(chatId, flowId, false, false, sent.message_id);
+              activeFlowByChat.delete(chatId);
+              return (val === undefined || val === "cancel" ? "deny" : String(val)) as T;
+            }
+
+            if (aliouGuardrailsData.feature === "permissionGate") {
+              const cmd = aliouGuardrailsData.action?.command || "";
+              btn("✅ Allow once", "allow");
+              btn("🔄 Allow for session", "allow-session");
+              btn("🚫 Deny", "deny");
+              const sent = await deps.transport.sendButtons(chatId,
+                `⚠️ <b>Dangerous Command</b>\n<code>${escapeHtml(cmd.substring(0, 200))}</code>\n\n${escapeHtml(aliouGuardrailsData.reason || "")}`,
+                rows);
+              const val = await waitInput(chatId, flowId, false, false, sent.message_id);
+              activeFlowByChat.delete(chatId);
+              return (val === undefined || val === "cancel" ? "deny" : String(val)) as T;
+            }
+          }
+
+          // 3. fallback – unknown custom() call
+          await deps.transport.sendText(chatId, "📋 The agent needs input — please respond in the terminal.");
+          return undefined as T;
         },
       };
     },
