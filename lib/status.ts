@@ -1,3 +1,8 @@
+import type { TelegramStatusLevel } from "./types.ts";
+
+const FILLED = "\u25CF";
+const HOLLOW = "\u25CB";
+
 export const TELEGRAM_STATUS_KEY = "telegram-plus";
 
 export type StatusLineTheme = {
@@ -19,25 +24,27 @@ export function formatTelegramStatusLine(
     error?: string;
     botUsername?: string;
   },
-): string {
-  const label = theme.fg("accent", "telegram+");
+  level?: TelegramStatusLevel,
+): string | undefined {
+  if (level === "hidden") return undefined;
+  const label = theme.fg("accent", level === "minimal" ? "tg+" : "telegram+");
   if (state.error) {
-    return `${label} ${theme.fg("error", "error")} ${theme.fg("muted", state.error)}`;
+    return `${label} ${theme.fg("error", FILLED)} ${theme.fg("muted", state.error)}`;
   }
   if (!state.hasBotToken) {
     return `${label} ${theme.fg("muted", "not configured")}`;
   }
   if (!state.pollingActive) {
-    return `${label} ${theme.fg("muted", "disconnected")}`;
+    return `${label} ${theme.fg("muted", HOLLOW)}`;
   }
   if (!state.paired) {
     return `${label} ${theme.fg("warning", "awaiting pairing")}`;
   }
-  const bot = state.botUsername ? ` @${state.botUsername}` : "";
+  const bot = level === "brief" || level === "minimal" ? "" : state.botUsername ? ` @${state.botUsername}` : "";
   if (state.processing) {
     return `${label} ${theme.fg("warning", "active")}${bot}`;
   }
-  return `${label} ${theme.fg("success", "connected")}${bot}`;
+  return `${label} ${theme.fg("success", FILLED)}${bot}`;
 }
 
 export function clearTelegramStatus(ctx: { ui?: StatusLineUi }): void {

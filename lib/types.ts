@@ -1,9 +1,11 @@
 import type { AgentSession, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 
 export type TelegramRenderLevel = "hidden" | "brief" | "full";
+export type TelegramStatusLevel = TelegramRenderLevel | "minimal";
 export type TelegramMessageMode = "queue" | "steer";
 
 export const RENDER_LEVELS: readonly TelegramRenderLevel[] = ["hidden", "brief", "full"] as const;
+export const STATUS_TEXT_LEVELS: readonly TelegramStatusLevel[] = ["hidden", "minimal", "brief", "full"] as const;
 export const MODE_VALUES: readonly TelegramMessageMode[] = ["queue", "steer"] as const;
 
 export type TelegramConfigStore = {
@@ -43,6 +45,13 @@ export type TelegramConfig = {
   messageMode?: TelegramMessageMode;
   /** Number of retries for failed Telegram API calls (0 = no retry, default 3). */
   retryCount?: number;
+  /** How detailed the telegram+ TUI footer status line is.
+   *  "hidden" — no status line.
+   *  "minimal" — shows tg+ with state icon, no username.
+   *  "brief" — shows telegram+ with state icon, no username.
+   *  "full" — shows telegram+ with state icon and @username (default).
+   */
+  tuiStatus?: TelegramStatusLevel;
 };
 
 export type TelegramPhotoSize = {

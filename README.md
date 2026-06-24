@@ -181,7 +181,15 @@ Or directly:
 /tg-config thinking full    # Thinking rendering: hidden | brief | full
 /tg-config mode steer       # Message mode: queue | steer
 /tg-config retry 3          # API retry count: 0-10
+/tg-config status full      # TUI footer: hidden | minimal | brief | full
 ```
+
+| `status` level   | Footer shows |
+|------------------|---|
+| `hidden`         | No telegram+ status line |
+| `minimal`        | `tg+` with state icon, no username |
+| `brief`          | `telegram+` with state icon, no username |
+| `full` (default) | `telegram+` with state icon and @username |
 
 ---
 

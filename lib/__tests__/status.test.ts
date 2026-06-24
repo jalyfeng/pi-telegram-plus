@@ -27,13 +27,14 @@ describe("formatTelegramStatusLine", () => {
     expect(result).toContain("not configured");
   });
 
-  it("shows 'disconnected' when not polling", () => {
+  it("shows '○' when not polling", () => {
     const result = formatTelegramStatusLine(theme, {
       hasBotToken: true,
       pollingActive: false,
       paired: false,
     });
-    expect(result).toContain("disconnected");
+    expect(result).toContain("○");
+    expect(result).toContain("[muted]");
   });
 
   it("shows 'awaiting pairing' when not paired", () => {
@@ -56,14 +57,14 @@ describe("formatTelegramStatusLine", () => {
     expect(result).toContain("[warning]");
   });
 
-  it("shows 'connected' when idle", () => {
+  it("shows '●' when idle", () => {
     const result = formatTelegramStatusLine(theme, {
       hasBotToken: true,
       pollingActive: true,
       paired: true,
       processing: false,
     });
-    expect(result).toContain("connected");
+    expect(result).toContain("●");
     expect(result).toContain("[success]");
   });
 

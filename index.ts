@@ -204,14 +204,13 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
       const fileInfo = await getTelegramFile(token, fileId);
       const data = await downloadTelegramFile(token, fileInfo.file_path);
       await mkdir(currentSessionCwd(), { recursive: true });
-      const candidateName = buildIncomingAttachmentPath(fileId, fileName || kind, fileInfo.file_path);
-      const outputPath = candidateName;
+      const outputPath = buildIncomingAttachmentPath(fileId, fileName || kind, fileInfo.file_path);
       await writeFile(outputPath, data);
       return outputPath;
     },
     getActiveTurn: (chatId: number) => activeTurns.get(chatId),
     beginTelegramTurn: (chatId, replaceMessageId) => {
-      if (activeTurns.has(chatId)) return undefined; // reject if busy
+      if (activeTurns.has(chatId)) return undefined;
       const turn: TelegramTurn = { chatId, replaceMessageId, queuedAttachments: [] };
       activeTurns.set(chatId, turn);
       refreshStatus();
@@ -279,7 +278,9 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     const session = getActiveSession();
     const ctx = session?.extensionRunner?.createCommandContext?.();
     if (ctx?.ui?.setStatus) {
-      ctx.ui.setStatus(TELEGRAM_STATUS_KEY, formatTelegramStatusLine(ctx.ui.theme, state));
+      const level = config.tuiStatus ?? "full";
+      const line = formatTelegramStatusLine(ctx.ui.theme, state, level);
+      ctx.ui.setStatus(TELEGRAM_STATUS_KEY, line);
     }
     heartbeat.refreshStatus(state);
   }

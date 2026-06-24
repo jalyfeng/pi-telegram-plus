@@ -1,12 +1,20 @@
 import type { CommandRegistry, TgConfigDeps } from "./register.ts";
-import type { TelegramConfig, TelegramMessageMode, TelegramRenderLevel } from "../types.ts";
-import { RENDER_LEVELS, MODE_VALUES } from "../types.ts";
+import type { TelegramConfig, TelegramMessageMode, TelegramRenderLevel, TelegramStatusLevel } from "../types.ts";
+import { RENDER_LEVELS, MODE_VALUES, STATUS_TEXT_LEVELS } from "../types.ts";
 
 const KEY_LABELS: Record<string, string> = {
   tool: "🔧 Tool rendering",
   thinking: "💭 Thinking rendering",
   mode: "📨 Message mode",
   retry: "🔄 Retry count",
+  status: "📋 Status text",
+};
+
+const STATUS_OPTION_HINTS: Record<string, string> = {
+  hidden: "no status line",
+  minimal: "tg+ with icon",
+  brief: "telegram+ with icon",
+  full: "telegram+ with icon + @username (default)",
 };
 
 export function registerTgConfigCommands(
@@ -20,6 +28,12 @@ export function registerTgConfigCommands(
       const parts = args.trim().split(/\s+/);
 
       // Direct-set mode: /tg-config <key> <value>
+      const applyAndNotify = async (next: TelegramConfig, label: string, val: string | number) => {
+        deps.setConfig(next);
+        await deps.persistConfig(next);
+        ui.notify(`${label} set to ${val}`, "info");
+      };
+
       if (parts.length >= 2 && parts[0]) {
         const key = parts[0];
         const value = parts[1];
@@ -33,9 +47,7 @@ export function registerTgConfigCommands(
           const next = key === "tool"
             ? { ...config, tool: value as TelegramRenderLevel }
             : { ...config, thinking: value as TelegramRenderLevel };
-          deps.setConfig(next);
-          await deps.persistConfig(next);
-          ui.notify(`${key} set to ${value}`, "info");
+          await applyAndNotify(next, key, value);
           return;
         } else if (key === "mode") {
           if (!(MODE_VALUES as readonly string[]).includes(value)) {
@@ -43,9 +55,7 @@ export function registerTgConfigCommands(
             return;
           }
           const next = { ...config, messageMode: value as TelegramMessageMode };
-          deps.setConfig(next);
-          await deps.persistConfig(next);
-          ui.notify(`mode set to ${value}`, "info");
+          await applyAndNotify(next, "mode", value);
           return;
         } else if (key === "retry") {
           const n = parseInt(value, 10);
@@ -54,12 +64,18 @@ export function registerTgConfigCommands(
             return;
           }
           const next = { ...config, retryCount: n };
-          deps.setConfig(next);
-          await deps.persistConfig(next);
-          ui.notify(`retryCount set to ${n}`, "info");
+          await applyAndNotify(next, "retryCount", n);
+          return;
+        } else if (key === "status") {
+          if (!(STATUS_TEXT_LEVELS as readonly string[]).includes(value)) {
+            ui.notify("Invalid. Use: /tg-config status <hidden|brief|full|minimal>", "error");
+            return;
+          }
+          const next = { ...config, tuiStatus: value as TelegramStatusLevel };
+          await applyAndNotify(next, "tuiStatus", value);
           return;
         } else {
-          ui.notify("Invalid key. Use: tool, thinking, mode, or retry", "error");
+          ui.notify("Invalid key. Use: tool, thinking, mode, status, or retry", "error");
           return;
         }
       }
@@ -70,11 +86,13 @@ export function registerTgConfigCommands(
       const currentThinking = config.thinking ?? "brief";
       const currentMode = config.messageMode ?? "steer";
       const currentRetry = config.retryCount ?? 3;
+      const currentStatus = config.tuiStatus ?? "full";
 
       const choice = await ui.select("⚙️ Telegram Config", [
         `${KEY_LABELS.tool}: ${currentTool}`,
         `${KEY_LABELS.thinking}: ${currentThinking}`,
         `${KEY_LABELS.mode}: ${currentMode}`,
+        `${KEY_LABELS.status}: ${currentStatus}`,
         `${KEY_LABELS.retry}: ${currentRetry}`,
       ]);
       if (!choice) return;
@@ -91,6 +109,9 @@ export function registerTgConfigCommands(
       } else if (choice.startsWith(KEY_LABELS.mode)) {
         selectedKey = "mode";
         current = currentMode;
+      } else if (choice.startsWith(KEY_LABELS.status)) {
+        selectedKey = "status";
+        current = currentStatus;
       } else if (choice.startsWith(KEY_LABELS.retry)) {
         // Retry count is a number, not a select from list
         const input = await ui.input("Retry count (0-10)", `Current: ${currentRetry}`);
@@ -101,16 +122,25 @@ export function registerTgConfigCommands(
           return;
         }
         const next = { ...config, retryCount: n };
-        deps.setConfig(next);
-        await deps.persistConfig(next);
-        ui.notify(`${KEY_LABELS.retry} set to ${n}`, "info");
+        await applyAndNotify(next, KEY_LABELS.retry, n);
         return;
       } else {
         return;
       }
 
-      const values = selectedKey === "mode" ? [...MODE_VALUES] : [...RENDER_LEVELS];
-      const labels = values.map((v) => (v === current ? `● ${v}` : `  ${v}`));
+      const values = selectedKey === "status" ? STATUS_TEXT_LEVELS
+        : selectedKey === "mode" ? MODE_VALUES
+        : RENDER_LEVELS;
+      const configKey = selectedKey === "status" ? "tuiStatus"
+        : selectedKey === "mode" ? "messageMode"
+        : selectedKey;
+      const labels = values.map((v) => {
+        const dot = v === current ? "● " : "  ";
+        const hint = selectedKey === "status" && STATUS_OPTION_HINTS[v]
+          ? ` — ${STATUS_OPTION_HINTS[v]}`
+          : "";
+        return `${dot}${v}${hint}`;
+      });
 
       const valueChoice = await ui.select(KEY_LABELS[selectedKey], labels);
       if (!valueChoice) return;
@@ -118,11 +148,8 @@ export function registerTgConfigCommands(
       const idx = labels.indexOf(valueChoice);
       if (idx < 0 || idx >= values.length) return;
       const selectedValue = values[idx];
-
-      const next = { ...config, [selectedKey === "mode" ? "messageMode" : selectedKey]: selectedValue };
-      deps.setConfig(next);
-      await deps.persistConfig(next);
-      ui.notify(`${KEY_LABELS[selectedKey]} set to ${selectedValue}`, "info");
+      const next = { ...config, [configKey]: selectedValue };
+      await applyAndNotify(next, KEY_LABELS[selectedKey], selectedValue);
     },
   });
 }
