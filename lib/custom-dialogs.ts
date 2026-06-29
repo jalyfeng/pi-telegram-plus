@@ -111,6 +111,231 @@ function hasCustomOption(lines: string[]): boolean {
   return lines.some((l) => l.includes("Write your own answer..."));
 }
 
+// ---- Multi-question questionnaire support ----
+// pi-goal's goal_questionnaire renders ONE tab at a time (the current question
+// + its options) behind an opaque `custom(factory)` component. A single render
+// only exposes the first question; the other questions' options are hidden until
+// the user switches tabs. To bridge the whole questionnaire to Telegram we drive
+// the opaque component ourselves: send a raw Tab byte ("\t", what matchesKey(…,
+// Key.tab) accepts) to cycle tabs and render each, extracting every question's
+// text/options. We then run a tab-style Telegram flow mirroring the TUI
+// (per-question option buttons + Prev/Next tab navigation + Submit) and return a
+// constructed GoalQuestionnaireResult — bypassing the component's `done`, the
+// same way the confirmation and single-question paths do.
+
+interface ParsedQuestion {
+  id: string;
+  question: string;
+  context: string;
+  options: string[];
+  allowCustom: boolean;
+  recommended: number; // 0-based option index, -1 if none
+}
+
+/** Raw terminal byte that matchesKey(…, Key.tab) accepts (pi-tui keys.js). */
+const TAB_KEY = "\t";
+
+/** Extract the ordered question ids from the multi-question tab bar line. */
+function parseTabBarIds(text: string): string[] {
+  const tabLine = text.split("\n").find((l) => l.includes("Submit") && l.includes("←"));
+  if (!tabLine) return [];
+  const ids: string[] = [];
+  for (const m of tabLine.matchAll(/[□■]\s+(\S+)/g)) {
+    const id = m[1];
+    if (id && id !== "Submit") ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Extract the current tab's question text + context from a rendered tab.
+ * Skips the top border, the tab bar (line with ←/Submit/→), and the hint line;
+ * stops at the first option row or the bottom border.
+ */
+function extractTabContent(lines: string[]): { question: string; context: string } {
+  const content: string[] = [];
+  let sawTabBar = false;
+  for (const line of lines) {
+    const t = line.trim();
+    if (/^─+$/.test(t)) { if (content.length > 0) break; continue; }
+    if (t.includes("Submit") && t.includes("←")) { sawTabBar = true; continue; }
+    if (t === "") { if (content.length > 0) break; continue; }
+    if (/navigate.*cancel/.test(t)) continue;
+    if (/Press Enter to write/.test(t)) continue;
+    if (/^\s*[>]?\s*\d+\.\s+/.test(t)) break; // option row
+    if (/Write your own answer/.test(t)) break;
+    if (!sawTabBar) continue; // pre-tab-bar noise (shouldn't happen)
+    content.push(t);
+  }
+  return { question: content[0] ?? "", context: content.slice(1).join("\n") };
+}
+
+/** Parse one rendered tab into a ParsedQuestion (options, recommended, custom flag). */
+function parseTabQuestion(lines: string[], id: string): ParsedQuestion {
+  const stripped = lines.map(stripAnsi);
+  const text = stripped.join("\n");
+  const textLines = text.split("\n");
+  const { question, context } = extractTabContent(textLines);
+  const options: string[] = [];
+  let recommended = -1;
+  for (const line of textLines) {
+    const m = line.match(/^\s*[>]?\s*(\d+)\.\s+(.+)$/);
+    if (m) {
+      const idx = parseInt(m[1], 10) - 1;
+      let label = m[2];
+      const isRec = /\s*★\s*$/.test(label);
+      label = label.replace(/\s*★\s*$/, "").trim();
+      if (label === "Write your own answer...") continue;
+      options.push(label);
+      if (isRec) recommended = idx;
+    }
+  }
+  const allowCustom = options.length === 0 ? true : hasCustomOption(textLines);
+  return { id, question: question || id, context, options, allowCustom, recommended };
+}
+
+/**
+ * Run a tab-style Telegram flow for a multi-question questionnaire, mirroring
+ * the TUI: show the current question + its option buttons, with Prev/Next tab
+ * navigation, an optional free-text entry, and a Submit that requires every
+ * question answered. Returns a constructed GoalQuestionnaireResult.
+ */
+async function runMultiQuestionFlow(
+  questions: ParsedQuestion[],
+  deps: BridgeCustomDialogDeps,
+): Promise<{ questions: ParsedQuestion[]; answers: { id: string; question: string; answer: string; wasCustom: boolean }[]; cancelled: boolean }> {
+  const n = questions.length;
+  const answers = new Map<number, { answer: string; wasCustom: boolean }>();
+  let current = 0;
+  let page = 0;
+  const PAGE_SIZE = 8;
+
+  const answeredAll = () => questions.every((_, i) => answers.has(i));
+  const unansweredIds = () => questions.filter((_, i) => !answers.has(i)).map((q) => q.id);
+
+  const buildText = () => {
+    const tabsLine = questions
+      .map((q, i) => {
+        const mark = answers.has(i) ? "■" : "□";
+        const cur = i === current ? "▸" : " ";
+        return `${cur}${mark} ${q.id}`;
+      })
+      .join("  ");
+    const q = questions[current];
+    if (!q) return `<b>${escapeHtml(tabsLine)}</b>`;
+    const ctx = q.context ? `\n${escapeHtml(q.context)}` : "";
+    const a = answers.get(current);
+    const curLine = a ? `\nCurrent: ${a.wasCustom ? "(wrote) " : ""}${escapeHtml(a.answer)}` : "";
+    return `<b>${escapeHtml(tabsLine)}</b>\n\n<b>${escapeHtml(q.question)}</b>${ctx}${curLine}\n<i>Question ${current + 1}/${n}</i>`;
+  };
+
+  const buildRows = (): ButtonRow[] => {
+    const q = questions[current];
+    if (!q) return [[{ text: "Cancel", value: "cancel" }]];
+    const start = page * PAGE_SIZE;
+    const pageOpts = q.options.slice(start, start + PAGE_SIZE);
+    const rows: ButtonRow[] = pageOpts.map((label, i) => {
+      const absIdx = start + i;
+      const rec = absIdx === q.recommended ? " ★" : "";
+      return [{ text: truncateLabel(`${absIdx + 1}. ${label}${rec}`), value: `o:${absIdx}` }];
+    });
+    const nav: { text: string; value: string }[] = [];
+    const pageCount = Math.max(1, Math.ceil(q.options.length / PAGE_SIZE));
+    if (page > 0) nav.push({ text: "◀", value: `op:${page - 1}` });
+    if (page < pageCount - 1) nav.push({ text: "▶", value: `op:${page + 1}` });
+    if (current > 0) nav.push({ text: "◀ Tab", value: `t:${current - 1}` });
+    if (current < n - 1) nav.push({ text: "Tab ▶", value: `t:${current + 1}` });
+    if (q.allowCustom || q.options.length === 0) nav.push({ text: "✏️ Type", value: "custom" });
+    nav.push({ text: "✓ Submit", value: "submit" });
+    nav.push({ text: "Cancel", value: "cancel" });
+    rows.push(nav);
+    return rows;
+  };
+
+  const cancelled = { questions, answers: [], cancelled: true };
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      await deps.sendButtons(buildText(), buildRows());
+    } catch {
+      deps.notify("⚠️ Failed to send dialog buttons; the agent will continue.", "warning");
+      return cancelled;
+    }
+
+    let value: string | boolean | undefined;
+    try {
+      value = await deps.waitInput(false, false);
+    } catch {
+      deps.notify("⚠️ Dialog input failed; the agent will continue.", "warning");
+      return cancelled;
+    }
+
+    if (typeof value !== "string") return cancelled; // undefined (timeout/stop) or unexpected
+    if (value === "cancel") return cancelled;
+
+    if (value === "submit") {
+      if (answeredAll()) {
+        const orderedAnswers = questions.map((q, i) => {
+          const a = answers.get(i)!;
+          return { id: q.id, question: q.question, answer: a.answer, wasCustom: a.wasCustom };
+        });
+        return { questions, answers: orderedAnswers, cancelled: false };
+      }
+      deps.notify(`Unanswered: ${unansweredIds().join(", ")}`, "warning");
+      continue;
+    }
+
+    if (value === "custom") {
+      // Free-text entry for the current question.
+      try {
+        await deps.sendButtons(`${buildText()}\n\nPlease type your answer:`, [[
+          { text: "Cancel", value: "cancel" },
+        ]]);
+      } catch {
+        deps.notify("⚠️ Failed to send dialog buttons; the agent will continue.", "warning");
+        return cancelled;
+      }
+      let typed: string | boolean | undefined;
+      try {
+        typed = await deps.waitInput(true, false);
+      } catch {
+        return cancelled;
+      }
+      if (typed === "cancel" || typed === undefined) return cancelled;
+      if (typeof typed === "string" && typed.trim()) {
+        answers.set(current, { answer: typed.trim(), wasCustom: true });
+        current = (current + 1) % n;
+        page = 0;
+      }
+      continue;
+    }
+
+    if (value.startsWith("o:")) {
+      const idx = parseInt(value.slice(2), 10);
+      const q = questions[current];
+      if (q && idx >= 0 && idx < q.options.length) {
+        answers.set(current, { answer: q.options[idx], wasCustom: false });
+        current = (current + 1) % n;
+        page = 0;
+      }
+      continue;
+    }
+    if (value.startsWith("op:")) {
+      page = Math.max(0, parseInt(value.slice(3), 10) || 0);
+      continue;
+    }
+    if (value.startsWith("t:")) {
+      const next = parseInt(value.slice(2), 10);
+      if (next >= 0 && next < n) { current = next; page = 0; }
+      continue;
+    }
+
+    // Unknown value → cancel.
+    return cancelled;
+  }
+}
+
 /**
  * Bridge an opaque `custom(factory)` dialog to Telegram inline buttons.
  *
@@ -129,9 +354,12 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
   let factoryDone = false;
   const done = (result: unknown) => { factoryResult = result as T; factoryDone = true; };
 
-  let component: { render(width: number): string[] };
+  let component: { render(width: number): string[]; handleInput?(data: string): void };
   try {
-    component = (await deps.factory(tuiShim, deps.theme, undefined, done)) as { render(width: number): string[] };
+    component = (await deps.factory(tuiShim, deps.theme, undefined, done)) as {
+      render(width: number): string[];
+      handleInput?(data: string): void;
+    };
   } catch {
     deps.notify("⚠️ Terminal-only dialog was auto-dismissed; the agent will continue.", "warning");
     return { questions: [], answers: [], cancelled: true } as T;
@@ -176,10 +404,36 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
     }
   }
 
-  // ---- Multi-question questionnaire (goal_questionnaire) → degrade ----
+  // ---- Multi-question questionnaire (goal_questionnaire) ----
+  // Drive the opaque component: cycle tabs with a raw Tab byte and render each
+  // tab to extract that question's text/options, then run a tab-style Telegram
+  // flow (runMultiQuestionFlow) mirroring the TUI. The component is bypassed
+  // for the answer/submit — we return a constructed result, like the other paths.
   if (shape === "multi-question") {
-    deps.notify("⚠️ Multi-question questionnaire is not supported on Telegram. The agent will ask questions one by one in chat.", "warning");
-    return { questions: [], answers: [], cancelled: true } as T;
+    if (typeof component.handleInput !== "function") {
+      deps.notify("⚠️ Terminal-only dialog was auto-dismissed; the agent will continue.", "warning");
+      return { questions: [], answers: [], cancelled: true } as T;
+    }
+    try {
+      const initialLines = component.render(width);
+      const initialText = stripAnsi(initialLines.join("\n"));
+      const ids = parseTabBarIds(initialText);
+      if (ids.length < 2) {
+        // Not actually multi-question — safe degrade.
+        deps.notify("⚠️ Terminal-only dialog was auto-dismissed; the agent will continue.", "warning");
+        return { questions: [], answers: [], cancelled: true } as T;
+      }
+      const questions: ParsedQuestion[] = [parseTabQuestion(initialLines, ids[0])];
+      for (let i = 1; i < ids.length; i++) {
+        component.handleInput(TAB_KEY);
+        questions.push(parseTabQuestion(component.render(width), ids[i]));
+      }
+      const result = await runMultiQuestionFlow(questions, deps);
+      return result as T;
+    } catch {
+      deps.notify("⚠️ Terminal-only dialog was auto-dismissed; the agent will continue.", "warning");
+      return { questions: [], answers: [], cancelled: true } as T;
+    }
   }
 
   // ---- Single-question (goal_question) ----

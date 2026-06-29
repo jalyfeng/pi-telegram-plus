@@ -211,12 +211,157 @@ const MULTI_QUESTION_RENDER = [
   "────────────────────────────────────────────────────────────────────────────────",
 ];
 
-describe("bridgeCustomDialog — multi-question degrade", () => {
-  it("degrades to cancelled:true with a notify", async () => {
+describe("bridgeCustomDialog — multi-question degrade (no handleInput)", () => {
+  it("degrades to cancelled:true with a notify when component has no handleInput", async () => {
     const { deps, notify } = makeDeps(stubFactory(MULTI_QUESTION_RENDER));
     const result = await bridgeCustomDialog(deps);
 
     expect(result).toBeDefined();
+    expect((result as any).cancelled).toBe(true);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---- bridgeCustomDialog: multi-question driving ----
+
+/** Stub factory that cycles through per-tab renders on a raw Tab byte ("\t"). */
+function multiTabFactory(tabRenders: string[][]) {
+  let tab = 0;
+  const total = tabRenders.length;
+  return (_tui: unknown, _theme: unknown, _kb: unknown, _done: (r: unknown) => void) => ({
+    render: () => tabRenders[tab],
+    invalidate: () => {},
+    handleInput: (data: string) => { if (data === "\t") tab = (tab + 1) % total; },
+  });
+}
+
+const MQ_TAB0 = [
+  "────────────────────────────────────────────────────────────────────────────────",
+  " ←  □ q1  □ q2  ✓ Submit →",
+  "",
+  " What is the deliverable?",
+  "",
+  " > 1. Report only ★",
+  "   2. Report + fix",
+  "   3. Write your own answer...",
+  "",
+  " Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel",
+  "────────────────────────────────────────────────────────────────────────────────",
+];
+const MQ_TAB1 = [
+  "────────────────────────────────────────────────────────────────────────────────",
+  " ←  □ q1  □ q2  ✓ Submit →",
+  "",
+  " What dimensions to analyze?",
+  "",
+  "   1. Code only",
+  " > 2. Code + tests",
+  "   3. Write your own answer...",
+  "",
+  " Tab/←→ navigate • ↑↓ select • Enter confirm • Esc cancel",
+  "────────────────────────────────────────────────────────────────────────────────",
+];
+
+/** Deps whose waitInput resolves a queue of scripted values, one per call. */
+function scriptedDeps(factory: unknown, script: (string | boolean | undefined)[]) {
+  const notify = vi.fn();
+  const sentButtons: { text: string; rows: ButtonRow[] }[] = [];
+  let i = 0;
+  const deps = {
+    factory: factory as any,
+    theme: {},
+    width: 80,
+    sendButtons: async (text: string, rows: ButtonRow[]) => { sentButtons.push({ text, rows }); return { message_id: 100 }; },
+    waitInput: () =>
+      new Promise<string | boolean | undefined>((resolve) => {
+        const v = script[i++];
+        // microtask delay so the loop awaits before we move on
+        setTimeout(() => resolve(v), 0);
+      }),
+    notify,
+  } as Parameters<typeof bridgeCustomDialog>[0];
+  return { deps, sentButtons, notify };
+}
+
+describe("bridgeCustomDialog — multi-question driving", () => {
+  it("extracts both tabs and collects answers on Submit", async () => {
+    const { deps, sentButtons } = scriptedDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]), [
+      "o:0", // q1 → Report only
+      "o:1", // q2 → Code + tests
+      "submit",
+    ]);
+    const result = await bridgeCustomDialog(deps);
+
+    expect(result).toBeDefined();
+    const r = result as any;
+    expect(r.cancelled).toBe(false);
+    expect(r.questions).toHaveLength(2);
+    expect(r.questions[0].id).toBe("q1");
+    expect(r.questions[1].id).toBe("q2");
+    expect(r.questions[0].options).toEqual(["Report only", "Report + fix"]);
+    expect(r.questions[0].recommended).toBe(0);
+    expect(r.answers).toHaveLength(2);
+    expect(r.answers[0]).toMatchObject({ id: "q1", answer: "Report only", wasCustom: false });
+    expect(r.answers[1]).toMatchObject({ id: "q2", answer: "Code + tests", wasCustom: false });
+    // At least 3 button sends: tab0, tab1, tab0-again (after wrap), then submit resolves.
+    expect(sentButtons.length).toBeGreaterThanOrEqual(3);
+    // First send shows q1 question text.
+    expect(sentButtons[0].text).toContain("What is the deliverable?");
+    // Tab progress line shows both ids.
+    expect(sentButtons[0].text).toContain("q1");
+    expect(sentButtons[0].text).toContain("q2");
+  });
+
+  it("Submit before all answered → notify Unanswered, re-show, then complete", async () => {
+    const { deps, notify } = scriptedDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]), [
+      "o:0",   // answer q1
+      "submit", // too early → notify Unanswered: q2
+      "t:1",   // navigate to q2 tab
+      "o:1",   // answer q2
+      "submit", // now complete
+    ]);
+    const result = await bridgeCustomDialog(deps);
+    const r = result as any;
+    expect(r.cancelled).toBe(false);
+    expect(r.answers).toHaveLength(2);
+    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/Unanswered.*q2/), "warning");
+  });
+
+  it("free-text (custom) answer for a tab → wasCustom true", async () => {
+    const { deps } = scriptedDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]), [
+      "custom",          // q1 → free-text entry
+      "A hybrid report", // typed answer
+      "o:1",             // q2 → Code + tests
+      "submit",
+    ]);
+    const result = await bridgeCustomDialog(deps);
+    const r = result as any;
+    expect(r.cancelled).toBe(false);
+    expect(r.answers[0]).toMatchObject({ id: "q1", answer: "A hybrid report", wasCustom: true });
+    expect(r.answers[1]).toMatchObject({ id: "q2", answer: "Code + tests", wasCustom: false });
+  });
+
+  it("Cancel button → cancelled true", async () => {
+    const { deps } = scriptedDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]), ["cancel"]);
+    const result = await bridgeCustomDialog(deps);
+    expect((result as any).cancelled).toBe(true);
+  });
+
+  it("timeout (undefined) → cancelled true", async () => {
+    const { deps } = scriptedDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]), [undefined]);
+    const result = await bridgeCustomDialog(deps);
+    expect((result as any).cancelled).toBe(true);
+  });
+
+  it("factory render throws during extraction → safe degrade", async () => {
+    let calls = 0;
+    const factory = (_tui: unknown, _theme: unknown, _kb: unknown, _done: (r: unknown) => void) => ({
+      render: () => { if (++calls === 2) throw new Error("boom"); return MQ_TAB0; },
+      invalidate: () => {},
+      handleInput: () => {},
+    });
+    const { deps, notify } = scriptedDeps(factory, []);
+    const result = await bridgeCustomDialog(deps);
     expect((result as any).cancelled).toBe(true);
     expect(notify).toHaveBeenCalledTimes(1);
   });

@@ -722,4 +722,121 @@ describe("createTelegramController media message behavior", () => {
     expect(transport.sendButtons).toHaveBeenCalledTimes(1);
     expect(transport.removeInlineKeyboard).toHaveBeenCalledWith(321, sentMessageId);
   });
+
+  it("holds the Telegram UI swap across a command's enqueued turn until the agent is idle", async () => {
+    // Simulates /sisyphus-style commands that return immediately while enqueuing
+    // an agent turn via pi.sendUserMessage. The UI swap must be held until that
+    // turn finishes (waitForIdle) so dialogs raised during it bridge to Telegram.
+    const setCalls: unknown[] = [];
+    let idle = true;
+    let resolveWait: () => void = () => {};
+    const waitPromise = () => new Promise<void>((r) => { resolveWait = r; });
+    const tuiUi = { _marker: "tui" };
+    const session = {
+      extensionRunner: {
+        getUIContext: () => tuiUi,
+        setUIContext: (u: unknown) => { setCalls.push(u); },
+        getCommand: () => undefined,
+        createCommandContext: () => ({ isIdle: () => idle, waitForIdle: () => waitPromise() }) as any,
+      },
+    } as any;
+
+    const transport = {
+      removeInlineKeyboard: vi.fn(async () => undefined),
+      sendText: vi.fn(async () => [] as any),
+      sendButtons: vi.fn(async () => ({ message_id: 1 }) as any),
+      editText: vi.fn(async () => undefined),
+      editButtons: vi.fn(async () => undefined),
+      answerCallbackQuery: vi.fn(async () => undefined),
+      deleteMessage: vi.fn(async () => undefined),
+      sendDocument: vi.fn(async () => undefined),
+      sendPhoto: vi.fn(async () => undefined),
+      sendChatAction: vi.fn(async () => undefined),
+    };
+    const uiRuntime = createTelegramUiRuntime({ getSession: () => session, transport });
+
+    let handlerRan = false;
+    const command = new Map<string, (args: string, _ctx: any) => Promise<void>>();
+    command.set("enqueue", async () => {
+      handlerRan = true;
+      // The command returns immediately, but the enqueued turn keeps the agent busy.
+      idle = false;
+    });
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport,
+      ui: uiRuntime,
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => "queue",
+      telegramCommands: command,
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: () => ({ chatId: 555, queuedAttachments: [], replaceMessageId: undefined }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({ message_id: 1, chat: { id: 555 }, text: "/enqueue" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(handlerRan).toBe(true);
+
+    // The swap to the Telegram UI happened; the TUI UI has NOT been restored yet
+    // because the enqueued turn is still "running" (waitForIdle pending).
+    expect(setCalls.length).toBeGreaterThanOrEqual(1);
+    expect(setCalls[0]).not.toBe(tuiUi);
+    const restoresBefore = setCalls.filter((u) => u === tuiUi).length;
+    expect(restoresBefore).toBe(0);
+
+    // The enqueued turn finishes: agent goes idle, waitForIdle resolves.
+    idle = true;
+    resolveWait();
+    // 120ms grace window used by the hold loop.
+    await new Promise((r) => setTimeout(r, 180));
+
+    // Now the TUI UI has been restored.
+    expect(setCalls.filter((u) => u === tuiUi).length).toBe(1);
+  });
+
+  it("does not hold the swap when a local turn was already streaming (not idle)", async () => {
+    const setCalls: unknown[] = [];
+    const tuiUi = { _marker: "tui" };
+    let handlerRan = false;
+    const session = {
+      extensionRunner: {
+        getUIContext: () => tuiUi,
+        setUIContext: (u: unknown) => { setCalls.push(u); },
+        getCommand: () => undefined,
+        createCommandContext: () => ({ isIdle: () => false, waitForIdle: () => Promise.resolve() }) as any,
+      },
+    } as any;
+    const transport = {
+      removeInlineKeyboard: vi.fn(async () => undefined),
+      sendText: vi.fn(async () => [] as any),
+      sendButtons: vi.fn(async () => ({ message_id: 1 }) as any),
+      editText: vi.fn(async () => undefined),
+      editButtons: vi.fn(async () => undefined),
+      answerCallbackQuery: vi.fn(async () => undefined),
+      deleteMessage: vi.fn(async () => undefined),
+      sendDocument: vi.fn(async () => undefined),
+      sendPhoto: vi.fn(async () => undefined),
+      sendChatAction: vi.fn(async () => undefined),
+    };
+    const uiRuntime = createTelegramUiRuntime({ getSession: () => session, transport });
+    const command = new Map<string, (args: string, _ctx: any) => Promise<void>>();
+    command.set("busy", async () => { handlerRan = true; });
+    const controller = createTelegramController({
+      getSession: () => session, transport, ui: uiRuntime,
+      authorizeUser: async () => true, setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot", getMessageMode: () => "queue",
+      telegramCommands: command, getActiveTurn: () => undefined,
+      beginTelegramTurn: () => ({ chatId: 1, queuedAttachments: [], replaceMessageId: undefined }),
+      endTelegramTurn: () => undefined,
+    });
+    await controller.handleMessage({ message_id: 1, chat: { id: 1 }, text: "/busy" });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(handlerRan).toBe(true);
+    // Agent was not idle at command start → swap restored immediately after handler.
+    expect(setCalls.filter((u) => u === tuiUi).length).toBe(1);
+  });
 });

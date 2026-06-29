@@ -67,10 +67,12 @@ are bridged to Telegram inline buttons so remote turns can interact with them:
 |----------|-------------------|
 | **pi-goal draft confirmation** (`propose_goal_draft` → `showProposalDialog`) | Shows ✅ Confirm / 💬 Continue chatting buttons. Confirm creates the goal; Continue lets the agent keep refining; `/stop` or timeout cancels. |
 | **pi-goal `goal_question`** (single question) | Shows the question text, option buttons (paginated if needed), a ✏️ Type answer button for free-text entry, and Cancel. Selecting an option or typing an answer resolves the question. |
-| **pi-goal `goal_questionnaire`** (multi-question) | Not fully supported yet — degrades to `cancelled: true` with a notification. The agent will ask questions one by one in chat instead. |
+| **pi-goal `goal_questionnaire`** (multi-question) | Drives the opaque questionnaire component: cycles tabs to extract every question, then presents one question at a time with option buttons, ◀ Tab / Tab ▶ navigation between questions, ✏️ Type for free-text entry, and ✓ Submit (requires all answered). Mirrors the TUI tab flow; the result is constructed and returned to the agent. Falls back to a `cancelled` degrade only if the component lacks the expected `handleInput`/`render` API. |
 | **Unknown `custom()` components** | Auto-dismissed with a ⚠️ notification and a `cancelled` result, so the agent continues gracefully (never hangs or throws). |
 
 **Telegram turns do not affect the local TUI.** Interactive modals (confirm, select, input, editor, custom) go to Telegram only — the TUI never shows a modal or loses keyboard focus from a remote turn. Persistent/stateful UI (goal widget, status line, working indicator, footer/header) is forwarded to the TUI base so the local TUI always shows accurate state. Editor operations (paste, set/get text) are no-ops during Telegram turns, so a remote turn never touches the local editor.
+
+> **Command-triggered turns are held to the end of the chain.** Commands like `/sisyphus` and `/goals` enqueue the agent turn fire-and-forget via `pi.sendUserMessage` and return immediately; the actual turn (and the `goal_question` / `goal_questionnaire` / `propose_goal_draft` dialogs it raises) runs afterward. The controller keeps the Telegram UI swap active across that enqueued turn and any pi-goal auto-continue chain (waiting for the agent to go idle through a small grace window), so every dialog in the chain bridges to Telegram instead of rendering to the local TUI. The hold is skipped when a local turn was already streaming, so it never hijacks an active local session.
 
 ### 🎨 Message Rendering
 - **Markdown → Telegram HTML** — Full conversion via `marked` (tables, code blocks, blockquotes, lists, inline formatting)
@@ -254,9 +256,9 @@ Or directly:
 - **`index.ts`** — Extension entry point. Wires all modules together and handles `session_start`/`session_shutdown` lifecycle events.
 - **`lib/telegram-api.ts`** — Raw Telegram Bot API client with retry logic and file upload/download.
 - **`lib/polling.ts`** — Long polling loop with multi-instance file lock. Re-reads config while holding the lock to prevent offset regressions.
-- **`lib/controller.ts`** — Message routing: slash commands, text prompts, media attachments, callback queries.
+- **`lib/controller.ts`** — Message routing: slash commands, text prompts, media attachments, callback queries. Holds the Telegram UI swap across command-enqueued turns and auto-continue chains so dialogs bridge to Telegram.
 - **`lib/telegram-ui.ts`** — Interactive UI layer: notify, confirm, input, select (pagination), editor, and a `custom()` bridge. Selectively forwards persistent/stateful UI to the TUI base so remote turns never disrupt the local TUI.
-- **`lib/custom-dialogs.ts`** — Bridges third-party `ctx.ui.custom(factory)` dialogs (e.g. pi-goal `propose_goal_draft`, `goal_question`) to Telegram inline buttons via render-text shape detection, with a safe `cancelled` fallback for unknown shapes.
+- **`lib/custom-dialogs.ts`** — Bridges third-party `ctx.ui.custom(factory)` dialogs (pi-goal `propose_goal_draft`, `goal_question`, `goal_questionnaire`) to Telegram inline buttons via render-text shape detection. Multi-question questionnaires are driven by cycling the opaque component's tabs; unknown shapes degrade safely to `cancelled`.
 - **`lib/renderer.ts`** — Hooks into agent lifecycle events (`agent_start`, `tool_execution_*`, `message_end`) and streams rendered output to Telegram.
 - **`lib/markdown.ts`** — Custom `marked` renderer that converts Markdown to Telegram-compatible HTML.
 - **`lib/config.ts`** — Configuration persistence with file locking for concurrent-safe writes. Supports global + workspace scopes.

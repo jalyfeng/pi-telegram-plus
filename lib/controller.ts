@@ -247,10 +247,43 @@ export function createTelegramController(deps: {
     // prompts (e.g. /new confirmation), and awaiting them would stall the
     // polling loop and block callback processing for that update.
     const telegramUi = deps.ui.create(chatId);
+    const ctx = session.extensionRunner.createCommandContext();
+    // Capture idleness BEFORE the handler runs. Commands like /sisyphus and
+    // /goals enqueue the agent turn fire-and-forget via pi.sendUserMessage and
+    // return immediately; the actual turn (and any goal_question /
+    // propose_goal_draft / goal_questionnaire dialogs it raises) runs AFTER the
+    // handler resolves. If we let runWithTelegramUi restore the TUI UI at that
+    // point, those dialogs render to the local TUI and Telegram gets nothing.
+    // Only hold the swap when the agent was idle when the command arrived: if a
+    // local turn was already streaming, holding the swap would hijack the local
+    // user's TUI (modals would route to Telegram, editor would no-op).
+    const idleFn = typeof (ctx as any).isIdle === "function" ? (ctx as any).isIdle : undefined;
+    const waitFn = typeof (ctx as any).waitForIdle === "function" ? (ctx as any).waitForIdle : undefined;
+    const wasIdle = idleFn ? idleFn.call(ctx) : false;
     void runWithTelegramUi({
       session,
       ui: telegramUi,
-      run: async () => handler(args, session.extensionRunner.createCommandContext()),
+      run: async () => {
+        await handler(args, ctx);
+        if (!wasIdle || !idleFn || !waitFn) return;
+        // Hold the Telegram UI swap across the command's enqueued turn and any
+        // auto-continue chain it spawns. pi-goal schedules continuation turns via
+        // setTimeout(0 / 50ms) after a turn ends, so a single waitForIdle()
+        // resolves before the next turn starts. After each idle, yield one
+        // macrotask window (120ms > pi-goal's 50ms CONTINUATION_IDLE_RETRY_MS) to
+        // let a pending continuation begin; if the agent starts streaming again,
+        // keep waiting. Stop when the agent stays idle through the window — the
+        // chain has drained and the local TUI is fully usable again.
+        try {
+          for (;;) {
+            await waitFn.call(ctx);
+            await new Promise((r) => setTimeout(r, 120));
+            if (idleFn.call(ctx)) break;
+          }
+        } catch {
+          // Session disposed / torn down during the wait — nothing to do.
+        }
+      },
     }).catch(() => undefined);
   };
 
