@@ -132,15 +132,65 @@ const SINGLE_QUESTION_RENDER = [
 ];
 
 describe("bridgeCustomDialog — single-question", () => {
-  it("option button → answer matches the option, wasCustom false", async () => {
-    const { deps, resolveWaitInput, sentButtons } = makeDeps(stubFactory(SINGLE_QUESTION_RENDER));
-    const resultP = bridgeCustomDialog(deps);
-    resolveWaitInput("s:0");
-    const result = await resultP;
+  it("option toggle + Submit → answer matches the option, wasCustom false", async () => {
+    const waitInputs: Array<(v: string | boolean | undefined) => void> = [];
+    const sentButtons: { text: string; rows: ButtonRow[] }[] = [];
+    const deps = {
+      factory: stubFactory(SINGLE_QUESTION_RENDER) as any,
+      theme: {},
+      width: 80,
+      sendButtons: async (text: string, rows: ButtonRow[]) => { sentButtons.push({ text, rows }); return { message_id: 100 }; },
+      waitInput: () => new Promise<string | boolean | undefined>((r) => { waitInputs.push(r); }),
+      notify: vi.fn(),
+    } as Parameters<typeof bridgeCustomDialog>[0];
 
+    const resultP = bridgeCustomDialog(deps);
+
+    await new Promise((r) => setTimeout(r, 10));
+    // Initial render: options use ☐ toggle markers; no Submit yet (nothing selected).
+    expect(sentButtons[0].rows[0][0].text).toContain("☐");
+    expect(sentButtons[0].rows.some((row) => row.some((b) => b.value === "submit"))).toBe(false);
+    waitInputs[0]!("s:0"); // toggle option 0
+
+    await new Promise((r) => setTimeout(r, 10));
+    // After toggle: option 0 is ☑ and a Submit button appears.
+    expect(sentButtons[1].rows[0][0].text).toContain("☑");
+    expect(sentButtons[1].rows.some((row) => row.some((b) => b.value === "submit"))).toBe(true);
+    waitInputs[1]!("submit");
+
+    const result = await resultP;
     expect(result).toBeDefined();
     expect((result as any).cancelled).toBe(false);
     expect((result as any).answers[0].answer).toBe("Frontend only");
+    expect((result as any).answers[0].wasCustom).toBe(false);
+  });
+
+  it("multi-select: toggle two options → answer is the joined string", async () => {
+    const waitInputs: Array<(v: string | boolean | undefined) => void> = [];
+    const sentButtons: { text: string; rows: ButtonRow[] }[] = [];
+    const deps = {
+      factory: stubFactory(SINGLE_QUESTION_RENDER) as any,
+      theme: {},
+      width: 80,
+      sendButtons: async (text: string, rows: ButtonRow[]) => { sentButtons.push({ text, rows }); return { message_id: 100 }; },
+      waitInput: () => new Promise<string | boolean | undefined>((r) => { waitInputs.push(r); }),
+      notify: vi.fn(),
+    } as Parameters<typeof bridgeCustomDialog>[0];
+
+    const resultP = bridgeCustomDialog(deps);
+    await new Promise((r) => setTimeout(r, 10));
+    waitInputs[0]!("s:0"); // toggle option 0 (Frontend only)
+    await new Promise((r) => setTimeout(r, 10));
+    waitInputs[1]!("s:1"); // toggle option 1 (Backend only)
+    await new Promise((r) => setTimeout(r, 10));
+    // Both selected now.
+    expect(sentButtons[2].text).toContain("Selected: Frontend only / Backend only");
+    waitInputs[2]!("submit");
+
+    const result = await resultP;
+    expect(result).toBeDefined();
+    expect((result as any).cancelled).toBe(false);
+    expect((result as any).answers[0].answer).toBe("Frontend only / Backend only");
     expect((result as any).answers[0].wasCustom).toBe(false);
   });
 
@@ -286,8 +336,9 @@ function scriptedDeps(factory: unknown, script: (string | boolean | undefined)[]
 describe("bridgeCustomDialog — multi-question driving", () => {
   it("extracts both tabs and collects answers on Submit", async () => {
     const { deps, sentButtons } = scriptedDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]), [
-      "o:0", // q1 → Report only
-      "o:1", // q2 → Code + tests
+      "o:0", // q1 → toggle Report only
+      "t:1", // navigate to q2 tab
+      "o:1", // q2 → toggle Code + tests
       "submit",
     ]);
     const result = await bridgeCustomDialog(deps);
@@ -324,13 +375,14 @@ describe("bridgeCustomDialog — multi-question driving", () => {
     const r = result as any;
     expect(r.cancelled).toBe(false);
     expect(r.answers).toHaveLength(2);
-    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/Unanswered.*q2/), "warning");
+    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/Still to answer.*q2/), "warning");
   });
 
   it("free-text (custom) answer for a tab → wasCustom true", async () => {
     const { deps } = scriptedDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]), [
       "custom",          // q1 → free-text entry
       "A hybrid report", // typed answer
+      "t:1",             // navigate to q2 tab
       "o:1",             // q2 → Code + tests
       "submit",
     ]);
@@ -716,7 +768,17 @@ describe("bridgeCustomDialog — pagination", () => {
       " ↑↓ navigate • Enter select • Esc cancel",
       "────────────────────────────────────────────────────────────────────────────────",
     ];
-    const { deps, resolveWaitInput, sentButtons } = makeDeps(stubFactory(renderLines));
+    const waitInputs: Array<(v: string | boolean | undefined) => void> = [];
+    const sentButtons: { text: string; rows: ButtonRow[] }[] = [];
+    const deps = {
+      factory: stubFactory(renderLines) as any,
+      theme: {},
+      width: 80,
+      sendButtons: async (text: string, rows: ButtonRow[]) => { sentButtons.push({ text, rows }); return { message_id: 100 }; },
+      waitInput: () => new Promise<string | boolean | undefined>((r) => { waitInputs.push(r); }),
+      notify: vi.fn(),
+    } as Parameters<typeof bridgeCustomDialog>[0];
+
     const resultP = bridgeCustomDialog(deps);
 
     await new Promise((r) => setTimeout(r, 10));
@@ -736,9 +798,14 @@ describe("bridgeCustomDialog — pagination", () => {
     );
     // No Prev on page 1
     expect(navRow.some((b) => b.text === "◀ Prev")).toBe(false);
+    // No Submit yet (nothing toggled)
+    expect(first.rows.some((row) => row.some((b) => b.value === "submit"))).toBe(false);
 
-    // Select option on page 1 (s:0 → "Option 1")
-    resolveWaitInput("s:0");
+    // Toggle option 0 on page 1, then Submit → answer "Option 1"
+    waitInputs[0]!("s:0");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sentButtons[1].rows.some((row) => row.some((b) => b.value === "submit"))).toBe(true);
+    waitInputs[1]!("submit");
     const result = await resultP;
     expect(result).toBeDefined();
     expect((result as any).cancelled).toBe(false);
@@ -793,8 +860,10 @@ describe("bridgeCustomDialog — pagination", () => {
     );
     expect(navRow.some((b) => b.text === "Next ▶")).toBe(false);
 
-    // Select option 11 (global index 10 → s:10)
+    // Toggle option 11 (global index 10 → s:10), then Submit → answer "Option 11"
     waitInputs[1]!("s:10");
+    await new Promise((r) => setTimeout(r, 10));
+    waitInputs[2]!("submit");
     const result = await resultP;
     expect(result).toBeDefined();
     expect((result as any).cancelled).toBe(false);
@@ -839,5 +908,175 @@ describe("bridgeCustomDialog — transport error degrade", () => {
     expect(result).toBeDefined();
     expect((result as any).cancelled).toBe(true);
     expect(notify).toHaveBeenCalledTimes(1);
+  });
+});
+// ---- bridgeCustomDialog: multi-question multi-select + Submit gating ----
+
+describe("bridgeCustomDialog — multi-question multi-select & Submit gating", () => {
+  /** Build deps with a waitInputs queue and captured sentButtons for inspection. */
+  function inspectableDeps(factory: unknown) {
+    const waitInputs: Array<(v: string | boolean | undefined) => void> = [];
+    const sentButtons: { text: string; rows: ButtonRow[] }[] = [];
+    const deps = {
+      factory: factory as any,
+      theme: {},
+      width: 80,
+      sendButtons: async (text: string, rows: ButtonRow[]) => { sentButtons.push({ text, rows }); return { message_id: 100 }; },
+      waitInput: () => new Promise<string | boolean | undefined>((r) => { waitInputs.push(r); }),
+      notify: vi.fn(),
+    } as Parameters<typeof bridgeCustomDialog>[0];
+    return { deps, waitInputs, sentButtons };
+  }
+
+  const hasSubmit = (rows: ButtonRow[]) => rows.some((row) => row.some((b) => b.value === "submit"));
+
+  it("toggles multiple options within one question → joined string answer", async () => {
+    const { deps, waitInputs } = inspectableDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]));
+    const resultP = bridgeCustomDialog(deps);
+    await new Promise((r) => setTimeout(r, 10));
+    waitInputs[0]!("o:0"); // q1: toggle Report only
+    await new Promise((r) => setTimeout(r, 10));
+    waitInputs[1]!("o:1"); // q1: toggle Report + fix (multi-select within q1)
+    await new Promise((r) => setTimeout(r, 10));
+    waitInputs[2]!("t:1"); // navigate to q2
+    await new Promise((r) => setTimeout(r, 10));
+    waitInputs[3]!("o:1"); // q2: toggle Code + tests
+    await new Promise((r) => setTimeout(r, 10));
+    waitInputs[4]!("submit");
+    const result = await resultP;
+    const r = result as any;
+    expect(r.cancelled).toBe(false);
+    expect(r.answers[0]).toMatchObject({ id: "q1", answer: "Report only / Report + fix", wasCustom: false });
+    expect(r.answers[1]).toMatchObject({ id: "q2", answer: "Code + tests", wasCustom: false });
+  });
+
+  it("option pick does NOT auto-advance (stays on the current question)", async () => {
+    const { deps, waitInputs, sentButtons } = inspectableDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]));
+    const resultP = bridgeCustomDialog(deps);
+    await new Promise((r) => setTimeout(r, 10));
+    // sentButtons[0] shows q1 (current question text).
+    expect(sentButtons[0].text).toContain("What is the deliverable?");
+    waitInputs[0]!("o:0"); // toggle q1 option 0
+    await new Promise((r) => setTimeout(r, 10));
+    // After pick: still on q1 (no auto-advance to q2).
+    expect(sentButtons[1].text).toContain("What is the deliverable?");
+    expect(sentButtons[1].text).not.toContain("What dimensions to analyze?");
+    // Cancel to end the flow cleanly.
+    waitInputs[1]!("cancel");
+    const result = await resultP;
+    expect((result as any).cancelled).toBe(true);
+  });
+
+  it("Submit button only appears after every question is answered; placeholder lists unanswered ids", async () => {
+    const { deps, waitInputs, sentButtons } = inspectableDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]));
+    const resultP = bridgeCustomDialog(deps);
+    await new Promise((r) => setTimeout(r, 10));
+    // Initially both unanswered: no Submit button, placeholder lists both.
+    expect(hasSubmit(sentButtons[0].rows)).toBe(false);
+    expect(sentButtons[0].text).toContain("Still to answer: q1, q2");
+
+    waitInputs[0]!("o:0"); // answer q1
+    await new Promise((r) => setTimeout(r, 10));
+    // q1 answered, q2 still open: still no Submit, placeholder now only q2.
+    expect(hasSubmit(sentButtons[1].rows)).toBe(false);
+    expect(sentButtons[1].text).toContain("Still to answer: q2");
+    expect(sentButtons[1].text).not.toContain("Still to answer: q1, q2");
+
+    waitInputs[1]!("t:1"); // navigate to q2
+    await new Promise((r) => setTimeout(r, 10));
+    waitInputs[2]!("o:1"); // answer q2
+    await new Promise((r) => setTimeout(r, 10));
+    // All answered: no placeholder, Submit button now present.
+    expect(hasSubmit(sentButtons[3].rows)).toBe(true);
+    expect(sentButtons[3].text).not.toContain("Still to answer");
+
+    waitInputs[3]!("submit");
+    const result = await resultP;
+    expect((result as any).cancelled).toBe(false);
+    expect((result as any).answers).toHaveLength(2);
+  });
+});
+
+// ---- createTelegramUiRuntime: interactive modals forward to base (race) ----
+
+describe("createTelegramUiRuntime — interactive modals forward to base (race)", () => {
+  function makeBaseRuntime(base: any) {
+    const transport = {
+      removeInlineKeyboard: vi.fn(async () => undefined),
+      sendText: async () => [{ message_id: 1 }],
+      sendButtons: vi.fn(async () => ({ message_id: 1 })),
+      editText: async () => undefined,
+      editButtons: async () => undefined,
+      answerCallbackQuery: async () => undefined,
+      deleteMessage: async () => undefined,
+      sendDocument: async () => undefined,
+      sendPhoto: async () => undefined,
+      sendChatAction: async () => undefined,
+    } as any;
+    const theme = base.theme ?? { fg: (s: string) => s };
+    const session = { extensionRunner: { getUIContext: () => ({ ...base, theme }) } } as any;
+    const runtime = createTelegramUiRuntime({ getSession: () => session, transport });
+    return { runtime, transport, chatId: 1 };
+  }
+
+  it("confirm: base resolves first → base value returned, telegram keyboard removed, pending cleared", async () => {
+    let resolveBase!: (v: boolean) => void;
+    const baseConfirm = vi.fn(() => new Promise<boolean>((r) => { resolveBase = r; }));
+    const { runtime, transport, chatId } = makeBaseRuntime({ confirm: baseConfirm });
+    const ui = runtime.create(chatId);
+    const resultP = ui.confirm("Save?", "Overwrite file?");
+    // Let the Telegram side send buttons and register a pending flow.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    expect(runtime.hasPendingInput(chatId)).toBe(true);
+    resolveBase(true);
+    expect(await resultP).toBe(true);
+    expect(baseConfirm).toHaveBeenCalledWith("Save?", "Overwrite file?");
+    expect(transport.removeInlineKeyboard).toHaveBeenCalledTimes(1);
+    expect(runtime.hasPendingInput(chatId)).toBe(false);
+  });
+
+  it("select: base resolves first → base value returned, telegram keyboard removed", async () => {
+    let resolveBase!: (v: string | undefined) => void;
+    const baseSelect = vi.fn(() => new Promise<string | undefined>((r) => { resolveBase = r; }));
+    const { runtime, transport, chatId } = makeBaseRuntime({ select: baseSelect });
+    const ui = runtime.create(chatId);
+    const resultP = ui.select("Pick", ["A", "B", "C"]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runtime.hasPendingInput(chatId)).toBe(true);
+    resolveBase("B");
+    expect(await resultP).toBe("B");
+    expect(baseSelect).toHaveBeenCalledWith("Pick", ["A", "B", "C"]);
+    expect(transport.removeInlineKeyboard).toHaveBeenCalledTimes(1);
+  });
+
+  it("custom: base resolves first → base value returned, telegram keyboard removed", async () => {
+    let resolveBase!: (v: any) => void;
+    const baseCustom = vi.fn(() => new Promise<any>((r) => { resolveBase = r; }));
+    const { runtime, transport, chatId } = makeBaseRuntime({ custom: baseCustom });
+    const ui = runtime.create(chatId);
+    const factory = stubFactory(CONFIRM_RENDER);
+    const resultP = ui.custom(factory);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runtime.hasPendingInput(chatId)).toBe(true);
+    const baseResult = { questions: [], answers: [{ id: "confirm", question: "h", answer: "Confirm — create this goal now", wasCustom: false }], cancelled: false };
+    resolveBase(baseResult);
+    expect(await resultP).toBe(baseResult);
+    expect(baseCustom).toHaveBeenCalledWith(factory, undefined);
+    expect(transport.removeInlineKeyboard).toHaveBeenCalledTimes(1);
+    expect(runtime.hasPendingInput(chatId)).toBe(false);
+  });
+
+  it("confirm with no base.confirm → falls back to Telegram-only (no crash); cancel resolves false", async () => {
+    const { runtime, transport, chatId } = makeBaseRuntime({});
+    const ui = runtime.create(chatId);
+    const resultP = ui.confirm("Save?", "Overwrite?");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    expect(runtime.hasPendingInput(chatId)).toBe(true);
+    // Cancel via /stop semantics (latest flow, raw undefined).
+    runtime.resolveInput(chatId, undefined);
+    expect(await resultP).toBe(false);
+    expect(runtime.hasPendingInput(chatId)).toBe(false);
   });
 });

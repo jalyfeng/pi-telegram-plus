@@ -195,28 +195,83 @@ function parseTabQuestion(lines: string[], id: string): ParsedQuestion {
 }
 
 /**
+ * Per-question selection state for the Telegram multi-select flows.
+ *
+ * pi-goal's questionnaire model is single-answer-per-question (answer: string),
+ * but on Telegram we let the user toggle multiple options for one question and
+ * join them into a single string before returning (the pi-goal contract is
+ * unchanged — see the goal contract). `selected` holds toggled option indices;
+ * `wasCustom` + `custom` hold a free-text answer that replaces the selection.
+ */
+interface QState {
+  selected: Set<number>;
+  custom: string | undefined;
+  wasCustom: boolean;
+}
+
+function newState(): QState {
+  return { selected: new Set<number>(), custom: undefined, wasCustom: false };
+}
+
+/** A question is answered if it has at least one toggled option or a custom text. */
+function qAnswered(s: QState): boolean {
+  if (s.wasCustom) return s.custom !== undefined && s.custom.trim().length > 0;
+  return s.selected.size > 0;
+}
+
+/** Build the single-string answer pi-goal expects: joined options, or custom text. */
+function qAnswer(s: QState, options: string[]): string {
+  if (s.wasCustom && s.custom !== undefined) return s.custom.trim();
+  return [...s.selected].sort((a, b) => a - b).map((i) => options[i]).join(" / ");
+}
+
+/** Toggle an option index in a question state, clearing any prior custom answer. */
+function toggleOption(s: QState, idx: number): void {
+  if (s.wasCustom) { s.wasCustom = false; s.custom = undefined; }
+  if (s.selected.has(idx)) s.selected.delete(idx);
+  else s.selected.add(idx);
+}
+
+/** Set a custom (free-text) answer, replacing any prior option selection. */
+function setCustom(s: QState, text: string): void {
+  s.wasCustom = true;
+  s.custom = text;
+  s.selected.clear();
+}
+
+/** Join selected option labels for the Telegram message preview. */
+function selectedPreview(s: QState, options: string[]): string {
+  if (s.wasCustom && s.custom) return `(custom) ${s.custom}`;
+  if (s.selected.size === 0) return "";
+  return [...s.selected].sort((a, b) => a - b).map((i) => options[i]).join(" / ");
+}
+
+const CANCELLED_RESULT = <T,>() => ({ questions: [], answers: [], cancelled: true }) as T;
+
+/**
  * Run a tab-style Telegram flow for a multi-question questionnaire, mirroring
- * the TUI: show the current question + its option buttons, with Prev/Next tab
- * navigation, an optional free-text entry, and a Submit that requires every
- * question answered. Returns a constructed GoalQuestionnaireResult.
+ * the TUI. Per-question options are multi-select toggles (no forced auto-advance
+ * on pick); the user navigates tabs freely with ◀ Tab / Tab ▶. The Submit button
+ * only appears once every question is answered; before that the message shows a
+ * "Still to answer: …" placeholder. Returns a constructed GoalQuestionnaireResult.
  */
 async function runMultiQuestionFlow(
   questions: ParsedQuestion[],
   deps: BridgeCustomDialogDeps,
 ): Promise<{ questions: ParsedQuestion[]; answers: { id: string; question: string; answer: string; wasCustom: boolean }[]; cancelled: boolean }> {
   const n = questions.length;
-  const answers = new Map<number, { answer: string; wasCustom: boolean }>();
+  const states: QState[] = questions.map(() => newState());
   let current = 0;
   let page = 0;
   const PAGE_SIZE = 8;
 
-  const answeredAll = () => questions.every((_, i) => answers.has(i));
-  const unansweredIds = () => questions.filter((_, i) => !answers.has(i)).map((q) => q.id);
+  const answeredAll = () => states.every((s) => qAnswered(s));
+  const unansweredIds = () => questions.filter((_, i) => !qAnswered(states[i])).map((q) => q.id);
 
   const buildText = () => {
     const tabsLine = questions
       .map((q, i) => {
-        const mark = answers.has(i) ? "■" : "□";
+        const mark = qAnswered(states[i]) ? "■" : "□";
         const cur = i === current ? "▸" : " ";
         return `${cur}${mark} ${q.id}`;
       })
@@ -224,9 +279,10 @@ async function runMultiQuestionFlow(
     const q = questions[current];
     if (!q) return `<b>${escapeHtml(tabsLine)}</b>`;
     const ctx = q.context ? `\n${escapeHtml(q.context)}` : "";
-    const a = answers.get(current);
-    const curLine = a ? `\nCurrent: ${a.wasCustom ? "(wrote) " : ""}${escapeHtml(a.answer)}` : "";
-    return `<b>${escapeHtml(tabsLine)}</b>\n\n<b>${escapeHtml(q.question)}</b>${ctx}${curLine}\n<i>Question ${current + 1}/${n}</i>`;
+    const preview = selectedPreview(states[current], q.options);
+    const selLine = preview ? `\nSelected: ${escapeHtml(preview)}` : "";
+    const tail = answeredAll() ? "" : `\n⚠️ Still to answer: ${unansweredIds().join(", ")}`;
+    return `<b>${escapeHtml(tabsLine)}</b>\n\n<b>${escapeHtml(q.question)}</b>${ctx}${selLine}${tail}\n<i>Question ${current + 1}/${n}</i>`;
   };
 
   const buildRows = (): ButtonRow[] => {
@@ -236,8 +292,10 @@ async function runMultiQuestionFlow(
     const pageOpts = q.options.slice(start, start + PAGE_SIZE);
     const rows: ButtonRow[] = pageOpts.map((label, i) => {
       const absIdx = start + i;
+      const sel = states[current].selected.has(absIdx);
+      const mark = sel ? "☑" : "☐";
       const rec = absIdx === q.recommended ? " ★" : "";
-      return [{ text: truncateLabel(`${absIdx + 1}. ${label}${rec}`), value: `o:${absIdx}` }];
+      return [{ text: truncateLabel(`${mark} ${absIdx + 1}. ${label}${rec}`), value: `o:${absIdx}` }];
     });
     const nav: { text: string; value: string }[] = [];
     const pageCount = Math.max(1, Math.ceil(q.options.length / PAGE_SIZE));
@@ -246,7 +304,8 @@ async function runMultiQuestionFlow(
     if (current > 0) nav.push({ text: "◀ Tab", value: `t:${current - 1}` });
     if (current < n - 1) nav.push({ text: "Tab ▶", value: `t:${current + 1}` });
     if (q.allowCustom || q.options.length === 0) nav.push({ text: "✏️ Type", value: "custom" });
-    nav.push({ text: "✓ Submit", value: "submit" });
+    // Submit only appears once every question is answered (terminal-state gate).
+    if (answeredAll()) nav.push({ text: "✓ Submit", value: "submit" });
     nav.push({ text: "Cancel", value: "cancel" });
     rows.push(nav);
     return rows;
@@ -276,13 +335,17 @@ async function runMultiQuestionFlow(
 
     if (value === "submit") {
       if (answeredAll()) {
-        const orderedAnswers = questions.map((q, i) => {
-          const a = answers.get(i)!;
-          return { id: q.id, question: q.question, answer: a.answer, wasCustom: a.wasCustom };
-        });
+        const orderedAnswers = questions.map((q, i) => ({
+          id: q.id,
+          question: q.question,
+          answer: qAnswer(states[i], q.options),
+          wasCustom: states[i].wasCustom,
+        }));
         return { questions, answers: orderedAnswers, cancelled: false };
       }
-      deps.notify(`Unanswered: ${unansweredIds().join(", ")}`, "warning");
+      // No Submit button is rendered when not all answered; reaching here means a
+      // stale/late callback. Re-show the current state.
+      deps.notify(`Still to answer: ${unansweredIds().join(", ")}`, "warning");
       continue;
     }
 
@@ -304,10 +367,9 @@ async function runMultiQuestionFlow(
       }
       if (typed === "cancel" || typed === undefined) return cancelled;
       if (typeof typed === "string" && typed.trim()) {
-        answers.set(current, { answer: typed.trim(), wasCustom: true });
-        current = (current + 1) % n;
-        page = 0;
+        setCustom(states[current], typed.trim());
       }
+      // Stay on the current tab (no forced auto-advance); user navigates manually.
       continue;
     }
 
@@ -315,10 +377,9 @@ async function runMultiQuestionFlow(
       const idx = parseInt(value.slice(2), 10);
       const q = questions[current];
       if (q && idx >= 0 && idx < q.options.length) {
-        answers.set(current, { answer: q.options[idx], wasCustom: false });
-        current = (current + 1) % n;
-        page = 0;
+        toggleOption(states[current], idx);
       }
+      // No auto-advance; stay on the current question.
       continue;
     }
     if (value.startsWith("op:")) {
@@ -437,8 +498,12 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
   }
 
   // ---- Single-question (goal_question) ----
-  // One option per row (Telegram limits rows to 8 buttons), with Prev/Next
-  // pagination when options exceed PAGE_SIZE, mirroring telegram-ui.ts `select`.
+  // Multi-select toggle: tap an option to toggle it (multiple options may be
+  // selected). A ✓ Submit button only appears once at least one option is
+  // selected (or a custom text is provided); before that the message shows a
+  // "Select one or more options, then Submit." placeholder. Free-text entry via
+  // ✏️ Type answer finalizes immediately with wasCustom=true (same as before).
+  // The returned answer is the joined string of selected options.
   if (shape === "single-question") {
     const contentLines = extractContentLines(lines);
     const questionText = contentLines[0] ?? "Question";
@@ -451,28 +516,38 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
       : `<b>${escapeHtml(questionText)}</b>`;
 
     const PAGE_SIZE = 10;
+    const state = newState();
     let page = 0;
     const pageCount = Math.max(1, Math.ceil(options.length / PAGE_SIZE));
 
     while (true) {
       const start = page * PAGE_SIZE;
       const pageOptions = options.slice(start, start + PAGE_SIZE);
-      const rows: ButtonRow[] = pageOptions.map((label, i) =>
-        [{ text: truncateLabel(label), value: `s:${start + i}` }],
-      );
+      const rows: ButtonRow[] = pageOptions.map((label, i) => {
+        const absIdx = start + i;
+        const sel = state.selected.has(absIdx);
+        const mark = sel ? "☑" : "☐";
+        return [{ text: truncateLabel(`${mark} ${label}`), value: `s:${absIdx}` }];
+      });
       const nav: { text: string; value: string }[] = [];
       if (page > 0) nav.push({ text: "◀ Prev", value: `p:${page - 1}` });
       if (page < pageCount - 1) nav.push({ text: "Next ▶", value: `p:${page + 1}` });
       if (allowCustom || options.length === 0) nav.push({ text: "✏️ Type answer", value: "custom" });
+      if (qAnswered(state)) nav.push({ text: "✓ Submit", value: "submit" });
       nav.push({ text: "Cancel", value: "cancel" });
       rows.push(nav);
 
+      const preview = selectedPreview(state, options);
+      const selLine = preview ? `\nSelected: ${escapeHtml(preview)}` : "";
+      const placeholder = options.length > 0 && !qAnswered(state)
+        ? "\nSelect one or more options, then Submit."
+        : "";
       const suffix = pageCount > 1 ? ` (${page + 1}/${pageCount})` : "";
       try {
-        await deps.sendButtons(`${displayText}${suffix}`, rows);
+        await deps.sendButtons(`${displayText}${selLine}${placeholder}${suffix}`, rows);
       } catch {
         deps.notify("⚠️ Failed to send dialog buttons; the agent will continue.", "warning");
-        return { questions: [], answers: [], cancelled: true } as T;
+        return CANCELLED_RESULT<T>();
       }
 
       let value: string | boolean | undefined;
@@ -480,13 +555,13 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
         value = await deps.waitInput(false, false);
       } catch {
         deps.notify("⚠️ Dialog input failed; the agent will continue.", "warning");
-        return { questions: [], answers: [], cancelled: true } as T;
+        return CANCELLED_RESULT<T>();
       }
 
-      if (value === undefined) return { questions: [], answers: [], cancelled: true } as T;
+      if (value === undefined) return CANCELLED_RESULT<T>();
 
       if (typeof value === "string") {
-        if (value === "cancel") return { questions: [], answers: [], cancelled: true } as T;
+        if (value === "cancel") return CANCELLED_RESULT<T>();
         if (value.startsWith("p:")) {
           const next = parseInt(value.slice(2), 10);
           if (next >= 0 && next < pageCount) page = next;
@@ -495,29 +570,38 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
         if (value.startsWith("s:")) {
           const idx = parseInt(value.slice(2), 10);
           if (idx >= 0 && idx < options.length) {
+            toggleOption(state, idx);
+          }
+          continue;
+        }
+        if (value === "submit") {
+          if (qAnswered(state)) {
             return {
               questions: [{ id: "q1", question: questionText, options, allowCustom }],
-              answers: [{ id: "q1", question: questionText, answer: options[idx], wasCustom: false }],
+              answers: [{ id: "q1", question: questionText, answer: qAnswer(state, options), wasCustom: state.wasCustom }],
               cancelled: false,
             } as T;
           }
+          // No Submit button is rendered when nothing is selected; reaching here
+          // means a stale callback. Re-show the current state.
+          continue;
         }
         if (value === "custom") {
-          // Free-text entry phase
+          // Free-text entry phase (finalizes immediately, same as before).
           try {
             await deps.sendButtons(`${displayText}\n\nPlease type your answer:`, [[
               { text: "Cancel", value: "cancel" },
             ]]);
           } catch {
             deps.notify("⚠️ Failed to send dialog buttons; the agent will continue.", "warning");
-            return { questions: [], answers: [], cancelled: true } as T;
+            return CANCELLED_RESULT<T>();
           }
           let textValue: string | boolean | undefined;
           try {
             textValue = await deps.waitInput(true, false);
           } catch {
             deps.notify("⚠️ Dialog input failed; the agent will continue.", "warning");
-            return { questions: [], answers: [], cancelled: true } as T;
+            return CANCELLED_RESULT<T>();
           }
           if (typeof textValue === "string" && textValue.trim()) {
             return {
@@ -526,11 +610,11 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
               cancelled: false,
             } as T;
           }
-          return { questions: [], answers: [], cancelled: true } as T;
+          return CANCELLED_RESULT<T>();
         }
       }
       // Unknown value → cancel
-      return { questions: [], answers: [], cancelled: true } as T;
+      return CANCELLED_RESULT<T>();
     }
   }
 

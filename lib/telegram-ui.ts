@@ -83,6 +83,54 @@ export function createTelegramUiRuntime(deps: {
   /** Track the currently active flow for each chat (for sendOrReplace lookups). */
   const activeFlowByChat = new Map<number, string>();
 
+  /**
+   * Force-resolve a pending Telegram flow with `undefined` (treated as cancel by
+   * every flow), clear its timer/registry entries, and remove the inline keyboard.
+   * Used when the local TUI base wins a modal race so the Telegram side stops
+   * awaiting and its buttons are cleaned up (instead of dangling forever).
+   */
+  const cancelTelegramFlow = (chatId: number, flowId: string, promptMessageId?: number) => {
+    const map = pendingByChat.get(chatId);
+    const pending = map?.get(flowId);
+    if (pending) { clearTimeout(pending.timer); pending.resolve(undefined); }
+    map?.delete(flowId);
+    if (latestFlow.get(chatId) === flowId) latestFlow.delete(chatId);
+    if (latestTextFlow.get(chatId) === flowId) latestTextFlow.delete(chatId);
+    if (map && map.size === 0) pendingByChat.delete(chatId);
+    if (promptMessageId !== undefined) void deps.transport.removeInlineKeyboard(chatId, promptMessageId);
+    deps.onPendingInputChange?.(chatId);
+  };
+
+  /**
+   * Race the local TUI base modal against the Telegram modal. Whichever resolves
+   * first wins the single awaited promise. If the TUI base wins, cancel the
+   * Telegram side (clear its pending flow + remove the inline keyboard). If the
+   * Telegram side wins, the TUI base promise is abandoned — the local TUI dialog
+   * stays rendered until the local user acts (parallel interaction contention is
+   * accepted per the goal contract). If there is no base (headless), only the
+   * Telegram side runs.
+   */
+  const raceTuiAndTelegram = <T,>(
+    basePromise: Promise<T | undefined> | undefined,
+    telegramPromise: Promise<T | undefined>,
+    cancelTelegram: () => void,
+  ): Promise<T | undefined> => {
+    if (!basePromise) return telegramPromise;
+    return new Promise<T | undefined>((resolve, reject) => {
+      let settled = false;
+      basePromise.then(
+        (r) => { if (!settled) { settled = true; cancelTelegram(); resolve(r as T | undefined); } },
+        // Base rejection is swallowed: the TUI side simply loses the race and the
+        // Telegram side continues. This keeps the modal's never-throw invariant.
+        () => { /* base rejected; let telegram continue */ },
+      );
+      telegramPromise.then(
+        (r) => { if (!settled) { settled = true; resolve(r as T | undefined); } },
+        (e) => { if (!settled) { settled = true; reject(e); } },
+      );
+    });
+  };
+
   return {
     create(chatId) {
       // base is the real TUI UI context (create() is called BEFORE runWithTelegramUi
@@ -99,71 +147,114 @@ export function createTelegramUiRuntime(deps: {
       return {
         chatId,
 
-        // ---- Interactive modals: Telegram-only (do NOT forward to base) ----
+        // ---- Interactive modals: forward to TUI base AND bridge to Telegram ----
+        // Each modal races the local TUI base (so the local user sees it and can
+        // interact via keyboard) against the Telegram inline-button flow. The
+        // first side to resolve wins; if the TUI wins, the Telegram side is
+        // cancelled (pending cleared + keyboard removed). If Telegram wins, the
+        // TUI base promise is abandoned (contention accepted).
         notify: notifyFn,
         confirm: async (title, message) => {
           const flowId = beginFlow();
           activeFlowByChat.set(chatId, flowId);
-          const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>\n${escapeHtml(message)}`, [[
-            { text: "Yes", value: cb(flowId, "yes") }, { text: "No", value: cb(flowId, "no") }, { text: "Cancel", value: cb(flowId, "cancel") },
-          ]], flowId);
-          const value = await waitInput(chatId, flowId, false, false, sent.message_id);
+          let promptMessageId: number | undefined;
+          const telegramPromise = (async (): Promise<boolean | undefined> => {
+            const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>\n${escapeHtml(message)}`, [[
+              { text: "Yes", value: cb(flowId, "yes") }, { text: "No", value: cb(flowId, "no") }, { text: "Cancel", value: cb(flowId, "cancel") },
+            ]], flowId);
+            promptMessageId = sent.message_id;
+            const value = await waitInput(chatId, flowId, false, false, sent.message_id);
+            return value === true || value === "yes";
+          })();
+          const basePromise = base?.confirm?.(title, message) as Promise<boolean | undefined> | undefined;
+          const result = await raceTuiAndTelegram<boolean>(basePromise, telegramPromise, () => cancelTelegramFlow(chatId, flowId, promptMessageId));
           activeFlowByChat.delete(chatId);
-          return value === true || value === "yes";
+          return result === true;
         },
         input: async (title, placeholder) => {
           const flowId = beginFlow();
           activeFlowByChat.set(chatId, flowId);
-          const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>${placeholder ? `\n${escapeHtml(placeholder)}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
-          const value = await waitInput(chatId, flowId, false, true, sent.message_id);
+          let promptMessageId: number | undefined;
+          const telegramPromise = (async (): Promise<string | undefined> => {
+            const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>${placeholder ? `\n${escapeHtml(placeholder)}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
+            promptMessageId = sent.message_id;
+            const value = await waitInput(chatId, flowId, false, true, sent.message_id);
+            return typeof value === "string" ? value : undefined;
+          })();
+          const basePromise = base?.input?.(title, placeholder) as Promise<string | undefined> | undefined;
+          const result = await raceTuiAndTelegram<string>(basePromise, telegramPromise, () => cancelTelegramFlow(chatId, flowId, promptMessageId));
           activeFlowByChat.delete(chatId);
-          return typeof value === "string" ? value : undefined;
+          return typeof result === "string" ? result : undefined;
         },
         inputSecret: async (title: string, placeholder?: string) => {
           const flowId = beginFlow();
           activeFlowByChat.set(chatId, flowId);
-          const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>${placeholder ? `\n${escapeHtml(placeholder)}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
-          const value = await waitInput(chatId, flowId, true, true, sent.message_id);
+          let promptMessageId: number | undefined;
+          const telegramPromise = (async (): Promise<string | undefined> => {
+            const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>${placeholder ? `\n${escapeHtml(placeholder)}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
+            promptMessageId = sent.message_id;
+            const value = await waitInput(chatId, flowId, true, true, sent.message_id);
+            return typeof value === "string" ? value : undefined;
+          })();
+          const basePromise = (base as any)?.inputSecret?.(title, placeholder) as Promise<string | undefined> | undefined;
+          const result = await raceTuiAndTelegram<string>(basePromise, telegramPromise, () => cancelTelegramFlow(chatId, flowId, promptMessageId));
           activeFlowByChat.delete(chatId);
-          return typeof value === "string" ? value : undefined;
+          return typeof result === "string" ? result : undefined;
         },
         editor: async (title, prefill) => {
           const flowId = beginFlow();
           activeFlowByChat.set(chatId, flowId);
-          const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>${prefill ? `\n${escapeHtml(prefill)}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
-          const value = await waitInput(chatId, flowId, false, true, sent.message_id);
+          let promptMessageId: number | undefined;
+          const telegramPromise = (async (): Promise<string | undefined> => {
+            const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>${prefill ? `\n${escapeHtml(prefill)}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
+            promptMessageId = sent.message_id;
+            const value = await waitInput(chatId, flowId, false, true, sent.message_id);
+            return typeof value === "string" ? value : undefined;
+          })();
+          const basePromise = base?.editor?.(title, prefill) as Promise<string | undefined> | undefined;
+          const result = await raceTuiAndTelegram<string>(basePromise, telegramPromise, () => cancelTelegramFlow(chatId, flowId, promptMessageId));
           activeFlowByChat.delete(chatId);
-          return typeof value === "string" ? value : undefined;
+          return typeof result === "string" ? result : undefined;
         },
         select: async (title, options) => {
           if (options.length === 0) return undefined;
-          let page = 0; const pageCount = Math.ceil(options.length / PAGE_SIZE); const flowId = beginFlow();
+          const flowId = beginFlow();
           activeFlowByChat.set(chatId, flowId);
-          while (true) {
-            const start = page * PAGE_SIZE; const pageOptions = options.slice(start, start + PAGE_SIZE);
-            const rows = pageOptions.map((label, i) => [{ text: truncateLabel(label), value: cb(flowId, `s:${start + i}`) }]);
-            const nav = [];
-            if (page > 0) nav.push({ text: "◀ Prev", value: cb(flowId, `p:${page - 1}`) });
-            if (page < pageCount - 1) nav.push({ text: "Next ▶", value: cb(flowId, `p:${page + 1}`) });
-            nav.push({ text: "Cancel", value: cb(flowId, "cancel") }); rows.push(nav);
-            const suffix = pageCount > 1 ? ` (${page + 1}/${pageCount})` : "";
-            const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title + suffix)}</b>`, rows, flowId);
-            const value = await waitInput(chatId, flowId, false, false, sent.message_id);
-            if (typeof value !== "string") { activeFlowByChat.delete(chatId); return undefined; }
-            if (value === "cancel") { activeFlowByChat.delete(chatId); return undefined; }
-            if (value.startsWith("p:")) { const next = parseInt(value.slice(2), 10); if (next >= 0 && next < pageCount) page = next; continue; }
-            if (value.startsWith("s:")) { const idx = parseInt(value.slice(2), 10); activeFlowByChat.delete(chatId); return idx >= 0 && idx < options.length ? options[idx] : undefined; }
-            if (options.includes(value)) { activeFlowByChat.delete(chatId); return value; }
-            activeFlowByChat.delete(chatId);
-            return undefined;
-          }
+          let promptMessageId: number | undefined;
+          const telegramPromise = (async (): Promise<string | undefined> => {
+            let page = 0; const pageCount = Math.ceil(options.length / PAGE_SIZE);
+            while (true) {
+              const start = page * PAGE_SIZE; const pageOptions = options.slice(start, start + PAGE_SIZE);
+              const rows = pageOptions.map((label, i) => [{ text: truncateLabel(label), value: cb(flowId, `s:${start + i}`) }]);
+              const nav = [];
+              if (page > 0) nav.push({ text: "◀ Prev", value: cb(flowId, `p:${page - 1}`) });
+              if (page < pageCount - 1) nav.push({ text: "Next ▶", value: cb(flowId, `p:${page + 1}`) });
+              nav.push({ text: "Cancel", value: cb(flowId, "cancel") }); rows.push(nav);
+              const suffix = pageCount > 1 ? ` (${page + 1}/${pageCount})` : "";
+              const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title + suffix)}</b>`, rows, flowId);
+              promptMessageId = sent.message_id;
+              const value = await waitInput(chatId, flowId, false, false, sent.message_id);
+              if (typeof value !== "string") return undefined;
+              if (value === "cancel") return undefined;
+              if (value.startsWith("p:")) { const next = parseInt(value.slice(2), 10); if (next >= 0 && next < pageCount) page = next; continue; }
+              if (value.startsWith("s:")) { const idx = parseInt(value.slice(2), 10); return idx >= 0 && idx < options.length ? options[idx] : undefined; }
+              if (options.includes(value)) return value;
+              return undefined;
+            }
+          })();
+          const basePromise = base?.select?.(title, options) as Promise<string | undefined> | undefined;
+          const result = await raceTuiAndTelegram<string>(basePromise, telegramPromise, () => cancelTelegramFlow(chatId, flowId, promptMessageId));
+          activeFlowByChat.delete(chatId);
+          return typeof result === "string" ? result : undefined;
         },
-        // custom: bridge pi-goal dialogs to Telegram buttons (Layer B). Does NOT forward to base.
+        // custom: bridge pi-goal dialogs to Telegram buttons AND forward to the TUI
+        // base so the local TUI renders the same dialog and is interactive. The two
+        // sides race; whichever resolves first wins (see raceTuiAndTelegram).
         custom: async <T>(factory: (tui: any, theme: any, keybindings: any, done: (result: T) => void) => any | Promise<any>, _options?: any): Promise<T> => {
           const flowId = beginFlow();
           activeFlowByChat.set(chatId, flowId);
           let promptMessageId: number | undefined;
-          const result = await bridgeCustomDialog<T>({
+          const telegramPromise = bridgeCustomDialog<T>({
             factory,
             theme: base?.theme,
             width: 80,
@@ -177,8 +268,12 @@ export function createTelegramUiRuntime(deps: {
               waitInput(chatId, flowId, sensitive, acceptsText, promptMessageId),
             notify: notifyFn,
           });
+          const basePromise = base?.custom?.(factory as any, _options as any) as Promise<T | undefined> | undefined;
+          const result = await raceTuiAndTelegram<T>(basePromise, telegramPromise, () => cancelTelegramFlow(chatId, flowId, promptMessageId));
           activeFlowByChat.delete(chatId);
-          return result as T;
+          // pi-goal accesses result.cancelled/answers without an undefined-guard, so
+          // never resolve undefined: fall back to a structured cancelled result.
+          return (result ?? ({ questions: [], answers: [], cancelled: true } as unknown as T)) as T;
         },
 
         // ---- Persistent/stateful UI: forward to TUI base (keeps TUI accurate) ----
