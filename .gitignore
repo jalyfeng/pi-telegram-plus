@@ -47,3 +47,6 @@ npm-debug.log*
 *.tgz
 *.d.ts
 
+
+# Review-loop artifacts (pi-subagents)
+review/

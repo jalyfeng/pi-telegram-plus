@@ -56,6 +56,21 @@ Full interactive UI components built on inline keyboards:
 - **InputSecret** — same as Input, but the prompt message is auto-deleted after reply to protect sensitive data
 - **Select** — paginated option list with Prev/Next navigation
 - **Editor** — multi-line text input prompt
+- **Custom (third-party)** — `ctx.ui.custom(factory)` dialogs from extensions like [`@capyup/pi-goal`](https://www.npmjs.com/package/@capyup/pi-goal) are bridged to inline buttons. See **Third-party Dialog Support** below.
+
+### 🧩 第三方对话框支持 / Third-party Dialog Support
+
+Third-party extensions that use `ctx.ui.custom(factory)` (such as [`@capyup/pi-goal`](https://www.npmjs.com/package/@capyup/pi-goal))
+are bridged to Telegram inline buttons so remote turns can interact with them:
+
+| Scenario | Telegram behavior |
+|----------|-------------------|
+| **pi-goal draft confirmation** (`propose_goal_draft` → `showProposalDialog`) | Shows ✅ Confirm / 💬 Continue chatting buttons. Confirm creates the goal; Continue lets the agent keep refining; `/stop` or timeout cancels. |
+| **pi-goal `goal_question`** (single question) | Shows the question text, option buttons (paginated if needed), a ✏️ Type answer button for free-text entry, and Cancel. Selecting an option or typing an answer resolves the question. |
+| **pi-goal `goal_questionnaire`** (multi-question) | Not fully supported yet — degrades to `cancelled: true` with a notification. The agent will ask questions one by one in chat instead. |
+| **Unknown `custom()` components** | Auto-dismissed with a ⚠️ notification and a `cancelled` result, so the agent continues gracefully (never hangs or throws). |
+
+**Telegram turns do not affect the local TUI.** Interactive modals (confirm, select, input, editor, custom) go to Telegram only — the TUI never shows a modal or loses keyboard focus from a remote turn. Persistent/stateful UI (goal widget, status line, working indicator, footer/header) is forwarded to the TUI base so the local TUI always shows accurate state. Editor operations (paste, set/get text) are no-ops during Telegram turns, so a remote turn never touches the local editor.
 
 ### 🎨 Message Rendering
 - **Markdown → Telegram HTML** — Full conversion via `marked` (tables, code blocks, blockquotes, lists, inline formatting)
@@ -80,15 +95,29 @@ Full interactive UI components built on inline keyboards:
 
 ### ⚙️ Telegram-Specific Commands
 
+**Global scope** (a single bot token shared across all workspaces):
+
 | Command | Description |
 |---------|-------------|
-| `/tg-setup` | Configure Telegram bot token (first-time setup) |
-| `/tg-connect` | Enable / start Telegram connection |
-| `/tg-disconnect` | Disable / stop connection (keeps token) |
+| `/tg-global-setup` | Configure the global bot token and connect (first-time setup) |
+| `/tg-global-connect` | Enable / start the global bot connection |
+| `/tg-global-disconnect` | Disable / stop the global bot (keeps the token) |
+
+**Workspace scope** (per-directory bot token; overrides global when bound):
+
+| Command | Description |
+|---------|-------------|
+| `/tg-bind-cwd` | Bind the current directory to its own bot token |
+| `/tg-cwd-connect` | Enable the bot for the current directory |
+| `/tg-cwd-disconnect` | Disable the bot for the current directory |
+| `/tg-unbind-cwd` | Remove the current directory's bot binding |
+| `/tg-list` | List all bot bindings (global + workspace) |
+
+**Shared:**
+
+| Command | Description |
+|---------|-------------|
 | `/tg-config` | Configure rendering levels and message mode |
-| `/tg-bind-cwd` | Bind a workspace directory to a separate bot token |
-| `/tg-unbind-cwd` | Remove workspace bot binding |
-| `/tg-list` | List all Telegram bot bindings |
 
 ### 🔧 Utility Commands
 
@@ -136,7 +165,7 @@ npm install
 pi packages add .
 ```
 
-3. **Start pi and configure your Telegram bot:**
+Then start pi and configure your bot:
 
 ```bash
 pi
@@ -145,7 +174,7 @@ pi
 Inside pi, run:
 
 ```
-/tg-setup
+/tg-global-setup
 ```
 
 Paste your bot token when prompted. The bot will connect automatically.
@@ -164,7 +193,7 @@ You can bind different bot tokens to different directories:
 /tg-bind-cwd /path/to/project
 ```
 
-This creates a workspace-specific binding in `~/.pi/agent/tg.json`. Workspace bindings take priority over the global configuration.
+This creates a workspace-specific binding in `~/.pi/agent/tg.json`. Workspace bindings take priority over the global configuration. After binding, use `/tg-cwd-connect` / `/tg-cwd-disconnect` to control it and `/tg-unbind-cwd` to remove it.
 
 ### Rendering & Mode Settings
 
@@ -226,7 +255,8 @@ Or directly:
 - **`lib/telegram-api.ts`** — Raw Telegram Bot API client with retry logic and file upload/download.
 - **`lib/polling.ts`** — Long polling loop with multi-instance file lock. Re-reads config while holding the lock to prevent offset regressions.
 - **`lib/controller.ts`** — Message routing: slash commands, text prompts, media attachments, callback queries.
-- **`lib/telegram-ui.ts`** — Interactive UI layer: notify, confirm, input, select (pagination), editor.
+- **`lib/telegram-ui.ts`** — Interactive UI layer: notify, confirm, input, select (pagination), editor, and a `custom()` bridge. Selectively forwards persistent/stateful UI to the TUI base so remote turns never disrupt the local TUI.
+- **`lib/custom-dialogs.ts`** — Bridges third-party `ctx.ui.custom(factory)` dialogs (e.g. pi-goal `propose_goal_draft`, `goal_question`) to Telegram inline buttons via render-text shape detection, with a safe `cancelled` fallback for unknown shapes.
 - **`lib/renderer.ts`** — Hooks into agent lifecycle events (`agent_start`, `tool_execution_*`, `message_end`) and streams rendered output to Telegram.
 - **`lib/markdown.ts`** — Custom `marked` renderer that converts Markdown to Telegram-compatible HTML.
 - **`lib/config.ts`** — Configuration persistence with file locking for concurrent-safe writes. Supports global + workspace scopes.
@@ -256,7 +286,8 @@ pi-telegram-plus/
     ├── telegram-api.ts          # Telegram Bot HTTP API client
     ├── polling.ts               # Long polling with multi-instance lock
     ├── controller.ts            # Message router & prompt executor
-    ├── telegram-ui.ts           # Interactive UI (notify, confirm, input, select)
+    ├── telegram-ui.ts           # Interactive UI (notify, confirm, input, select, editor, custom bridge)
+    ├── custom-dialogs.ts        # Bridge third-party custom() dialogs to Telegram buttons
     ├── renderer.ts              # Agent event → Telegram output renderer
     ├── markdown.ts              # Markdown → Telegram HTML converter
     ├── html.ts                  # HTML escaping utilities
@@ -278,15 +309,19 @@ pi-telegram-plus/
     │   ├── lifecycle.ts         # /compact, /reload, /stop, /quit
     │   ├── settings.ts          # /settings menu
     │   ├── tg-config.ts         # /tg-config
-    │   └── telegram-commands.ts # /tg-setup, /tg-connect, /tg-disconnect, /tg-bind-cwd, /tg-list
+    │   └── telegram-commands.ts # /tg-global-*, /tg-bind-cwd, /tg-cwd-*, /tg-unbind-cwd, /tg-list
     └── __tests__/
         ├── attachments.test.ts
         ├── callback-protocol.test.ts
         ├── config.test.ts
         ├── controller.test.ts
         ├── html.test.ts
+        ├── info-status.test.ts
         ├── markdown.test.ts
+        ├── renderer-helpers.test.ts
         ├── status.test.ts
+        ├── telegram-api.test.ts
+        ├── telegram-ui-custom.test.ts
         └── text-split.test.ts
 ```
 

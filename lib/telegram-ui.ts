@@ -1,5 +1,6 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { encodeUiCallback } from "./callback-protocol.ts";
+import { bridgeCustomDialog } from "./custom-dialogs.ts";
 import { escapeHtml } from "./html.ts";
 import type { CapturedAgentSession, PendingInputResolver, TelegramTransport } from "./types.ts";
 
@@ -84,14 +85,22 @@ export function createTelegramUiRuntime(deps: {
 
   return {
     create(chatId) {
-      const base = deps.getSession()?.extensionRunner.getUIContext?.();
+      // base is the real TUI UI context (create() is called BEFORE runWithTelegramUi
+      // swaps the UI context, so this is the genuine TUI context). We forward persistent
+      // /stateful methods to base so the TUI stays accurate even when the trigger came
+      // from Telegram. Interactive modals stay Telegram-only; editor ops are no-ops.
+      const base = deps.getSession()?.extensionRunner.getUIContext?.() as ExtensionUIContext | undefined;
+
+      const notifyFn = (message: string, level: "info" | "warning" | "error" = "info") => {
+        const fid = activeFlowByChat.get(chatId);
+        void sendOrReplaceText(chatId, `<b>${escapeHtml(String(level))}</b>\n${escapeHtml(message)}`, fid);
+      };
+
       return {
-        ...(base as ExtensionUIContext),
         chatId,
-        notify: (message, level = "info") => {
-          const flowId = activeFlowByChat.get(chatId);
-          void sendOrReplaceText(chatId, `<b>${escapeHtml(String(level))}</b>\n${escapeHtml(message)}`, flowId);
-        },
+
+        // ---- Interactive modals: Telegram-only (do NOT forward to base) ----
+        notify: notifyFn,
         confirm: async (title, message) => {
           const flowId = beginFlow();
           activeFlowByChat.set(chatId, flowId);
@@ -149,6 +158,59 @@ export function createTelegramUiRuntime(deps: {
             return undefined;
           }
         },
+        // custom: bridge pi-goal dialogs to Telegram buttons (Layer B). Does NOT forward to base.
+        custom: async <T>(factory: (tui: any, theme: any, keybindings: any, done: (result: T) => void) => any | Promise<any>, _options?: any): Promise<T> => {
+          const flowId = beginFlow();
+          activeFlowByChat.set(chatId, flowId);
+          let promptMessageId: number | undefined;
+          const result = await bridgeCustomDialog<T>({
+            factory,
+            theme: base?.theme,
+            width: 80,
+            sendButtons: async (text, rows) => {
+              const encodedRows = rows.map((row) => row.map((btn) => ({ text: btn.text, value: cb(flowId, btn.value) })));
+              const sent = await sendOrReplaceButtons(chatId, text, encodedRows, flowId);
+              promptMessageId = sent.message_id;
+              return sent;
+            },
+            waitInput: (acceptsText = false, sensitive = false) =>
+              waitInput(chatId, flowId, sensitive, acceptsText, promptMessageId),
+            notify: notifyFn,
+          });
+          activeFlowByChat.delete(chatId);
+          return result as T;
+        },
+
+        // ---- Persistent/stateful UI: forward to TUI base (keeps TUI accurate) ----
+        setStatus: (key: string, text: string | undefined) => { base?.setStatus?.(key, text); },
+        setWorkingMessage: (message?: string) => { base?.setWorkingMessage?.(message); },
+        setWorkingVisible: (visible: boolean) => { base?.setWorkingVisible?.(visible); },
+        setWorkingIndicator: (options?: { frames?: string[]; intervalMs?: number }) => { base?.setWorkingIndicator?.(options); },
+        setHiddenThinkingLabel: (label?: string) => { base?.setHiddenThinkingLabel?.(label); },
+        setWidget: ((key: string, content: unknown, options?: unknown) => { base?.setWidget?.(key as string, content as any, options as any); }) as ExtensionUIContext["setWidget"],
+        setFooter: (factory: unknown) => { base?.setFooter?.(factory as any); },
+        setHeader: (factory: unknown) => { base?.setHeader?.(factory as any); },
+        setTitle: (title: string) => { base?.setTitle?.(title); },
+        setToolsExpanded: (expanded: boolean) => { base?.setToolsExpanded?.(expanded); },
+        getToolsExpanded: () => base?.getToolsExpanded?.() ?? false,
+        setTheme: (theme: string | unknown) => base?.setTheme?.(theme as any) ?? { success: false, error: "UI not available" },
+        getTheme: (name: string) => base?.getTheme?.(name),
+        getAllThemes: () => base?.getAllThemes?.() ?? [],
+
+        // ---- Editor/terminal: no-ops (remote turns must not touch local editor) ----
+        onTerminalInput: () => () => {},
+        pasteToEditor: () => {},
+        setEditorText: () => {},
+        getEditorText: () => "",
+        setEditorComponent: () => {},
+        getEditorComponent: () => undefined,
+        addAutocompleteProvider: () => {},
+
+        // ---- Theme getter: delegate to base (factory needs theme.fg/bg) ----
+        // base is always defined when create() runs (create() is called before the
+        // runWithTelegramUi UI swap, per plan §2.1). The non-null assertion makes
+        // this precondition explicit instead of hiding it behind a cast.
+        get theme() { return base!.theme; },
       };
     },
     resolveInput(chatId, raw, replyToMessageId, fromCallback = false) {
