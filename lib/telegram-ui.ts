@@ -116,6 +116,7 @@ export function createTelegramUiRuntime(deps: {
           ]], flowId);
           const value = await waitInput(chatId, flowId, false, false, sent.message_id);
           activeFlowByChat.delete(chatId);
+          void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
           return value === true || value === "yes";
         },
         input: async (title, placeholder) => {
@@ -124,6 +125,7 @@ export function createTelegramUiRuntime(deps: {
           const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>${placeholder ? `\n${escapeHtml(placeholder)}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
           const value = await waitInput(chatId, flowId, false, true, sent.message_id);
           activeFlowByChat.delete(chatId);
+          void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
           return typeof value === "string" ? value : undefined;
         },
         inputSecret: async (title: string, placeholder?: string) => {
@@ -132,6 +134,7 @@ export function createTelegramUiRuntime(deps: {
           const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>${placeholder ? `\n${escapeHtml(placeholder)}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
           const value = await waitInput(chatId, flowId, true, true, sent.message_id);
           activeFlowByChat.delete(chatId);
+          void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
           return typeof value === "string" ? value : undefined;
         },
         editor: async (title, prefill) => {
@@ -140,6 +143,7 @@ export function createTelegramUiRuntime(deps: {
           const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title)}</b>${prefill ? `\n${escapeHtml(prefill)}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
           const value = await waitInput(chatId, flowId, false, true, sent.message_id);
           activeFlowByChat.delete(chatId);
+          void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
           return typeof value === "string" ? value : undefined;
         },
         select: async (title, options) => {
@@ -156,12 +160,13 @@ export function createTelegramUiRuntime(deps: {
             const suffix = pageCount > 1 ? ` (${page + 1}/${pageCount})` : "";
             const sent = await sendOrReplaceButtons(chatId, `<b>${escapeHtml(title + suffix)}</b>`, rows, flowId);
             const value = await waitInput(chatId, flowId, false, false, sent.message_id);
-            if (typeof value !== "string") { activeFlowByChat.delete(chatId); return undefined; }
-            if (value === "cancel") { activeFlowByChat.delete(chatId); return undefined; }
+            if (typeof value !== "string") { activeFlowByChat.delete(chatId); void deps.transport.removeInlineKeyboard(chatId, sent.message_id); return undefined; }
+            if (value === "cancel") { activeFlowByChat.delete(chatId); void deps.transport.removeInlineKeyboard(chatId, sent.message_id); return undefined; }
             if (value.startsWith("p:")) { const next = parseInt(value.slice(2), 10); if (next >= 0 && next < pageCount) page = next; continue; }
-            if (value.startsWith("s:")) { const idx = parseInt(value.slice(2), 10); activeFlowByChat.delete(chatId); return idx >= 0 && idx < options.length ? options[idx] : undefined; }
-            if (options.includes(value)) { activeFlowByChat.delete(chatId); return value; }
+            if (value.startsWith("s:")) { const idx = parseInt(value.slice(2), 10); activeFlowByChat.delete(chatId); void deps.transport.removeInlineKeyboard(chatId, sent.message_id); return idx >= 0 && idx < options.length ? options[idx] : undefined; }
+            if (options.includes(value)) { activeFlowByChat.delete(chatId); void deps.transport.removeInlineKeyboard(chatId, sent.message_id); return value; }
             activeFlowByChat.delete(chatId);
+            void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
             return undefined;
           }
         },
@@ -185,6 +190,7 @@ export function createTelegramUiRuntime(deps: {
             waitInput: (acceptsText = false, sensitive = false) =>
               waitInput(chatId, flowId, sensitive, acceptsText, promptMessageId),
             notify: notifyFn,
+            removeKeyboard: async () => { if (promptMessageId) await deps.transport.removeInlineKeyboard(chatId, promptMessageId); },
           });
           activeFlowByChat.delete(chatId);
           // pi-goal accesses result.cancelled/answers without an undefined-guard, so

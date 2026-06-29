@@ -36,6 +36,8 @@ export interface BridgeCustomDialogDeps {
   waitInput: (acceptsText?: boolean, sensitive?: boolean) => Promise<string | boolean | undefined>;
   /** Send a notification to the Telegram chat. */
   notify: (message: string, level?: "info" | "warning" | "error") => void;
+  /** Remove the inline keyboard from the current prompt message (terminal cleanup). Optional; defaults to no-op. */
+  removeKeyboard?: () => Promise<void>;
 }
 
 // ---- pi-goal literal strings (from showProposalDialog) ----
@@ -232,6 +234,14 @@ function toggleOption(s: QState, idx: number): void {
   else s.selected.add(idx);
 }
 
+/** Single-select: set exactly one option as the answer, replacing any prior selection/custom. */
+function selectOption(s: QState, idx: number): void {
+  s.wasCustom = false;
+  s.custom = undefined;
+  s.selected.clear();
+  s.selected.add(idx);
+}
+
 /** Set a custom (free-text) answer, replacing any prior option selection. */
 function setCustom(s: QState, text: string): void {
   s.wasCustom = true;
@@ -264,9 +274,22 @@ async function runMultiQuestionFlow(
   let current = 0;
   let page = 0;
   const PAGE_SIZE = 8;
+  const removeKeyboard = deps.removeKeyboard ?? (async () => {});
 
   const answeredAll = () => states.every((s) => qAnswered(s));
   const unansweredIds = () => questions.filter((_, i) => !qAnswered(states[i])).map((q) => q.id);
+
+  // Advance to the next unanswered question after the current one is answered.
+  // Searches forward first, then wraps to any earlier unanswered tab. If every
+  // question is answered, stays on the current tab so ✓ Submit becomes visible.
+  const advanceAfterAnswer = () => {
+    let next = -1;
+    for (let i = current + 1; i < n; i++) if (!qAnswered(states[i])) { next = i; break; }
+    if (next === -1) {
+      for (let i = 0; i < current; i++) if (!qAnswered(states[i])) { next = i; break; }
+    }
+    if (next !== -1) { current = next; page = 0; }
+  };
 
   const buildText = () => {
     const tabsLine = questions
@@ -330,11 +353,12 @@ async function runMultiQuestionFlow(
       return cancelled;
     }
 
-    if (typeof value !== "string") return cancelled; // undefined (timeout/stop) or unexpected
-    if (value === "cancel") return cancelled;
+    if (typeof value !== "string") { void removeKeyboard(); return cancelled; } // undefined (timeout/stop) or unexpected
+    if (value === "cancel") { void removeKeyboard(); return cancelled; }
 
     if (value === "submit") {
       if (answeredAll()) {
+        void removeKeyboard();
         const orderedAnswers = questions.map((q, i) => ({
           id: q.id,
           question: q.question,
@@ -357,19 +381,23 @@ async function runMultiQuestionFlow(
         ]]);
       } catch {
         deps.notify("⚠️ Failed to send dialog buttons; the agent will continue.", "warning");
+        void removeKeyboard();
         return cancelled;
       }
       let typed: string | boolean | undefined;
       try {
         typed = await deps.waitInput(true, false);
       } catch {
+        void removeKeyboard();
         return cancelled;
       }
-      if (typed === "cancel" || typed === undefined) return cancelled;
+      if (typed === "cancel" || typed === undefined) { void removeKeyboard(); return cancelled; }
       if (typeof typed === "string" && typed.trim()) {
         setCustom(states[current], typed.trim());
+        // Auto-advance to the next unanswered question, mirroring the option-pick path.
+        advanceAfterAnswer();
       }
-      // Stay on the current tab (no forced auto-advance); user navigates manually.
+      // Stay on the (now advanced) tab; user navigates manually with ◀ Tab / Tab ▶.
       continue;
     }
 
@@ -377,9 +405,13 @@ async function runMultiQuestionFlow(
       const idx = parseInt(value.slice(2), 10);
       const q = questions[current];
       if (q && idx >= 0 && idx < q.options.length) {
-        toggleOption(states[current], idx);
+        // Single-select (pi-goal questionnaire contract: one answer per question):
+        // tapping an option sets it as THE answer (replacing any prior pick), then
+        // auto-advances to the next unanswered question so the user flows Q1 → Q2 → …
+        // without manually pressing Tab ▶.
+        selectOption(states[current], idx);
+        advanceAfterAnswer();
       }
-      // No auto-advance; stay on the current question.
       continue;
     }
     if (value.startsWith("op:")) {
@@ -393,6 +425,7 @@ async function runMultiQuestionFlow(
     }
 
     // Unknown value → cancel.
+    void removeKeyboard();
     return cancelled;
   }
 }
@@ -444,6 +477,7 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
   // ---- Confirmation dialog (pi-goal showProposalDialog) ----
   if (shape === "confirmation") {
     const header = extractConfirmationHeader(text);
+    const removeKeyboard = deps.removeKeyboard ?? (async () => {});
     try {
       await deps.sendButtons(`<b>${escapeHtml(header)}</b>`, [[
         { text: "✅ Confirm", value: "confirm" },
@@ -452,12 +486,15 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
       const value = await deps.waitInput(false, false);
 
       if (value === "confirm") {
+        void removeKeyboard();
         return { questions: [], answers: [{ id: "confirm", question: header, answer: CONFIRM_ANSWER, wasCustom: false }], cancelled: false } as T;
       }
       if (value === "continue") {
+        void removeKeyboard();
         return { questions: [], answers: [{ id: "confirm", question: header, answer: CONTINUE_ANSWER, wasCustom: false }], cancelled: false } as T;
       }
       // /stop or timeout → cancel
+      void removeKeyboard();
       return { questions: [], answers: [], cancelled: true } as T;
     } catch {
       deps.notify("⚠️ Failed to send dialog buttons; the agent will continue.", "warning");
@@ -510,6 +547,11 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
     const contextText = contentLines.slice(1).join("\n");
     const options = extractOptions(lines);
     const allowCustom = hasCustomOption(lines);
+    const removeKeyboard = deps.removeKeyboard ?? (async () => {});
+    // Terminal cleanup helper: strip the inline keyboard so the user can't tap
+    // stale buttons after the flow resolves. Continuation callbacks (p:/s:) edit
+    // the same message in place and must NOT reach these returns.
+    const cancel = (): T => { void removeKeyboard(); return CANCELLED_RESULT<T>(); };
 
     const displayText = contextText
       ? `<b>${escapeHtml(questionText)}</b>\n${escapeHtml(contextText)}`
@@ -547,7 +589,7 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
         await deps.sendButtons(`${displayText}${selLine}${placeholder}${suffix}`, rows);
       } catch {
         deps.notify("⚠️ Failed to send dialog buttons; the agent will continue.", "warning");
-        return CANCELLED_RESULT<T>();
+        return cancel();
       }
 
       let value: string | boolean | undefined;
@@ -555,13 +597,13 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
         value = await deps.waitInput(false, false);
       } catch {
         deps.notify("⚠️ Dialog input failed; the agent will continue.", "warning");
-        return CANCELLED_RESULT<T>();
+        return cancel();
       }
 
-      if (value === undefined) return CANCELLED_RESULT<T>();
+      if (value === undefined) return cancel();
 
       if (typeof value === "string") {
-        if (value === "cancel") return CANCELLED_RESULT<T>();
+        if (value === "cancel") return cancel();
         if (value.startsWith("p:")) {
           const next = parseInt(value.slice(2), 10);
           if (next >= 0 && next < pageCount) page = next;
@@ -576,6 +618,7 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
         }
         if (value === "submit") {
           if (qAnswered(state)) {
+            void removeKeyboard();
             return {
               questions: [{ id: "q1", question: questionText, options, allowCustom }],
               answers: [{ id: "q1", question: questionText, answer: qAnswer(state, options), wasCustom: state.wasCustom }],
@@ -594,27 +637,28 @@ export async function bridgeCustomDialog<T>(deps: BridgeCustomDialogDeps): Promi
             ]]);
           } catch {
             deps.notify("⚠️ Failed to send dialog buttons; the agent will continue.", "warning");
-            return CANCELLED_RESULT<T>();
+            return cancel();
           }
           let textValue: string | boolean | undefined;
           try {
             textValue = await deps.waitInput(true, false);
           } catch {
             deps.notify("⚠️ Dialog input failed; the agent will continue.", "warning");
-            return CANCELLED_RESULT<T>();
+            return cancel();
           }
           if (typeof textValue === "string" && textValue.trim()) {
+            void removeKeyboard();
             return {
               questions: [{ id: "q1", question: questionText, options, allowCustom }],
               answers: [{ id: "q1", question: questionText, answer: textValue.trim(), wasCustom: true }],
               cancelled: false,
             } as T;
           }
-          return CANCELLED_RESULT<T>();
+          return cancel();
         }
       }
       // Unknown value → cancel
-      return CANCELLED_RESULT<T>();
+      return cancel();
     }
   }
 

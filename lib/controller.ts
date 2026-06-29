@@ -330,15 +330,17 @@ export function createTelegramController(deps: {
         const result = deps.ui.resolveInput(chatId, uiValue, query.message?.message_id, true);
         if (!result.handled) {
           await deps.transport.sendText(chatId, "This prompt is no longer active.");
-        } else {
-          // Remove inline keyboards only for terminal UI callbacks. Select
-          // pagination callbacks continue the same flow and immediately edit the
-          // same message with the next page of buttons; removing the keyboard here
-          // can race after that edit and strip the new page buttons.
-          const isPaginationCallback = /^f:[^:]+:p:\d+$/.test(uiValue);
-          const promptMessageId = result.promptMessageId ?? query.message?.message_id;
-          if (!isPaginationCallback && promptMessageId) void deps.transport.removeInlineKeyboard(chatId, promptMessageId);
         }
+        // Keyboard cleanup is OWNED by each UI flow (confirm/input/select and the
+        // custom-dialog bridge): each calls removeInlineKeyboard on its own prompt
+        // message right before resolving a terminal value (yes/no/cancel/submit/...).
+        // The controller must NOT speculatively strip keyboards here. Doing so races
+        // with continuation flows (multi-question tab navigation, single-question
+        // option toggles, select pagination) that edit the SAME message in place:
+        // removeInlineKeyboard and editButtons hit Telegram concurrently on one
+        // message, and when the strip lands last the message is left with no
+        // buttons — the "answered Q1 but Q2 never appeared" bug. Terminal flows
+        // clean up themselves, so no controller-side strip is needed.
         return;
       }
 

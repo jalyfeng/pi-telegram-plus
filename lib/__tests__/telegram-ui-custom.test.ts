@@ -912,7 +912,7 @@ describe("bridgeCustomDialog — transport error degrade", () => {
 });
 // ---- bridgeCustomDialog: multi-question multi-select + Submit gating ----
 
-describe("bridgeCustomDialog — multi-question multi-select & Submit gating", () => {
+describe("bridgeCustomDialog — multi-question single-select & Submit gating", () => {
   /** Build deps with a waitInputs queue and captured sentButtons for inspection. */
   function inspectableDeps(factory: unknown) {
     const waitInputs: Array<(v: string | boolean | undefined) => void> = [];
@@ -930,37 +930,39 @@ describe("bridgeCustomDialog — multi-question multi-select & Submit gating", (
 
   const hasSubmit = (rows: ButtonRow[]) => rows.some((row) => row.some((b) => b.value === "submit"));
 
-  it("toggles multiple options within one question → joined string answer", async () => {
+  it("single-select: picking another option replaces the prior pick (no join)", async () => {
     const { deps, waitInputs } = inspectableDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]));
     const resultP = bridgeCustomDialog(deps);
     await new Promise((r) => setTimeout(r, 10));
-    waitInputs[0]!("o:0"); // q1: toggle Report only
+    waitInputs[0]!("o:0"); // q1: pick Report only → auto-advance to q2
     await new Promise((r) => setTimeout(r, 10));
-    waitInputs[1]!("o:1"); // q1: toggle Report + fix (multi-select within q1)
+    waitInputs[1]!("t:0"); // go back to q1
     await new Promise((r) => setTimeout(r, 10));
-    waitInputs[2]!("t:1"); // navigate to q2
+    waitInputs[2]!("o:1"); // q1: change to Report + fix (replaces prior pick)
     await new Promise((r) => setTimeout(r, 10));
-    waitInputs[3]!("o:1"); // q2: toggle Code + tests
+    // Auto-advanced back to q2 after re-answering q1; answer q2.
+    waitInputs[3]!("o:1"); // q2: pick Code + tests
     await new Promise((r) => setTimeout(r, 10));
     waitInputs[4]!("submit");
     const result = await resultP;
     const r = result as any;
     expect(r.cancelled).toBe(false);
-    expect(r.answers[0]).toMatchObject({ id: "q1", answer: "Report only / Report + fix", wasCustom: false });
+    // Single answer per question — last pick wins, NOT a joined string.
+    expect(r.answers[0]).toMatchObject({ id: "q1", answer: "Report + fix", wasCustom: false });
     expect(r.answers[1]).toMatchObject({ id: "q2", answer: "Code + tests", wasCustom: false });
   });
 
-  it("option pick does NOT auto-advance (stays on the current question)", async () => {
+  it("option pick auto-advances to the next unanswered question", async () => {
     const { deps, waitInputs, sentButtons } = inspectableDeps(multiTabFactory([MQ_TAB0, MQ_TAB1]));
     const resultP = bridgeCustomDialog(deps);
     await new Promise((r) => setTimeout(r, 10));
     // sentButtons[0] shows q1 (current question text).
     expect(sentButtons[0].text).toContain("What is the deliverable?");
-    waitInputs[0]!("o:0"); // toggle q1 option 0
+    waitInputs[0]!("o:0"); // pick q1 option 0
     await new Promise((r) => setTimeout(r, 10));
-    // After pick: still on q1 (no auto-advance to q2).
-    expect(sentButtons[1].text).toContain("What is the deliverable?");
-    expect(sentButtons[1].text).not.toContain("What dimensions to analyze?");
+    // After pick: auto-advanced to q2 (next unanswered) — q2 question text shows.
+    expect(sentButtons[1].text).toContain("What dimensions to analyze?");
+    expect(sentButtons[1].text).not.toContain("What is the deliverable?");
     // Cancel to end the flow cleanly.
     waitInputs[1]!("cancel");
     const result = await resultP;

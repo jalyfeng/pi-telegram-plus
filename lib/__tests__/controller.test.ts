@@ -840,3 +840,65 @@ describe("createTelegramController media message behavior", () => {
     expect(setCalls.filter((u) => u === tuiUi).length).toBe(1);
   });
 });
+
+describe("createTelegramController — callback keyboard cleanup ownership", () => {
+  // The controller must NOT speculatively strip inline keyboards for handled UI
+  // callbacks. Keyboard cleanup is owned by each UI flow (it calls
+  // removeInlineKeyboard on its own prompt message right before resolving a
+  // terminal value). Controller-side stripping races with continuation flows
+  // (multi-question tab nav, single-question option toggle, select pagination)
+  // that edit the SAME message in place — when the strip lands last the message
+  // is left with no buttons (the answered Q1 but Q2 never appeared bug).
+  function makeController(resolveInput: () => { handled: boolean; promptMessageId?: number }) {
+    const transport = {
+      removeInlineKeyboard: vi.fn(async () => undefined),
+      sendText: vi.fn(async () => [] as any),
+      sendButtons: vi.fn(async () => ({ message_id: 1 }) as any),
+      editText: vi.fn(async () => undefined),
+      editButtons: vi.fn(async () => undefined),
+      answerCallbackQuery: vi.fn(async () => undefined),
+      deleteMessage: vi.fn(async () => undefined),
+      sendDocument: vi.fn(async () => undefined),
+      sendPhoto: vi.fn(async () => undefined),
+      sendChatAction: vi.fn(async () => undefined),
+    } as any;
+    const ui = { resolveInput } as any;
+    const controller = createTelegramController({
+      getSession: () => ({ extensionRunner: {} }) as any,
+      transport, ui,
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => "queue",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: () => ({ chatId: 1, queuedAttachments: [], replaceMessageId: undefined }),
+      endTelegramTurn: () => undefined,
+    });
+    return { controller, transport };
+  }
+
+  it("handled continuation callback (tab nav) does NOT strip the keyboard", async () => {
+    const { controller, transport } = makeController(() => ({ handled: true, promptMessageId: 55 }));
+    await controller.handleCallbackQuery({
+      id: "cb",
+      message: { chat: { id: 1 }, message_id: 55 },
+      data: encodeUiCallback("f:1:t:1"),
+    } as any);
+    expect(transport.answerCallbackQuery).toHaveBeenCalledTimes(1);
+    // The flow owns cleanup; the controller must not race it.
+    expect(transport.removeInlineKeyboard).not.toHaveBeenCalled();
+    expect(transport.sendText).not.toHaveBeenCalled();
+  });
+
+  it("stale/unhandled callback sends the no-longer-active notice (no strip)", async () => {
+    const { controller, transport } = makeController(() => ({ handled: false }));
+    await controller.handleCallbackQuery({
+      id: "cb",
+      message: { chat: { id: 1 }, message_id: 55 },
+      data: encodeUiCallback("f:1:o:0"),
+    } as any);
+    expect(transport.sendText).toHaveBeenCalledWith(1, "This prompt is no longer active.");
+    expect(transport.removeInlineKeyboard).not.toHaveBeenCalled();
+  });
+});
