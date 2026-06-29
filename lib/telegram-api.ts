@@ -141,10 +141,30 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
     return token;
   };
 
+  /** True when an error represents a network-level failure (fetch rejected,
+   *  DNS, connection refused/timeout, …). When the bot is unreachable the
+   *  plain-text fallback retry will fail identically, so callers should skip
+   *  it and let existing `.catch(() => undefined)` / status-line reporting
+   *  surface the outage instead of pointlessly retrying (and logging). */
+  const isNetworkError = (err: unknown): boolean => {
+    const msg = err instanceof Error ? err.message : String(err);
+    // telegramApi wraps raw fetch failures as "Telegram API request failed: <cause>".
+    if (msg.startsWith("Telegram API request failed")) return true;
+    // sendDocument/sendPhoto wrap as "Telegram sendX failed: <cause>"; direct
+    // Node fetch errors also surface with these signatures.
+    return /\bfetch failed\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR|socket hang up|network(?:\s|_)?error/i.test(msg);
+  };
+
   /** Log why an HTML-format send failed before falling back to plain text.
    *  Without this the renderer's failures were completely silent — a single
-   *  unsupported tag nuked the whole message's formatting and nobody noticed. */
+   *  unsupported tag nuked the whole message's formatting and nobody noticed.
+   *
+   *  Network-level failures are intentionally NOT logged here: the polling
+   *  loop already reports them via the status line / ui.notify, and logging
+   *  every failed send via console.warn pollutes the pi TUI input box when the
+   *  bot is simply offline. */
   const warnHtmlFallback = (label: string, err: unknown, preview: string) => {
+    if (isNetworkError(err)) return;
     const reason = err instanceof Error ? err.message : String(err);
     const snippet = preview.replace(/\s+/g, " ").slice(0, 120);
     console.warn(`[telegram-plus] HTML ${label} rejected (${reason}); falling back to plain text. Preview: ${snippet}`);
@@ -165,6 +185,10 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
         };
         const msg = await callApi<TelegramSentMessage>("sendMessage", body)
           .catch((err) => {
+            // Network failure: the plain-text retry will fail identically.
+            // Propagate so the caller's `.catch` (or renderer suppression)
+            // handles it; the polling status line already reports outages.
+            if (isNetworkError(err)) throw err;
             warnHtmlFallback("sendMessage", err, chunk);
             return callApi<TelegramSentMessage>("sendMessage", {
               chat_id: chatId,
@@ -187,6 +211,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
         parse_mode: "HTML",
         reply_markup,
       }).catch((err) => {
+        if (isNetworkError(err)) throw err;
         warnHtmlFallback("sendButtons", err, first);
         return callApi<TelegramSentMessage>("sendMessage", {
           chat_id: chatId,
@@ -204,6 +229,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
         text: first,
         parse_mode: "HTML",
       }).catch((err) => {
+        if (isNetworkError(err)) return; // swallow; nothing useful to retry
         warnHtmlFallback("editMessageText", err, first);
         return callApi("editMessageText", {
           chat_id: chatId,
@@ -223,6 +249,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
         parse_mode: "HTML",
         reply_markup,
       }).catch((err) => {
+        if (isNetworkError(err)) return; // swallow; nothing useful to retry
         warnHtmlFallback("editButtons", err, first);
         return callApi("editMessageText", {
           chat_id: chatId,
