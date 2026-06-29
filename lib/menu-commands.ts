@@ -1,5 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { setTelegramMyCommands } from "./telegram-api.ts";
+import { log } from "./logger.ts";
+
+const menuLog = log.child("menu-commands");
 
 const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = [
   // Keep the built-in pi commands in the same order as the TUI slash menu.
@@ -69,5 +72,5 @@ export async function syncTelegramCommands(botToken: string | undefined, pi: Ext
   if (!botToken) return;
   try {
     await setTelegramMyCommands(botToken, buildTelegramMenuCommands(pi));
-  } catch { /* non-critical */ }
+  } catch (err) { menuLog.warn("syncTelegramCommands failed", { err }); }
 }

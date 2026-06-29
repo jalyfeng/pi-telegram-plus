@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { getAgentDir } from "./config.ts";
 import { getTelegramUpdates } from "./telegram-api.ts";
 import type { TelegramConfig, TelegramUpdate } from "./types.ts";
+import { log } from "./logger.ts";
+
+const pollLog = log.child("polling");
 
 export type TelegramPollingRuntime = {
   start(): void;
@@ -42,7 +45,8 @@ function isPidAlive(pid: unknown): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
+  } catch (err) {
+    pollLog.debug("isPollingLockStale stat failed (treated as not stale)", { err });
     return false;
   }
 }
@@ -61,7 +65,8 @@ async function readPollingLockOwner(ownerPath: string): Promise<PollingLockOwner
       at: typeof owner.at === "string" ? owner.at : "",
       touchedAt: typeof owner.touchedAt === "string" ? owner.touchedAt : "",
     };
-  } catch {
+  } catch (err) {
+    pollLog.debug("readPollingLockOwner failed (treated as no owner)", { err });
     return undefined;
   }
 }
@@ -93,7 +98,7 @@ async function acquirePollingLock(token: string): Promise<{ owns: () => Promise<
 
   // Clean up stale lock if it exists.
   if (!await isPollingLockStale(lockPath)) return undefined;
-  await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+  await rm(lockPath, { recursive: true, force: true }).catch(pollLog.swallow("debug", "rm stale polling lock failed", { lockPath }));
 
   // Create lock directory; if another process won, bail out.
   try {
@@ -110,7 +115,7 @@ async function acquirePollingLock(token: string): Promise<{ owns: () => Promise<
     await writeFile(tmpPath, ownerText(owner), { mode: 0o600, flag: "wx" });
   } catch (error) {
     // Another process's candidate won; clean up and bail.
-    await rm(tmpPath).catch(() => undefined);
+    await rm(tmpPath).catch(pollLog.swallow("debug", "rm polling candidate tmp failed", { tmpPath }));
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined;
     throw error;
   }
@@ -120,7 +125,7 @@ async function acquirePollingLock(token: string): Promise<{ owns: () => Promise<
     await nodeRename(tmpPath, ownerPath);
   } catch {
     // rename failed (e.g. cross-device or another process already wrote owner.json).
-    await rm(tmpPath).catch(() => undefined);
+    await rm(tmpPath).catch(pollLog.swallow("debug", "rm polling candidate tmp after rename failure", { tmpPath }));
     return undefined;
   }
 
@@ -129,7 +134,7 @@ async function acquirePollingLock(token: string): Promise<{ owns: () => Promise<
       const current = await readPollingLockOwner(ownerPath);
       if (current?.id !== owner.id) return;
       owner.touchedAt = new Date().toISOString();
-      await writeFile(ownerPath, ownerText(owner), { mode: 0o600 }).catch(() => undefined);
+      await writeFile(ownerPath, ownerText(owner), { mode: 0o600 }).catch(pollLog.swallow("warn", "polling lock touch write failed", { ownerPath }));
     })();
   }, POLL_LOCK_TOUCH_MS);
 
@@ -138,7 +143,7 @@ async function acquirePollingLock(token: string): Promise<{ owns: () => Promise<
     release: async () => {
       clearInterval(touch);
       const current = await readPollingLockOwner(ownerPath);
-      if (current?.id === owner.id) await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+      if (current?.id === owner.id) await rm(lockPath, { recursive: true, force: true }).catch(pollLog.swallow("debug", "rm polling lock on release failed", { lockPath }));
     },
   };
 }
@@ -159,7 +164,7 @@ export function createTelegramPollingRuntime(deps: {
   const releasePollLock = async () => {
     const lock = pollLock;
     pollLock = undefined;
-    await lock?.release().catch(() => undefined);
+    await lock?.release().catch(pollLog.swallow("warn", "poll lock release failed"));
   };
 
   const ensurePollLock = async (token: string): Promise<boolean> => {

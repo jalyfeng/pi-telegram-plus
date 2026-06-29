@@ -6,6 +6,9 @@ import { escapeHtml } from "./html.ts";
 import { markdownToTelegramHtml } from "./markdown.ts";
 import type { TelegramConfig, TelegramRenderLevel, TelegramTransport, TelegramTurn } from "./types.ts";
 import { RENDER_LEVELS } from "./types.ts";
+import { log } from "./logger.ts";
+
+const renderLog = log.child("renderer");
 
 type AnyMessage = {
   role?: string;
@@ -265,15 +268,16 @@ export function registerTelegramRenderer(
       return;
     }
     if (options.final && Buffer.byteLength(html, "utf8") > EDIT_LIMIT) {
-      await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Assistant</b>\n\nFinal answer follows in separate message(s).").catch(() => undefined);
+      await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Assistant</b>\n\nFinal answer follows in separate message(s).").catch(renderLog.swallow("warn", "editText final-answer pointer failed", { chatId: turn.chatId, messageId: turn.replaceMessageId }));
       turn.replaceMessageId = undefined;
       await deps.transport.sendText(turn.chatId, html);
       return;
     }
     try {
       await deps.transport.editText(turn.chatId, turn.replaceMessageId, html);
-    } catch {
+    } catch (err) {
       // Edit failed (message deleted / too many edits). Fall back to a new message.
+      renderLog.debug("editText failed; falling back to sendText", { chatId: turn.chatId, messageId: turn.replaceMessageId, err });
       turn.replaceMessageId = undefined;
       await deps.transport.sendText(turn.chatId, html);
     }
@@ -297,7 +301,7 @@ export function registerTelegramRenderer(
     const turn = deps.getActiveTurn();
     if (!turn) return;
     if (turn.replaceMessageId !== undefined) await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Working…</b>");
-    } catch { /* suppressed */ }
+    } catch (err) { renderLog.warn("render status-clear handler failed", { err }); }
   });
 
   pi.on("tool_execution_start", async (event) => {
@@ -310,7 +314,7 @@ export function registerTelegramRenderer(
       : `🔧 ${event.toolName} started
 ${stringifyShort(event.args, 1200)}`;
     await sendInlineEvent(inline);
-    } catch { /* suppressed */ }
+    } catch (err) { renderLog.warn("render tool_execution_start handler failed", { err }); }
   });
 
   pi.on("tool_execution_update", async (event) => {
@@ -325,7 +329,7 @@ ${stringifyShort(event.args, 1200)}`;
     if (!partial || partial === "{}") return;
     await sendInlineEvent(`🔄 ${event.toolName} update
 ${partial}`);
-    } catch { /* suppressed */ }
+    } catch (err) { renderLog.warn("render tool_execution_update handler failed", { err }); }
   });
 
   pi.on("tool_execution_end", async (event) => {
@@ -359,10 +363,10 @@ ${partial}`);
       const chatIds = currentChats();
       for (const chatId of chatIds) {
         await deps.transport.sendChatAction(chatId, "upload_photo");
-        await deps.transport.sendPhoto(chatId, image.data, "image").catch(() => undefined);
+        await deps.transport.sendPhoto(chatId, image.data, "image").catch(renderLog.swallow("warn", "sendPhoto failed", { chatId }));
       }
     }
-    } catch { /* suppressed */ }
+    } catch (err) { renderLog.warn("tool-result image upload failed", { err }); }
   });
 
   pi.on("message_end", async (event) => {
@@ -389,13 +393,13 @@ ${partial}`);
       const chatIds = turn ? [turn.chatId] : currentChats();
       for (const chatId of chatIds) {
         for (const block of codeFiles) {
-          const filePath = await writeTempCodeFile(block.fileName, block.content).catch(() => undefined);
+          const filePath = await writeTempCodeFile(block.fileName, block.content).catch(renderLog.swallow("warn", "writeTempCodeFile failed", { fileName: block.fileName }));
           if (!filePath) continue;
           await deps.transport.sendChatAction(chatId, "upload_document");
           const lines = block.content.split("\n").length;
           const caption = `📎 ${block.lang || "code"} block (${lines} lines)`;
-          await deps.transport.sendDocument(chatId, filePath, caption).catch(() => undefined);
-          await rm(filePath, { force: true }).catch(() => undefined);
+          await deps.transport.sendDocument(chatId, filePath, caption).catch(renderLog.swallow("warn", "sendDocument code block failed", { chatId, fileName: block.fileName }));
+          await rm(filePath, { force: true }).catch(renderLog.swallow("debug", "rm temp code file failed", { filePath }));
         }
       }
     }
@@ -411,7 +415,7 @@ ${partial}`);
       await deps.transport.editText(turn.chatId, turn.replaceMessageId, `✅ <b>Output sent.</b>\n${noun}`);
       turn.replaceMessageId = undefined;
     }
-    } catch { /* suppressed */ }
+    } catch (err) { renderLog.warn("render assistant_message handler failed", { err }); }
   });
 
 }

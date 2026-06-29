@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdir, readFile, rm } from "node:fs/promises";
+import { join, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { createTelegramTransport } from "../telegram-api.ts";
 import type { TelegramConfig } from "../types.ts";
+import { __drainAndListFiles, __resetSinkForTests, initLogger } from "../logger.ts";
 
 type FetchImpl = typeof fetch;
 
@@ -21,21 +25,40 @@ function makeTransport() {
   return { transport, setConfig: (next: TelegramConfig) => { config = next; }, getConfig: () => config };
 }
 
-describe("createTelegramTransport — network-failure suppression", () => {
+function freshLogDir(): string {
+  return join(tmpdir(), `pi-tg-api-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+}
+
+async function readTodayLog(dir: string): Promise<string> {
+  await __drainAndListFiles(dir).catch(() => undefined);
+  const files = await __drainAndListFiles(dir);
+  const base = files.find((f) => f.split(sep).pop()!.match(/^pi-telegram-plus-\d{4}-\d{2}-\d{2}\.log$/));
+  if (!base) return "";
+  return readFile(base, "utf8");
+}
+
+describe("createTelegramTransport — network-failure suppression & logging", () => {
   let originalFetch: FetchImpl;
   let warnSpy: ReturnType<typeof vi.spyOn>;
+  let logDir: string;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
+    // Logger must NEVER touch the console (it pollutes the pi TUI). Keep a spy
+    // to enforce the no-console invariant across every test below.
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    logDir = freshLogDir();
+    __resetSinkForTests();
+    initLogger({ dir: logDir, level: "debug" });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     globalThis.fetch = originalFetch;
     warnSpy.mockRestore();
+    await rm(logDir, { recursive: true, force: true }).catch(() => undefined);
   });
 
-  it("sendText rejects (no console.warn, no plain-text retry) on a network failure", async () => {
+  it("sendText rejects (no log warn, no console.warn, no plain-text retry) on a network failure", async () => {
     // Node's fetch rejects with a TypeError("fetch failed") on network errors.
     const failingFetch = vi.fn(async () => { throw new TypeError("fetch failed"); });
     globalThis.fetch = failingFetch as unknown as FetchImpl;
@@ -51,18 +74,23 @@ describe("createTelegramTransport — network-failure suppression", () => {
     // plain-text fallback path entirely.
     expect(failingFetch).toHaveBeenCalledTimes(1);
     expect(warnSpy).not.toHaveBeenCalled();
+    // Network failures are not logged as HTML rejections (isNetworkError guard).
+    const logText = await readTodayLog(logDir);
+    expect(logText).not.toMatch(/HTML .*rejected/);
   });
 
-  it("editText swallows network failures silently (no console.warn)", async () => {
+  it("editText swallows network failures (no console.warn, no log warn)", async () => {
     const failingFetch = vi.fn(async () => { throw new TypeError("fetch failed"); });
     globalThis.fetch = failingFetch as unknown as FetchImpl;
 
     const { transport } = makeTransport();
     await expect(transport.editText(1, 10, "<b>hi</b>")).resolves.toBeUndefined();
     expect(warnSpy).not.toHaveBeenCalled();
+    const logText = await readTodayLog(logDir);
+    expect(logText).not.toMatch(/HTML .*rejected/);
   });
 
-  it("sendText falls back to plain text and warns on a genuine HTML rejection", async () => {
+  it("sendText falls back to plain text and logs a warn on a genuine HTML rejection", async () => {
     const htmlError = () => telegramResponse(false, undefined, "Bad Request: can't parse entities: unexpected character");
     const plainOk = () => telegramResponse(true, { message_id: 7 });
     const stub = vi.fn(async (_url: string, init: RequestInit) => {
@@ -77,7 +105,12 @@ describe("createTelegramTransport — network-failure suppression", () => {
     // With retryCount: 0: one HTML attempt (rejected) then one plain-text
     // fallback (ok) — no retries.
     expect(stub).toHaveBeenCalledTimes(2);
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).toMatch(/HTML sendMessage rejected.*can't parse entities/);
+    // The warn now goes to the log file (JSON Lines), NOT the console.
+    expect(warnSpy).not.toHaveBeenCalled();
+    const logText = await readTodayLog(logDir);
+    expect(logText).toMatch(/"level":"warn"/);
+    expect(logText).toMatch(/HTML sendMessage rejected/);
+    expect(logText).toMatch(/can't parse entities/);
+    expect(logText).toMatch(/"scope":"telegram-api"/);
   });
 });

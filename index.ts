@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { extname, resolve } from "node:path";
+import { extname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerTelegramAttachmentTool } from "./lib/attachments.ts";
-import { readResolvedTelegramConfig, writeResolvedTelegramConfig } from "./lib/config.ts";
+import { readResolvedTelegramConfig, writeResolvedTelegramConfig, getAgentDir } from "./lib/config.ts";
 import { createTelegramController, type TelegramCommandHandler } from "./lib/controller.ts";
 import { createHeartbeat } from "./lib/heartbeat.ts";
 import { registerTelegramRenderer } from "./lib/renderer.ts";
@@ -11,10 +11,14 @@ import { createTelegramTransport, downloadTelegramFile, getTelegramBotUsername, 
 import { createTelegramUiRuntime } from "./lib/telegram-ui.ts";
 import { formatTelegramStatusLine, clearTelegramStatus, TELEGRAM_STATUS_KEY } from "./lib/status.ts";
 import { createTelegramPollingRuntime } from "./lib/polling.ts";
+import { initLogger, log, type LogLevel } from "./lib/logger.ts";
+
 import { registerAllCommands } from "./lib/commands/register.ts";
 import { registerTelegramCommands } from "./lib/commands/telegram-commands.ts";
 import { syncTelegramCommands } from "./lib/menu-commands.ts";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramTurn } from "./lib/types.ts";
+
+const indexLog = log.child("index");
 
 type TelegramPlusRuntimeState = {
   dispose?: () => void;
@@ -30,6 +34,14 @@ function getTelegramPlusRuntimeState(): TelegramPlusRuntimeState {
 
 export default function piTelegramPlus(pi: ExtensionAPI): void {
   installAgentSessionCapture();
+  // Initialize file logging first, before any subsystem can emit. Log directory
+  // lives under the pi agent cache dir alongside tg.json; level is overridable
+  // via PI_TELEGRAM_PLUS_LOG_LEVEL (debug/info/warn/error). See lib/logger.ts.
+  const envLevel = process.env.PI_TELEGRAM_PLUS_LOG_LEVEL?.toLowerCase();
+  const level: LogLevel = (envLevel === "debug" || envLevel === "info" || envLevel === "warn" || envLevel === "error")
+    ? envLevel
+    : "info";
+  initLogger({ dir: join(getAgentDir(), "logs"), level });
   const runtimeState = getTelegramPlusRuntimeState();
   runtimeState.dispose?.();
 
@@ -256,7 +268,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
       }
       const chatId = config.activeChatId;
       if (chatId !== undefined && config.botToken) {
-        transport.sendText(chatId, `<b>error</b>\nTelegram polling failed`).catch(() => undefined);
+        transport.sendText(chatId, `<b>error</b>\nTelegram polling failed`).catch(log.child("polling").swallow("error", "sendText polling-failure notice failed", { chatId }));
       } else {
         getActiveSession()?.extensionRunner.getUIContext().notify(`Telegram polling failed: ${message}`, "error");
       }
@@ -318,10 +330,10 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
           config = { ...config, botUsername };
           await persistCurrentConfig(config);
         }
-      } catch { /* non-critical */ }
+      } catch (err) { indexLog.debug("resolve botUsername on startup failed (non-critical)", { err }); }
     }
     if (config.botToken && isTelegramEnabled() && !polling.isActive()) polling.start();
-    try { await syncTelegramCommands(config.botToken, pi); } catch { /* non-critical */ }
+    try { await syncTelegramCommands(config.botToken, pi); } catch (err) { indexLog.debug("syncTelegramCommands on startup failed (non-critical)", { err }); }
     lastStatusError = undefined;
     heartbeat.startStatusHeartbeat(refreshStatus);
     refreshStatus();

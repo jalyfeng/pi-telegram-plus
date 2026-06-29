@@ -12,6 +12,9 @@ import type {
   TelegramTurn,
 } from "./types.ts";
 import type { TelegramUiRuntime } from "./telegram-ui.ts";
+import { log } from "./logger.ts";
+
+const ctrlLog = log.child("controller");
 
 export type TelegramController = {
   handleMessage(message: TelegramMessage): Promise<void>;
@@ -221,7 +224,7 @@ export function createTelegramController(deps: {
     const mode = deps.getMessageMode();
     if (mode === "steer") {
       const task = runPrompt(text, chatId, replaceMessageId);
-      void task.catch(() => undefined);
+      void task.catch(ctrlLog.swallow("error", "steer-mode prompt task failed", { chatId }));
       return;
     }
 
@@ -233,7 +236,7 @@ export function createTelegramController(deps: {
         if (generation !== getInterruptGeneration(chatId)) return;
         return runPrompt(text, chatId, replaceMessageId);
       })
-      .catch(() => undefined);
+      .catch(ctrlLog.swallow("error", "queue-mode prompt task failed", { chatId }));
     setTail(chatId, task);
   };
 
@@ -280,11 +283,12 @@ export function createTelegramController(deps: {
             await new Promise((r) => setTimeout(r, 120));
             if (idleFn.call(ctx)) break;
           }
-        } catch {
-          // Session disposed / torn down during the wait — nothing to do.
+        } catch (err) {
+          // Session disposed / torn down during the wait — nothing to do but log.
+          ctrlLog.debug("waitForIdle during enqueued turn interrupted", { err });
         }
       },
-    }).catch(() => undefined);
+    }).catch(ctrlLog.swallow("warn", "beginTelegramTurn enqueued-turn wrapper failed"));
   };
 
   const tryHandleSlashCommand = async (text: string, chatId: number): Promise<boolean> => {
@@ -320,7 +324,7 @@ export function createTelegramController(deps: {
     async handleCallbackQuery(query) {
       const chatId = query.message?.chat?.id;
       if (typeof chatId !== "number") return;
-      await deps.transport.answerCallbackQuery(query.id).catch(() => undefined);
+      await deps.transport.answerCallbackQuery(query.id).catch(ctrlLog.swallow("debug", "answerCallbackQuery failed", { queryId: query.id }));
       if (!(await deps.authorizeUser(query.from?.id))) return;
       await deps.setActiveChatId(chatId);
 
@@ -403,7 +407,7 @@ export function createTelegramController(deps: {
             formatIncomingAttachmentReceipt("saved", downloadedMediaLines),
             formatIncomingAttachmentReceipt("failed", failedMediaLines),
           ].filter(Boolean);
-          await deps.transport.sendText(chatId, lines.join("\n\n")).catch(() => undefined);
+          await deps.transport.sendText(chatId, lines.join("\n\n")).catch(ctrlLog.swallow("warn", "sendText media receipt failed", { chatId }));
         }
       }
       const hasPromptInput = hasTextInput || hasMediaInput;

@@ -3,6 +3,9 @@ import { basename, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { TelegramTransport, TelegramTurn } from "./types.ts";
+import { log } from "./logger.ts";
+
+const attachLog = log.child("attachments");
 
 const MAX_ATTACHMENTS_PER_TURN = 10;
 const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
@@ -58,7 +61,8 @@ async function sendTelegramAttachment(
         await transport.sendChatAction(chatId, "upload_photo");
         await transport.sendPhoto(chatId, attachment.path, attachment.fileName, true);
         return;
-      } catch {
+      } catch (err) {
+        attachLog.warn("sendPhoto failed; falling back to sendDocument", { chatId, fileName: attachment.fileName, err });
         await transport.sendChatAction(chatId, "upload_document");
         await transport.sendDocument(chatId, attachment.path, attachment.fileName);
         return;
@@ -125,7 +129,7 @@ export function registerTelegramAttachmentTool(
       for (const attachment of pendingAttachments) {
         await sendTelegramAttachment(chatId, attachment, deps.transport, maxBytes, async (message) => {
           failed.push(message);
-          await deps.transport.sendText(chatId, message).catch(() => undefined);
+          await deps.transport.sendText(chatId, message).catch(attachLog.swallow("warn", "sendText attachment error notice failed", { chatId }));
         });
       }
       return {
@@ -148,7 +152,7 @@ export async function sendQueuedTelegramAttachments(
   const maxBytes = outboundAttachmentLimit();
   for (const attachment of turn.queuedAttachments) {
     await sendTelegramAttachment(turn.chatId, attachment, transport, maxBytes, async (message) => {
-      await transport.sendText(turn.chatId, message).catch(() => undefined);
+      await transport.sendText(turn.chatId, message).catch(attachLog.swallow("warn", "sendText attachment error notice failed", { chatId: turn.chatId }));
     });
   }
 }

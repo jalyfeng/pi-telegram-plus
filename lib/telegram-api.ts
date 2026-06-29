@@ -2,6 +2,9 @@ import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import type { TelegramButton, TelegramConfig, TelegramSentMessage, TelegramTransport, TelegramUpdate } from "./types.ts";
 import { stripHtml, splitTelegramHtml } from "./text-split.ts";
+import { log } from "./logger.ts";
+
+const apiLog = log.child("telegram-api");
 
 type TelegramFileInfo = {
   file_id: string;
@@ -144,7 +147,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
   /** True when an error represents a network-level failure (fetch rejected,
    *  DNS, connection refused/timeout, …). When the bot is unreachable the
    *  plain-text fallback retry will fail identically, so callers should skip
-   *  it and let existing `.catch(() => undefined)` / status-line reporting
+   *  it and let existing `.catch(swallow(...))` / status-line reporting
    *  surface the outage instead of pointlessly retrying (and logging). */
   const isNetworkError = (err: unknown): boolean => {
     const msg = err instanceof Error ? err.message : String(err);
@@ -161,13 +164,13 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
    *
    *  Network-level failures are intentionally NOT logged here: the polling
    *  loop already reports them via the status line / ui.notify, and logging
-   *  every failed send via console.warn pollutes the pi TUI input box when the
-   *  bot is simply offline. */
+   *  every failed send when the bot is simply offline would only noise up the
+   *  log file. */
   const warnHtmlFallback = (label: string, err: unknown, preview: string) => {
     if (isNetworkError(err)) return;
     const reason = err instanceof Error ? err.message : String(err);
     const snippet = preview.replace(/\s+/g, " ").slice(0, 120);
-    console.warn(`[telegram-plus] HTML ${label} rejected (${reason}); falling back to plain text. Preview: ${snippet}`);
+    apiLog.warn(`HTML ${label} rejected; falling back to plain text`, { reason, snippet });
   };
 
   return {
@@ -235,7 +238,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
           chat_id: chatId,
           message_id: messageId,
           text: stripHtml(first),
-        }).catch(() => undefined);
+        }).catch(apiLog.swallow("debug", "editMessageText plain-text fallback failed", { chatId, messageId }));
       });
     },
 
@@ -256,7 +259,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
           message_id: messageId,
           text: stripHtml(first),
           reply_markup,
-        }).catch(() => undefined);
+        }).catch(apiLog.swallow("debug", "editButtons plain-text fallback failed", { chatId, messageId }));
       });
     },
 
@@ -272,14 +275,14 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
         chat_id: chatId,
         message_id: messageId,
         reply_markup: { inline_keyboard: [] },
-      }).catch(() => undefined);
+      }).catch(apiLog.swallow("debug", "removeInlineKeyboard failed", { chatId, messageId }));
     },
 
     async deleteMessage(chatId, messageId) {
       await callApi("deleteMessage", {
         chat_id: chatId,
         message_id: messageId,
-      }).catch(() => undefined);
+      }).catch(apiLog.swallow("warn", "deleteMessage failed", { chatId, messageId }));
     },
 
     async sendDocument(chatId, path, caption, signal) {
@@ -365,7 +368,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
       await telegramApi(requireToken(), "sendChatAction", {
         chat_id: chatId,
         action,
-      }).catch(() => undefined);
+      }).catch(apiLog.swallow("debug", "sendChatAction failed", { chatId, action }));
     },
   };
 }

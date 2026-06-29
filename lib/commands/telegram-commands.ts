@@ -4,6 +4,9 @@ import { escapeHtml } from "../html.ts";
 import { getTelegramBotUsername } from "../telegram-api.ts";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramTransport } from "../types.ts";
 import type { TelegramPollingRuntime } from "../polling.ts";
+import { log } from "../logger.ts";
+
+const tgCmdLog = log.child("tg-commands");
 
 export type TelegramCommandDeps = {
   getConfig: () => TelegramConfig;
@@ -40,7 +43,7 @@ async function configureGlobalTelegramToken(
 ): Promise<boolean> {
   const token = await (ui.inputSecret?.("Telegram bot token") ?? ui.input("Telegram bot token"));
   if (!token) return false;
-  const botUsername = await getTelegramBotUsername(token).catch(() => undefined);
+  const botUsername = await getTelegramBotUsername(token).catch(tgCmdLog.swallow("warn", "getTelegramBotUsername failed during global token setup"));
   if (!deps.getResolvedConfig()) {
     deps.switchResolvedConfig({ store: { version: 2, global: {}, workspaces: [] }, scope: "global", config: {} });
   }
@@ -72,10 +75,10 @@ async function handleTgGlobalConnect(
     if (!deps.getConfig().botToken) {
       if (!(await configureGlobalTelegramToken(ui, deps))) return;
     } else {
-      const botUsername = deps.getConfig().botUsername ?? await getTelegramBotUsername(deps.getConfig().botToken!).catch(() => undefined);
+      const botUsername = deps.getConfig().botUsername ?? await getTelegramBotUsername(deps.getConfig().botToken!).catch(tgCmdLog.swallow("warn", "getTelegramBotUsername failed during global connect"));
       await globalConnectAndStart(deps, deps.getConfig().botToken!, botUsername);
     }
-  } catch { /* connection errors reported via polling onError */ }
+  } catch (err) { tgCmdLog.debug("global connect swallowed error (reported via polling onError)", { err }); }
   deps.clearStatusError();
   deps.startStatusHeartbeat();
   ui.notify("Telegram global bot connected.", "info");
@@ -128,7 +131,7 @@ export function registerTelegramCommands(
       const workspacePath = resolve(args.trim() || ctx.cwd || process.cwd());
       const token = await (ui.inputSecret?.(`Telegram bot token for ${workspacePath}`) ?? ui.input(`Telegram bot token for ${workspacePath}`));
       if (!token) return;
-      const botUsername = await getTelegramBotUsername(token).catch(() => undefined);
+      const botUsername = await getTelegramBotUsername(token).catch(tgCmdLog.swallow("warn", "getTelegramBotUsername failed during workspace token setup", { workspacePath }));
       await deps.getPolling().stop();
       deps.switchResolvedConfig(await bindWorkspaceTelegramConfig(workspacePath, {
         botToken: token,

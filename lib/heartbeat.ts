@@ -1,5 +1,8 @@
 import { formatTelegramStatusLine } from "./status.ts";
 import type { TelegramConfig, TelegramTurn } from "./types.ts";
+import { log } from "./logger.ts";
+
+const heartbeatLog = log.child("heartbeat");
 
 const TYPING_REFRESH_MS = 4000;
 const HEARTBEAT_MS = 2000;
@@ -27,8 +30,9 @@ export function createHeartbeat(deps: HeartbeatDeps) {
       if (generation === typingGeneration && deps.getActiveTurn() === turn) {
         await deps.sendChatAction(turn.chatId, "typing");
       }
-    } catch {
+    } catch (err) {
       // Non-critical: the next pulse can retry while the turn is still processing.
+      heartbeatLog.debug("typing pulse sendChatAction failed", { err });
     } finally {
       typingInFlight = false;
     }

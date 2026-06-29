@@ -5,6 +5,9 @@ import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-age
 import type { SessionNameDeps, CommandRegistry } from "./register.ts";
 import { escapeHtml } from "../html.ts";
 import type { CapturedAgentSession } from "../types.ts";
+import { log } from "../logger.ts";
+
+const sessionLog = log.child("session");
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max - 1) + "…";
@@ -187,7 +190,7 @@ export function registerSessionCommands(
       if (!rawPath) return;
 
       const targetCwd = resolveTargetCwd(rawPath, ctx.cwd);
-      const info = await stat(targetCwd).catch(() => undefined);
+      const info = await stat(targetCwd).catch(sessionLog.swallow("debug", "stat target cwd failed (treated as not-a-directory)", { targetCwd }));
       if (!info?.isDirectory()) {
         ui.notify(`Not a directory: ${escapeHtml(targetCwd)}`, "error");
         return;

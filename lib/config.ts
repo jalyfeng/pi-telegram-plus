@@ -3,6 +3,9 @@ import { chmod, mkdir, readFile, rm, rmdir, stat, writeFile } from "node:fs/prom
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramConfigStore, TelegramWorkspaceConfig } from "./types.ts";
+import { log } from "./logger.ts";
+
+const configLog = log.child("config");
 
 export function getAgentDir(): string {
   return process.env.PI_CODING_AGENT_DIR
@@ -33,7 +36,7 @@ async function withTelegramConfigLock<T>(run: () => Promise<T>): Promise<T> {
       if (code !== "EEXIST") throw error;
       const age = Date.now() - (await stat(lockPath).then((s) => s.mtimeMs).catch(() => Date.now()));
       if (age > 30_000 || Date.now() - started > 10_000) {
-        await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+        await rm(lockPath, { recursive: true, force: true }).catch(configLog.swallow("warn", "rm stale config lock failed", { lockPath }));
         continue;
       }
       await sleep(50);
@@ -42,7 +45,7 @@ async function withTelegramConfigLock<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } finally {
-    await rmdir(lockPath).catch(() => undefined);
+    await rmdir(lockPath).catch(configLog.swallow("warn", "rmdir config lock failed on release", { lockPath }));
   }
 }
 
@@ -73,7 +76,7 @@ export async function writeTelegramConfigStore(store: TelegramConfigStore): Prom
     workspaces: store.workspaces ?? [],
   };
   await writeFile(path, JSON.stringify(normalized, null, 2) + "\n", { mode: 0o600 });
-  await chmod(path, 0o600).catch(() => undefined);
+  await chmod(path, 0o600).catch(configLog.swallow("warn", "chmod config file failed", { path }));
 }
 
 function normalizePath(path: string): string {
