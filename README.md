@@ -1,10 +1,6 @@
 # pi-telegram-plus
 
-<p>
-  <a href="https://www.npmjs.com/package/pi-telegram-plus"><img src="https://img.shields.io/npm/v/pi-telegram-plus?style=flat-square&logo=npm" alt="npm" /></a>
-  <a href="https://github.com/jalyfeng/pi-telegram-plus"><img src="https://img.shields.io/github/license/jalyfeng/pi-telegram-plus?style=flat-square" alt="license" /></a>
-  <img src="https://img.shields.io/badge/node-%3E%3D22.19.0-339933?style=flat-square&logo=node.js" alt="node" />
-</p>
+## Overview
 
 **Full Telegram control of [pi coding agent](https://github.com/earendil-works/pi-coding-agent) — commands, interactive UI, model/session management, file transfer, and real-time streaming output, all from Telegram.**
 
@@ -19,27 +15,15 @@
 - **Multi-instance safe** — file-based polling lock prevents multiple pi instances from racing on the same bot token
 - **Automatic reconnection** — exponential backoff on transient failures
 - **Bot command menu sync** — automatically syncs available commands to Telegram's BotMenu (up to 100 commands)
+- **Authorized user** — the first Telegram user to message the bot is auto-authorized and persisted; all other users are rejected (reset by removing the binding and re-setting up)
+- **TUI status line** — a `telegram+` indicator in the pi status bar shows connection state (connected / active / awaiting pairing / disconnected / not configured / error)
+- **Typing indicator** — sends `typing` chat-action pulses while a turn is active so the Telegram chat shows the bot is working
 
 ### 🎮 Full Session Control
-All pi session lifecycle commands available via Telegram:
-
-| Command | Description |
-|---------|-------------|
-| `/new` | Start a new session |
-| `/fork` | Fork from a previous user message |
-| `/clone` | Clone at a previous user message |
-| `/tree` | Navigate session tree |
-| `/resume` | Resume a previous session |
-| `/compact` | Compact session context |
-| `/name` | Set or show session name |
-| `/session` | Show session statistics |
+All pi session lifecycle commands are available via Telegram — start, fork, clone, navigate, resume, compact, rename, and inspect sessions. See **Session Control Commands** in the Usage Guide.
 
 ### 🧠 Model & Authentication Management
-- `/model` — View available models / switch current model via interactive selection
-- `/scoped-models` — Toggle scoped model sets
-- `/thinking` — Adjust thinking level (off/minimal/low/medium/high/xhigh)
-- `/login` — OAuth or API key authentication with full interactive flow
-- `/logout` — Remove stored credentials
+Switch the current model, toggle scoped model sets, adjust the thinking level, and complete OAuth or API key authentication with full interactive flows — all from Telegram. See **Model & Authentication Commands** in the Usage Guide.
 
 ### 📨 Message Modes
 Two modes for handling incoming messages while the agent is running:
@@ -58,7 +42,7 @@ Full interactive UI components built on inline keyboards:
 - **Editor** — multi-line text input prompt
 - **Custom (third-party)** — `ctx.ui.custom(factory)` dialogs from extensions like [`@capyup/pi-goal`](https://www.npmjs.com/package/@capyup/pi-goal) are bridged to inline buttons. See **Third-party Dialog Support** below.
 
-### 🧩 第三方对话框支持 / Third-party Dialog Support
+### 🧩 Third-party Dialog Support
 
 Third-party extensions that use `ctx.ui.custom(factory)` (such as [`@capyup/pi-goal`](https://www.npmjs.com/package/@capyup/pi-goal))
 are bridged to Telegram inline buttons so remote turns can interact with them:
@@ -70,15 +54,17 @@ are bridged to Telegram inline buttons so remote turns can interact with them:
 | **pi-goal `goal_questionnaire`** (multi-question) | Drives the opaque questionnaire component: cycles tabs to extract every question, then presents one question at a time with option buttons as multi-select toggles (☐/☑), ◀ Tab / Tab ▶ navigation between questions (no forced auto-advance on option pick), ✏️ Type for free-text entry, and Cancel. A ✓ Submit button only appears once every question is answered; before that the message shows a `Still to answer: …` placeholder. Per-question selections are joined into single-string answers. Falls back to a `cancelled` degrade only if the component lacks the expected `handleInput`/`render` API. |
 | **Unknown `custom()` components** | Auto-dismissed with a ⚠️ notification and a `cancelled` result, so the agent continues gracefully (never hangs or throws). |
 
-**Interactive modals render on the local TUI AND Telegram in parallel.** Interactive modals (confirm, select, input, editor, custom) are forwarded to the TUI base so the local TUI renders the dialog and stays interactive, AND bridged to Telegram inline buttons for the remote user. The two sides race: whichever resolves first wins the single awaited promise; if the TUI base wins, the Telegram side is cancelled (pending cleared + inline keyboard removed); if Telegram wins, the TUI base promise is abandoned (parallel interaction contention is accepted). Persistent/stateful UI (goal widget, status line, working indicator, footer/header) is forwarded to the TUI base so the local TUI always shows accurate state. Editor operations (paste, set/get text) are no-ops during Telegram turns, so a remote turn never touches the local editor.
+**Interactive modals are Telegram-only during a Telegram turn.** Interactive modals (confirm, select, input, editor, custom) are bridged to Telegram inline buttons for the remote user and are NOT also rendered in the local TUI. `ExtensionUIContext.custom` and the other modals expose no external cancel handle, so mirroring a modal into the TUI during a remote turn would leave the local TUI stuck at the dialog once the Telegram side resolves. Local TUI turns never enter the Telegram UI swap, so they keep using the real TUI UIContext and are completely unaffected. Persistent/stateful UI (goal widget, status line, working indicator, footer/header) is forwarded to the TUI base so the local TUI always shows accurate state. Editor operations (paste, set/get text) are no-ops during Telegram turns, so a remote turn never touches the local editor.
 
 > **Command-triggered turns are held to the end of the chain.** Commands like `/sisyphus` and `/goals` enqueue the agent turn fire-and-forget via `pi.sendUserMessage` and return immediately; the actual turn (and the `goal_question` / `goal_questionnaire` / `propose_goal_draft` dialogs it raises) runs afterward. The controller keeps the Telegram UI swap active across that enqueued turn and any pi-goal auto-continue chain (waiting for the agent to go idle through a small grace window), so every dialog in the chain bridges to Telegram instead of rendering to the local TUI. The hold is skipped when a local turn was already streaming, so it never hijacks an active local session.
 
 ### 🎨 Message Rendering
 - **Markdown → Telegram HTML** — Full conversion via `marked` (tables, code blocks, blockquotes, lists, inline formatting)
+- **Mobile-first table rendering** — box-drawing and card layouts with pseudo-table protection and header repetition across split chunks, so wide tables stay readable on phone screens
 - **Tool execution rendering** — Configurable level (`hidden` / `brief` / `full`) for tool call visibility
 - **Thinking rendering** — Configurable level (`hidden` / `brief` / `full`) for agent thinking blocks
 - **Output splitting** — Safe UTF-8-aware splitting at Telegram's 4096-byte limit
+- **Oversized code blocks** — automatically sent as downloadable files instead of being split across many `<pre>` messages
 - **Image output** — Automatically sends agent-generated images as Telegram photos
 
 ### 📎 File Attachments
@@ -95,7 +81,32 @@ are bridged to Telegram inline buttons so remote turns can interact with them:
 - Reports saved paths back to the user
 - Handles name sanitization and deduplication
 
-### ⚙️ Telegram-Specific Commands
+---
+
+## Usage Guide
+
+### Session Control Commands
+
+| Command | Description |
+|---------|-------------|
+| `/new` | Start a new session |
+| `/fork` | Fork from a previous user message |
+| `/clone` | Clone at a previous user message |
+| `/tree` | Navigate session tree |
+| `/resume` | Resume a previous session |
+| `/compact` | Compact session context |
+| `/name` | Set or show session name |
+| `/session` | Show session statistics |
+
+### Model & Authentication Commands
+
+- `/model` — View available models / switch current model via interactive selection
+- `/scoped-models` — Toggle scoped model sets
+- `/thinking` — Adjust thinking level (off/minimal/low/medium/high/xhigh)
+- `/login` — OAuth or API key authentication with full interactive flow
+- `/logout` — Remove stored credentials
+
+### Telegram Connection Commands
 
 **Global scope** (a single bot token shared across all workspaces):
 
@@ -121,7 +132,7 @@ are bridged to Telegram inline buttons so remote turns can interact with them:
 |---------|-------------|
 | `/tg-config` | Configure rendering levels and message mode |
 
-### 🔧 Utility Commands
+### Utility Commands
 
 | Command | Description |
 |---------|-------------|
@@ -142,219 +153,39 @@ are bridged to Telegram inline buttons so remote turns can interact with them:
 
 ---
 
-## Installation
+## Troubleshooting
 
-### Prerequisites
+Common issues and diagnostic steps.
 
-- Node.js >= 22.19.0
-- [pi coding agent](https://github.com/earendil-works/pi-coding-agent) installed globally
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+### The bot does not respond to my messages
+- Verify the bot token is correct: run `/tg-global-setup` (global) or `/tg-bind-cwd` (workspace) and re-paste the token from [@BotFather](https://t.me/BotFather).
+- Confirm the bot is connected: `/tg-list` should show the binding as enabled. If not, run `/tg-global-connect` or `/tg-cwd-connect`.
+- Make sure you are the authorized user. The **first** Telegram user to message the bot is auto-authorized; all others are rejected. To reset authorization, remove the binding and re-setup.
+- Check that no other pi instance is polling the same token. The file-based polling lock prevents races, but a stuck lock file can block a new instance — restart pi or remove the stale lock if needed.
 
-### Installation
+### Messages arrive but the agent output is not streamed
+- Confirm pi has an active model and valid credentials: run `/model` and `/status` from Telegram.
+- If `tool` / `thinking` rendering is set to `hidden`, output may look silent. Run `/tg-config tool brief` and `/tg-config thinking brief` to surface activity.
+- Long single messages may exceed Telegram's 4096-byte limit; the extension splits them automatically, but if delivery still fails, check your network and the pi log for upstream API errors.
 
-**Install via npm (recommended):**
+### Interactive dialogs (Select / Confirm / Input / Editor) do not appear
+- Inline keyboards require a recent Telegram client; update your Telegram app.
+- Inline keyboards are removed once the pending dialog resolves or is cancelled (e.g. via `/stop` or timeout). Re-trigger the action to get a fresh keyboard.
+- For third-party `custom()` dialogs (pi-goal), ensure the producing extension is loaded (`/reload`) and that the component exposes the expected `handleInput`/`render` API. Unknown shapes are auto-dismissed as `cancelled`.
 
-```bash
-pi install npm:pi-telegram-plus
-```
+### `/tg-global-*` or `/tg-bind-cwd` commands are missing
+- The extension must be registered as a pi package. Re-run `pi install npm:pi-telegram-plus` (or `pi packages add .` from source) and restart pi.
+- Run `/reload` to refresh command registration without a full restart.
 
-**Or install from source:**
+### File attachments fail to send or are rejected
+- Outbound `tg_attach` blocks sensitive paths (`/etc`, `~/.ssh`, etc.). Move the file to a non-sensitive location and retry.
+- Default upload size limit is 50 MB. Files exceeding it are rejected; reduce the file size or split the content.
+- For download failures (Telegram → working directory), check that the working directory is writable and that the filename was sanitized correctly. Saved paths are reported back in the chat.
 
-```bash
-git clone https://github.com/jalyfeng/pi-telegram-plus.git
-cd pi-telegram-plus
-npm install
-pi packages add .
-```
+### Polling reconnects repeatedly or reports transient failures
+- The extension uses exponential backoff on transient errors. If failures persist, verify network reachability to `api.telegram.org` and that the bot token has not been revoked in BotFather.
+- A revoked/regenerated token will keep failing until you re-run `/tg-global-setup` with the new token.
 
-Then start pi and configure your bot:
-
-```bash
-pi
-```
-
-Inside pi, run:
-
-```
-/tg-global-setup
-```
-
-Paste your bot token when prompted. The bot will connect automatically.
-
-> **Note:** On first message from any user, pi-telegram-plus automatically authorizes that user ID. Only that user can control the bot afterward.
-
----
-
-## Configuration
-
-### Per-Workspace Bot Tokens
-
-You can bind different bot tokens to different directories:
-
-```
-/tg-bind-cwd /path/to/project
-```
-
-This creates a workspace-specific binding in `~/.pi/agent/tg.json`. Workspace bindings take priority over the global configuration. After binding, use `/tg-cwd-connect` / `/tg-cwd-disconnect` to control it and `/tg-unbind-cwd` to remove it.
-
-### Rendering & Mode Settings
-
-Via interactive menu:
-
-```
-/tg-config
-```
-
-Or directly:
-
-```
-/tg-config tool brief       # Tool rendering: hidden | brief | full
-/tg-config thinking full    # Thinking rendering: hidden | brief | full
-/tg-config mode steer       # Message mode: queue | steer
-/tg-config retry 3          # API retry count: 0-10
-```
-
----
-
-## How It Works
-
-```
-┌─────────────────┐     Long Polling      ┌──────────────────────┐
-│   Telegram Bot   │ ◄──────────────────► │  pi-telegram-plus    │
-│  (api.telegram)  │     Callback Queries  │  (pi extension)      │
-└─────────────────┘                       │                      │
-        ▲                                 │  ┌────────────────┐  │
-        │ Messages / Files                │  │  Controller     │  │
-        │                                 │  │  ├─ handleMsg   │  │
-  ┌─────────┐                            │  │  ├─ handleCB    │  │
-  │  User    │                            │  │  └─ runPrompt   │  │
-  │ (Telegram)│                           │  │                  │  │
-  └─────────┘                            │  │  ┌─────────────┐ │  │
-        ▲                                │  │  │ TelegramUI  │ │  │
-        │ Streaming Output               │  │  │ (interactive)│ │  │
-        │ Live Tool/Thinking Events      │  │  └─────────────┘ │  │
-        │ File Attachments (tg_attach)   │  │                  │  │
-        └───────────────────────────────────┤  ┌─────────────┐ │  │
-                                          │  │  Renderer    │ │  │
-                                          │  │  (Markdown→  │ │  │
-                                          │  │   Telegram   │ │  │
-                                          │  │   HTML)      │ │  │
-                                          │  └─────────────┘ │  │
-                                          │         │         │  │
-                                          │         ▼         │  │
-                                          │  ┌─────────────┐  │  │
-                                          │  │ pi Agent    │  │  │
-                                          │  │ (session,   │  │  │
-                                          │  │ models,     │  │  │
-                                          │  │ tools, ...) │  │  │
-                                          │  └─────────────┘  │  │
-                                          └──────────────────────┘
-```
-
-### Architecture Overview
-
-- **`index.ts`** — Extension entry point. Wires all modules together and handles `session_start`/`session_shutdown` lifecycle events.
-- **`lib/telegram-api.ts`** — Raw Telegram Bot API client with retry logic and file upload/download.
-- **`lib/polling.ts`** — Long polling loop with multi-instance file lock. Re-reads config while holding the lock to prevent offset regressions.
-- **`lib/controller.ts`** — Message routing: slash commands, text prompts, media attachments, callback queries. Holds the Telegram UI swap across command-enqueued turns and auto-continue chains so dialogs bridge to Telegram.
-- **`lib/telegram-ui.ts`** — Interactive UI layer: notify, confirm, input, select (pagination), editor, and a `custom()` bridge. Each interactive modal is forwarded to the TUI base AND bridged to Telegram inline buttons; the two race and whichever resolves first wins (if the TUI wins, the Telegram side is cancelled). Persistent/stateful UI is forwarded to the TUI base so the local TUI stays accurate.
-- **`lib/custom-dialogs.ts`** — Bridges third-party `ctx.ui.custom(factory)` dialogs (pi-goal `propose_goal_draft`, `goal_question`, `goal_questionnaire`) to Telegram inline buttons via render-text shape detection. Single-question and per-question options are multi-select toggles (joined into single-string answers); the Submit button only appears once all questions are answered. Multi-question questionnaires are driven by cycling the opaque component's tabs; unknown shapes degrade safely to `cancelled`.
-- **`lib/renderer.ts`** — Hooks into agent lifecycle events (`agent_start`, `tool_execution_*`, `message_end`) and streams rendered output to Telegram.
-- **`lib/markdown.ts`** — Custom `marked` renderer that converts Markdown to Telegram-compatible HTML.
-- **`lib/config.ts`** — Configuration persistence with file locking for concurrent-safe writes. Supports global + workspace scopes.
-- **`lib/attachments.ts`** — `tg_attach` tool registration and outbound attachment delivery.
-- **`lib/commands/`** — Command handler modules: model, session, auth (login/logout), lifecycle, settings, tg-config, telegram-commands.
-- **`lib/heartbeat.ts`** — Periodic typing indicator while processing.
-- **`lib/status.ts`** — TUI status line integration showing connection state.
-- **`lib/session-capture.ts`** — Monkeys patches `AgentSession.bindExtensions` to intercept session lifecycle and capture the active session reference.
-- **`lib/menu-commands.ts`** — Builds and syncs the Telegram BotMenu command list.
-- **`lib/callback-protocol.ts`** — Encodes/decodes inline button callback data.
-
----
-
-## Project Structure
-
-```
-pi-telegram-plus/
-├── index.ts                     # Extension entry point
-├── pi-host.d.ts                 # Type augmentation for @earendil-works/pi-ai
-├── package.json
-├── tsconfig.json
-├── vitest.config.ts
-├── .pi/
-│   └── settings.json            # pi package registration
-└── lib/
-    ├── types.ts                 # All TypeScript interfaces & types
-    ├── telegram-api.ts          # Telegram Bot HTTP API client
-    ├── polling.ts               # Long polling with multi-instance lock
-    ├── controller.ts            # Message router & prompt executor
-    ├── telegram-ui.ts           # Interactive UI (notify, confirm, input, select, editor, custom bridge)
-    ├── custom-dialogs.ts        # Bridge third-party custom() dialogs to Telegram buttons
-    ├── renderer.ts              # Agent event → Telegram output renderer
-    ├── markdown.ts              # Markdown → Telegram HTML converter
-    ├── html.ts                  # HTML escaping utilities
-    ├── text-split.ts            # UTF-8-safe text splitter for 4096 byte limit
-    ├── command-parser.ts        # Slash command parser & bot-username normalizer
-    ├── config.ts                # Configuration store (global + workspace scopes)
-    ├── attachments.ts           # Outbound file attachment tool (tg_attach)
-    ├── heartbeat.ts             # Typing indicator pulse
-    ├── status.ts                # TUI status line formatter
-    ├── session-capture.ts       # Agent session capture & handler patching
-    ├── menu-commands.ts         # Telegram BotMenu sync
-    ├── callback-protocol.ts     # UI callback encoding/decoding
-    ├── commands/
-    │   ├── register.ts          # Command registry aggregator
-    │   ├── model.ts             # /model, /scoped-models, /thinking
-    │   ├── session.ts           # /new, /fork, /clone, /tree, /resume, /cd, /cwd, /name, /session
-    │   ├── auth.ts              # /login (OAuth + API key), /logout
-    │   ├── info.ts              # /copy, /export, /import, /share, /status, /changelog, /hotkeys, /debug
-    │   ├── lifecycle.ts         # /compact, /reload, /stop, /quit
-    │   ├── settings.ts          # /settings menu
-    │   ├── tg-config.ts         # /tg-config
-    │   └── telegram-commands.ts # /tg-global-*, /tg-bind-cwd, /tg-cwd-*, /tg-unbind-cwd, /tg-list
-    └── __tests__/
-        ├── attachments.test.ts
-        ├── callback-protocol.test.ts
-        ├── config.test.ts
-        ├── controller.test.ts
-        ├── html.test.ts
-        ├── info-status.test.ts
-        ├── markdown.test.ts
-        ├── renderer-helpers.test.ts
-        ├── status.test.ts
-        ├── telegram-api.test.ts
-        ├── telegram-ui-custom.test.ts
-        └── text-split.test.ts
-```
-
----
-
-## Development
-
-```bash
-# Type checking
-npm run typecheck
-
-# Run tests
-npm test
-
-# Watch mode
-npm run test:watch
-```
-
----
-
-## Security
-
-- **No secrets in source code** — All bot tokens and API keys are read from `~/.pi/agent/tg.json` and `~/.pi/agent/auth.json` at runtime.
-- **File permissions** — Configuration files are created with `chmod 600` (owner-only access).
-- **Sensitive input protection** — API key inputs use `inputSecret` which automatically deletes the user's message after reading.
-- **Attachment path safety** — Outbound `tg_attach` blocks sensitive paths (`/etc`, `~/.ssh`, etc.).
-- **Polling lock** — File-based lock prevents multiple pi instances from polling the same bot token simultaneously.
-- **First-user authorization** — The first Telegram user to message the bot is automatically authorized; subsequent users are rejected.
-
----
-
-## License
-
-MIT
+### Configuration changes are not picked up
+- Per-workspace bindings live in `~/.pi/agent/tg.json`. After editing by hand, run `/reload` (or restart pi) so the extension re-reads config.
+- Workspace bindings override the global token. If the wrong bot responds, run `/tg-list` and `/tg-unbind-cwd` to clear the unintended override.
