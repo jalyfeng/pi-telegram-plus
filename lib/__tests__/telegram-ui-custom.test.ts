@@ -997,9 +997,9 @@ describe("bridgeCustomDialog — multi-question multi-select & Submit gating", (
   });
 });
 
-// ---- createTelegramUiRuntime: interactive modals forward to base (race) ----
+// ---- createTelegramUiRuntime: interactive modals are Telegram-only (do NOT forward to base) ----
 
-describe("createTelegramUiRuntime — interactive modals forward to base (race)", () => {
+describe("createTelegramUiRuntime — interactive modals are Telegram-only (no base forwarding)", () => {
   function makeBaseRuntime(base: any) {
     const transport = {
       removeInlineKeyboard: vi.fn(async () => undefined),
@@ -1019,51 +1019,52 @@ describe("createTelegramUiRuntime — interactive modals forward to base (race)"
     return { runtime, transport, chatId: 1 };
   }
 
-  it("confirm: base resolves first → base value returned, telegram keyboard removed, pending cleared", async () => {
-    let resolveBase!: (v: boolean) => void;
-    const baseConfirm = vi.fn(() => new Promise<boolean>((r) => { resolveBase = r; }));
+  it("confirm: Telegram-only — base.confirm is NOT called; result comes from Telegram callback", async () => {
+    const baseConfirm = vi.fn(() => new Promise<boolean>(() => {}));
     const { runtime, transport, chatId } = makeBaseRuntime({ confirm: baseConfirm });
     const ui = runtime.create(chatId);
     const resultP = ui.confirm("Save?", "Overwrite file?");
-    // Let the Telegram side send buttons and register a pending flow.
     await new Promise((r) => setTimeout(r, 10));
     expect(transport.sendButtons).toHaveBeenCalledTimes(1);
     expect(runtime.hasPendingInput(chatId)).toBe(true);
-    resolveBase(true);
+    // base.confirm must not be invoked — modals are Telegram-only during a Telegram turn.
+    expect(baseConfirm).not.toHaveBeenCalled();
+    // Telegram user taps "Yes" (callback_data form: f:<flowId>:<value>).
+    runtime.resolveInput(chatId, "f:1:yes", 1, true);
     expect(await resultP).toBe(true);
-    expect(baseConfirm).toHaveBeenCalledWith("Save?", "Overwrite file?");
-    expect(transport.removeInlineKeyboard).toHaveBeenCalledTimes(1);
     expect(runtime.hasPendingInput(chatId)).toBe(false);
   });
 
-  it("select: base resolves first → base value returned, telegram keyboard removed", async () => {
-    let resolveBase!: (v: string | undefined) => void;
-    const baseSelect = vi.fn(() => new Promise<string | undefined>((r) => { resolveBase = r; }));
+  it("select: Telegram-only — base.select is NOT called; result comes from Telegram callback", async () => {
+    const baseSelect = vi.fn(() => new Promise<string | undefined>(() => {}));
     const { runtime, transport, chatId } = makeBaseRuntime({ select: baseSelect });
     const ui = runtime.create(chatId);
     const resultP = ui.select("Pick", ["A", "B", "C"]);
     await new Promise((r) => setTimeout(r, 10));
     expect(runtime.hasPendingInput(chatId)).toBe(true);
-    resolveBase("B");
+    expect(baseSelect).not.toHaveBeenCalled();
+    // Telegram user taps option B (index 1).
+    runtime.resolveInput(chatId, "f:1:s:1", 1, true);
     expect(await resultP).toBe("B");
-    expect(baseSelect).toHaveBeenCalledWith("Pick", ["A", "B", "C"]);
-    expect(transport.removeInlineKeyboard).toHaveBeenCalledTimes(1);
+    expect(runtime.hasPendingInput(chatId)).toBe(false);
   });
 
-  it("custom: base resolves first → base value returned, telegram keyboard removed", async () => {
-    let resolveBase!: (v: any) => void;
-    const baseCustom = vi.fn(() => new Promise<any>((r) => { resolveBase = r; }));
+  it("custom: Telegram-only — base.custom is NOT called; result comes from Telegram callback", async () => {
+    const baseCustom = vi.fn(() => new Promise<any>(() => {}));
     const { runtime, transport, chatId } = makeBaseRuntime({ custom: baseCustom });
     const ui = runtime.create(chatId);
     const factory = stubFactory(CONFIRM_RENDER);
     const resultP = ui.custom(factory);
     await new Promise((r) => setTimeout(r, 10));
     expect(runtime.hasPendingInput(chatId)).toBe(true);
-    const baseResult = { questions: [], answers: [{ id: "confirm", question: "h", answer: "Confirm — create this goal now", wasCustom: false }], cancelled: false };
-    resolveBase(baseResult);
-    expect(await resultP).toBe(baseResult);
-    expect(baseCustom).toHaveBeenCalledWith(factory, undefined);
-    expect(transport.removeInlineKeyboard).toHaveBeenCalledTimes(1);
+    // base.custom must not be invoked — racing the TUI would leave the local TUI
+    // dialog undismissible once Telegram wins (the stuck-selection bug).
+    expect(baseCustom).not.toHaveBeenCalled();
+    // Telegram user taps Confirm (callback_data form: f:<flowId>:<value>).
+    runtime.resolveInput(chatId, "f:1:confirm", 1, true);
+    const result = await resultP;
+    expect((result as any).cancelled).toBe(false);
+    expect((result as any).answers[0].answer).toBe("Confirm — create this goal now");
     expect(runtime.hasPendingInput(chatId)).toBe(false);
   });
 
