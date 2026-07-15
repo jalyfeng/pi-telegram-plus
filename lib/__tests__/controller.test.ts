@@ -335,6 +335,179 @@ describe("createTelegramController media message behavior", () => {
     await gate;
   });
 
+  it.each([
+    ["steer", "steer"],
+    ["queue", "followUp"],
+  ] as const)("delivers goal-running messages in %s mode with %s behavior", async (mode, expectedBehavior) => {
+    const prompt = vi.fn(async (_text: string, options?: { streamingBehavior?: string }) => {
+      if (!options?.streamingBehavior) {
+        throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+      }
+    });
+    const session = {
+      prompt,
+      isStreaming: true,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({ waitForIdle: async () => undefined }) as any,
+      },
+    } as any;
+    const sendText = vi.fn(async () => [{ message_id: 1 }]);
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText,
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => mode,
+      telegramCommands: new Map(),
+      // Goal turns are started by pi-goal, so they are streaming without an
+      // entry in this extension's TelegramTurn bookkeeping map.
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number) => ({ chatId, queuedAttachments: [] }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({ message_id: 1, chat: { id: 999 }, text: "Use my new instructions" });
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+
+    expect(prompt).toHaveBeenCalledWith("Use my new instructions", {
+      source: "interactive",
+      streamingBehavior: expectedBehavior,
+    });
+    expect(sendText).not.toHaveBeenCalledWith(999, expect.stringContaining("could not be delivered"));
+  });
+
+  it("survives a goal continuation starting while input hooks are being dispatched", async () => {
+    let streamingReads = 0;
+    let session: any;
+    const prompt = vi.fn(async (_text: string, options?: { streamingBehavior?: string }) => {
+      // Mirrors AgentSession.prompt(): isStreaming is checked again only after
+      // async input hooks have had a chance to let pi-goal start a continuation.
+      const streamingNow = session.isStreaming;
+      if (streamingNow && !options?.streamingBehavior) {
+        throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+      }
+    });
+    session = {
+      prompt,
+      get isStreaming() { return streamingReads++ > 0; },
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({ waitForIdle: async () => undefined }) as any,
+      },
+    };
+    const sendText = vi.fn(async () => [{ message_id: 1 }]);
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText,
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => "steer",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number) => ({ chatId, queuedAttachments: [] }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({ message_id: 1, chat: { id: 999 }, text: "Pause and inspect this" });
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+
+    expect(prompt.mock.calls[0]?.[1]).toMatchObject({ streamingBehavior: "steer" });
+    expect(sendText).not.toHaveBeenCalledWith(999, expect.stringContaining("could not be delivered"));
+  });
+
+  it("reports asynchronous prompt failures back to Telegram", async () => {
+    const session = {
+      prompt: vi.fn(async () => { throw new Error("prompt failed"); }),
+      isStreaming: true,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+    const sendText = vi.fn(async () => [{ message_id: 1 }]);
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText,
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => "steer",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number) => ({ chatId, queuedAttachments: [] }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({ message_id: 1, chat: { id: 999 }, text: "Do not lose this" });
+    await vi.waitFor(() => expect(sendText).toHaveBeenCalledWith(
+      999,
+      "⚠️ Your message could not be delivered to π. Please retry.",
+    ));
+  });
+
   it("skips queued follow-up prompts after /stop", async () => {
     let firstResolved = false;
     let firstRelease: () => void = () => {};

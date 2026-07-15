@@ -156,6 +156,12 @@ export function createTelegramController(deps: {
     void abortResult?.catch?.(() => undefined);
   };
 
+  const reportPromptFailure = async (label: string, chatId: number, err: unknown): Promise<void> => {
+    ctrlLog.error(`${label} prompt task failed`, { chatId, err });
+    await deps.transport.sendText(chatId, "⚠️ Your message could not be delivered to π. Please retry.")
+      .catch(ctrlLog.swallow("warn", "sendText prompt-failure notice failed", { chatId }));
+  };
+
   const runPrompt = async (text: string, chatId: number, replaceMessageId?: number) => {
     const session = deps.getSession();
     if (!session) {
@@ -184,7 +190,12 @@ export function createTelegramController(deps: {
           await runWithTelegramUi({
             session,
             ui: telegramUi,
-            run: () => session.prompt(text, { source: "interactive" }),
+            run: async () => {
+              // Goal auto-continuations can be streaming without owning an
+              // active TelegramTurn. Keep the delivery behavior tied to the
+              // configured mode rather than to our renderer bookkeeping.
+              await session.prompt(text, { source: "interactive", streamingBehavior: "steer" });
+            },
           });
         } finally {
           deps.endTelegramTurn(chatId, turn);
@@ -213,7 +224,15 @@ export function createTelegramController(deps: {
       await runWithTelegramUi({
         session,
         ui: telegramUi,
-        run: () => session.prompt(text, { source: "interactive" }),
+        run: async () => {
+          // Always provide a delivery mode. AgentSession re-checks isStreaming
+          // after awaiting input hooks, so a goal continuation can start after
+          // our snapshot above and before prompt dispatch.
+          await session.prompt(text, {
+            source: "interactive",
+            streamingBehavior: mode === "queue" ? "followUp" : "steer",
+          });
+        },
       });
     } finally {
       deps.endTelegramTurn(chatId, turn);
@@ -224,7 +243,7 @@ export function createTelegramController(deps: {
     const mode = deps.getMessageMode();
     if (mode === "steer") {
       const task = runPrompt(text, chatId, replaceMessageId);
-      void task.catch(ctrlLog.swallow("error", "steer-mode prompt task failed", { chatId }));
+      void task.catch((err) => reportPromptFailure("steer-mode", chatId, err));
       return;
     }
 
@@ -236,7 +255,7 @@ export function createTelegramController(deps: {
         if (generation !== getInterruptGeneration(chatId)) return;
         return runPrompt(text, chatId, replaceMessageId);
       })
-      .catch(ctrlLog.swallow("error", "queue-mode prompt task failed", { chatId }));
+      .catch((err) => reportPromptFailure("queue-mode", chatId, err));
     setTail(chatId, task);
   };
 
