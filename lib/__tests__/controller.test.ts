@@ -764,7 +764,7 @@ describe("createTelegramController media message behavior", () => {
     await firstGate;
   });
 
-  it("does not crash when command handler rejects", async () => {
+  it("does not crash and notifies Telegram when command handler rejects", async () => {
     const session = {
       extensionRunner: {
         getUIContext: () => undefined,
@@ -779,20 +779,22 @@ describe("createTelegramController media message behavior", () => {
       throw new Error("command boom");
     });
 
+    const transport = {
+      removeInlineKeyboard: vi.fn(async () => undefined),
+      sendText: vi.fn(async () => [{ message_id: 1 }]),
+      sendButtons: vi.fn(async () => ({ message_id: 1 })),
+      editText: vi.fn(async () => undefined),
+      editButtons: vi.fn(async () => undefined),
+      answerCallbackQuery: vi.fn(async () => undefined),
+      deleteMessage: vi.fn(async () => undefined),
+      sendDocument: vi.fn(async () => undefined),
+      sendPhoto: vi.fn(async () => undefined),
+      sendChatAction: vi.fn(async () => undefined),
+    };
+
     const controller = createTelegramController({
       getSession: () => session,
-      transport: {
-        removeInlineKeyboard: async () => undefined,
-        sendText: async () => [{ message_id: 1 }],
-        sendButtons: async () => ({ message_id: 1 }),
-        editText: async () => undefined,
-        editButtons: async () => undefined,
-        answerCallbackQuery: async () => undefined,
-        deleteMessage: async () => undefined,
-        sendDocument: async () => undefined,
-        sendPhoto: async () => undefined,
-        sendChatAction: async () => undefined,
-      },
+      transport,
       ui: {
         create: () => ({
           notify: async () => undefined,
@@ -817,6 +819,79 @@ describe("createTelegramController media message behavior", () => {
       chat: { id: 999 },
       text: "/fail",
     })).resolves.toBeUndefined();
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(transport.sendText).toHaveBeenCalledWith(999, expect.stringContaining("Command failed"));
+    expect(transport.sendText).toHaveBeenCalledWith(999, expect.stringContaining("command boom"));
+  });
+
+  it("sets Telegram command UI context to rpc mode and restores the previous mode", async () => {
+    let activeMode = "tui";
+    const previousUi = { kind: "tui" };
+    const setCalls: Array<{ ui: unknown; mode: unknown }> = [];
+    const commandCtx = Object.defineProperty({}, "mode", {
+      get: () => activeMode,
+    });
+    let observedMode: string | undefined;
+    const session = {
+      extensionRunner: {
+        getUIContext: () => previousUi,
+        setUIContext: (ui: unknown, mode?: string) => {
+          setCalls.push({ ui, mode });
+          if (mode) activeMode = mode;
+        },
+        createContext: () => ({ mode: activeMode }),
+        getCommand: () => undefined,
+        createCommandContext: () => commandCtx as any,
+      },
+    } as any;
+
+    const command = new Map<string, (args: string, ctx: any) => Promise<void>>();
+    command.set("mode", async (_args, ctx) => {
+      observedMode = ctx.mode;
+    });
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async () => [{ message_id: 1 }],
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => "queue",
+      telegramCommands: command,
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 1,
+      chat: { id: 999 },
+      text: "/mode",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(observedMode).toBe("rpc");
+    expect(setCalls[0]?.mode).toBe("rpc");
+    expect(setCalls.at(-1)).toEqual({ ui: previousUi, mode: "tui" });
   });
 
   it("resolves ui.confirm through callback without blocking", async () => {

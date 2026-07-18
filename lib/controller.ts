@@ -13,6 +13,7 @@ import type {
 } from "./types.ts";
 import type { TelegramUiRuntime } from "./telegram-ui.ts";
 import { log } from "./logger.ts";
+import { commandErrorMessage, getRunnerMode, setRunnerUiContext, TELEGRAM_EXTENSION_MODE } from "./pi-compat.ts";
 
 const ctrlLog = log.child("controller");
 
@@ -108,11 +109,12 @@ async function runWithTelegramUi<T>(deps: {
 }): Promise<T> {
   const runner = deps.session.extensionRunner;
   const previousUi = runner.getUIContext();
-  runner.setUIContext(deps.ui);
+  const previousMode = getRunnerMode(runner as any);
+  setRunnerUiContext(runner as any, deps.ui, TELEGRAM_EXTENSION_MODE);
   try {
     return await deps.run();
   } finally {
-    runner.setUIContext(previousUi);
+    setRunnerUiContext(runner as any, previousUi, previousMode);
   }
 }
 
@@ -307,7 +309,11 @@ export function createTelegramController(deps: {
           ctrlLog.debug("waitForIdle during enqueued turn interrupted", { err });
         }
       },
-    }).catch(ctrlLog.swallow("warn", "beginTelegramTurn enqueued-turn wrapper failed"));
+    }).catch(async (err) => {
+      ctrlLog.warn("telegram command handler failed", { chatId, err });
+      await deps.transport.sendText(chatId, `⚠️ Command failed:\n${commandErrorMessage(err)}`)
+        .catch(ctrlLog.swallow("warn", "sendText command-failure notice failed", { chatId }));
+    });
   };
 
   const tryHandleSlashCommand = async (text: string, chatId: number): Promise<boolean> => {

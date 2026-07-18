@@ -1,7 +1,7 @@
-import type { Model } from "@earendil-works/pi-ai";
 import type { CommandRegistry } from "./register.ts";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { CapturedAgentSession } from "../types.ts";
+import type { PiModel } from "../pi-compat.ts";
+import { getAllModels, getAvailableModels } from "../pi-compat.ts";
 
 /**
  * Safely set the model on the session.
@@ -10,10 +10,10 @@ import type { CapturedAgentSession } from "../types.ts";
  */
 async function trySetModel(
   session: CapturedAgentSession,
-  model: Model,
+  model: PiModel,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    await session.setModel(model);
+    await (session.setModel as (model: unknown) => Promise<void>)(model);
     return { ok: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -21,7 +21,7 @@ async function trySetModel(
   }
 }
 
-function formatModel(model: Model): string {
+function formatModel(model: { provider: string; id: string }): string {
   return `${model.provider}/${model.id}`;
 }
 
@@ -52,11 +52,11 @@ export function registerModelCommands(
         // Prefer available (auth'd) models, fall back to all models so
         // the user gets a clear auth error instead of "not found".
         const model =
-          session.modelRegistry.getAvailable().find((m) => {
+          getAvailableModels(ctx, session).find((m) => {
             const ref = formatModel(m).toLowerCase();
             return ref === needle || m.id.toLowerCase() === needle || ref.includes(needle);
           }) ??
-          session.modelRegistry.getAll().find((m) => {
+          getAllModels(ctx, session).find((m) => {
             const ref = formatModel(m).toLowerCase();
             return ref === needle || m.id.toLowerCase() === needle || ref.includes(needle);
           });
@@ -73,7 +73,7 @@ export function registerModelCommands(
         return;
       }
 
-      const available = session.modelRegistry.getAvailable();
+      const available = getAvailableModels(ctx, session);
       if (available.length === 0) {
         ui.notify("No authenticated models available. Use /login to add an API key.", "error");
         return;
@@ -111,7 +111,7 @@ export function registerModelCommands(
 
       const scoped = session.scopedModels;
       if (!scoped || scoped.length === 0) {
-        const allModels = session.modelRegistry.getAvailable();
+        const allModels = getAvailableModels(ctx, session);
         if (allModels.length === 0) {
           ui.notify("No authenticated models. Use /login to add an API key.", "info");
           return;
@@ -127,7 +127,7 @@ export function registerModelCommands(
           ui.notify(setResult.error, "error");
           return;
         }
-        session.setScopedModels([{ model: selected }]);
+        session.setScopedModels([{ model: selected as any }]);
         ui.notify(`Scoped to ${formatModel(selected)}`, "info");
         return;
       }
