@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package",
   "name": "pi-telegram-plus",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Full Telegram control of pi coding agent — commands, menus, interactive UI, model management, and more",
   "keywords": [
     "pi-package",
@@ -26,6 +26,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:pi-versions": "node scripts/test-pi-versions.mjs",
     "prepublishOnly": "npm test && npm run typecheck"
   },
   "pi": {
@@ -40,7 +41,7 @@
     "url": "https://github.com/jalyfeng/pi-telegram-plus"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": ">=0.76.0 <0.82.0",
     "typebox": "*"
   },
   "dependencies": {

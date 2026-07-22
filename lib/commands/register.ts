@@ -1,4 +1,4 @@
-import type { CapturedAgentSession, TelegramTransport } from "../types.ts";
+import type { CapturedAgentSession, TelegramTransport, TelegramTurn } from "../types.ts";
 import { registerModelCommands } from "./model.ts";
 import { registerSessionCommands } from "./session.ts";
 import { registerAuthCommands } from "./auth.ts";
@@ -33,6 +33,7 @@ export type TgConfigDeps = SessionDeps & {
 export type InfoDeps = {
   getTransport?: () => TelegramTransport | undefined;
   getActiveChatId?: () => number | undefined;
+  getActiveTurn?: () => TelegramTurn | undefined;
 };
 
 export function registerAllCommands(

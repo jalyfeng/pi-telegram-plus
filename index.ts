@@ -12,6 +12,8 @@ import { createTelegramUiRuntime } from "./lib/telegram-ui.ts";
 import { formatTelegramStatusLine, clearTelegramStatus, TELEGRAM_STATUS_KEY } from "./lib/status.ts";
 import { createTelegramPollingRuntime } from "./lib/polling.ts";
 import { initLogger, log, type LogLevel } from "./lib/logger.ts";
+import { authorizeTelegramUser, ensureTelegramPairingCode, formatPairingInstructions } from "./lib/pairing.ts";
+import { getCurrentTelegramTurn } from "./lib/turn-context.ts";
 
 import { registerAllCommands } from "./lib/commands/register.ts";
 import { registerTelegramCommands } from "./lib/commands/telegram-commands.ts";
@@ -47,9 +49,10 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
 
   let config: TelegramConfig = {};
   let resolvedConfig: ResolvedTelegramConfig | undefined;
-  // Per-chat active turns: prevents interleaving across chats and allows
-  // beginTelegramTurn to reject when a chat is already busy.
-  const activeTurns = new Map<number, TelegramTurn>();
+  const activeTurnKey = (chatId: number, messageThreadId?: number) => `${chatId}:${messageThreadId ?? "main"}`;
+  // Per chat/thread active turns: prevents interleaving in one Telegram target
+  // while allowing different topics in the same supergroup to stay isolated.
+  const activeTurns = new Map<string, TelegramTurn>();
   let lastStatusError: string | undefined;
 
   const setConfig = (nextConfig: TelegramConfig) => {
@@ -112,10 +115,12 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     transport,
   });
 
+  const getCurrentActiveTurn = (): TelegramTurn | undefined => getCurrentTelegramTurn();
+
   const heartbeat = createHeartbeat({
     getConfig: () => config,
-    getActiveTurn: () => { for (const turn of activeTurns.values()) return turn; return undefined; },
-    sendChatAction: (chatId, action) => transport.sendChatAction(chatId, action),
+    getActiveTurns: () => [...activeTurns.values()],
+    sendChatAction: (chatId, action, messageThreadId) => transport.sendChatAction(chatId, action, messageThreadId),
     ensurePollingStarted: () => { if (config.botToken && isTelegramEnabled() && !polling.isActive()) polling.start(); },
   });
 
@@ -154,6 +159,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
   }, sessionDeps, sessionNameDeps, tgConfigDeps, {
     getTransport: () => transport,
     getActiveChatId: () => config.activeChatId,
+    getActiveTurn: getCurrentActiveTurn,
   });
 
   registerTelegramCommands({
@@ -179,33 +185,34 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
   });
 
   registerTelegramAttachmentTool(pi, {
-    getActiveTurn: () => { for (const turn of activeTurns.values()) return turn; return undefined; },
-    getDefaultChatId: () => config.activeChatId,
+    getActiveTurn: getCurrentActiveTurn,
+    getDefaultChatId: () => activeTurns.size === 0 ? config.activeChatId : undefined,
     transport,
   });
 
   registerTelegramRenderer(pi, {
     getConfig: () => config,
     transport,
-    getActiveTurn: (chatId?: number) => {
-      if (chatId !== undefined) return activeTurns.get(chatId);
-      for (const turn of activeTurns.values()) return turn;
-      return undefined;
+    getActiveTurn: (chatId?: number, messageThreadId?: number) => {
+      if (chatId !== undefined) return activeTurns.get(activeTurnKey(chatId, messageThreadId));
+      return getCurrentActiveTurn();
     },
+    hasActiveTurns: () => activeTurns.size > 0,
   });
 
   const controller = createTelegramController({
     getSession: getActiveSession,
     transport,
     ui,
-    authorizeUser: async (userId) => {
-      if (userId === undefined) return false;
-      if (config.allowedUserId === undefined) {
-        config = { ...config, allowedUserId: userId };
+    authorizeUser: async (userId, text) => {
+      const decision = authorizeTelegramUser(config, userId, text, config.botUsername);
+      if (!decision.authorized) return false;
+      if (decision.config !== config) {
+        config = decision.config;
         await persistCurrentConfig(config);
         refreshStatus();
       }
-      return config.allowedUserId === userId;
+      return decision.paired ? "paired" : true;
     },
     telegramCommands,
     saveIncomingTelegramAttachment: async (fileId, fileName, kind) => {
@@ -221,16 +228,18 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
       await writeFile(outputPath, data);
       return outputPath;
     },
-    getActiveTurn: (chatId: number) => activeTurns.get(chatId),
-    beginTelegramTurn: (chatId, replaceMessageId) => {
-      if (activeTurns.has(chatId)) return undefined; // reject if busy
-      const turn: TelegramTurn = { chatId, replaceMessageId, queuedAttachments: [] };
-      activeTurns.set(chatId, turn);
+    getActiveTurn: (chatId: number, messageThreadId?: number) => activeTurns.get(activeTurnKey(chatId, messageThreadId)),
+    beginTelegramTurn: (chatId, replaceMessageId, messageThreadId, sourceMessageId) => {
+      const key = activeTurnKey(chatId, messageThreadId);
+      if (activeTurns.has(key)) return undefined; // reject if this chat/thread is busy
+      const turn: TelegramTurn = { chatId, messageThreadId, sourceMessageId, replaceMessageId, queuedAttachments: [] };
+      activeTurns.set(key, turn);
       refreshStatus();
       return turn;
     },
     endTelegramTurn: (chatId, turn) => {
-      if (activeTurns.get(chatId) === turn) activeTurns.delete(chatId);
+      const key = activeTurnKey(chatId, turn.messageThreadId);
+      if (activeTurns.get(key) === turn) activeTurns.delete(key);
       refreshStatus();
     },
     setActiveChatId: async (chatId) => {
@@ -266,9 +275,10 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
         getActiveSession()?.extensionRunner.getUIContext().notify(message, "warning");
         return;
       }
-      const chatId = config.activeChatId;
+      const turn = getCurrentActiveTurn();
+      const chatId = turn?.chatId ?? config.activeChatId;
       if (chatId !== undefined && config.botToken) {
-        transport.sendText(chatId, `<b>error</b>\nTelegram polling failed`).catch(log.child("polling").swallow("error", "sendText polling-failure notice failed", { chatId }));
+        transport.sendText(chatId, `<b>error</b>\nTelegram polling failed`, turn?.messageThreadId, turn?.sourceMessageId).catch(log.child("polling").swallow("error", "sendText polling-failure notice failed", { chatId, messageThreadId: turn?.messageThreadId }));
       } else {
         getActiveSession()?.extensionRunner.getUIContext().notify(`Telegram polling failed: ${message}`, "error");
       }
@@ -306,7 +316,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
   function disposeRuntime(): void {
     void polling.stop();
     heartbeat.dispose();
-    for (const turn of activeTurns.values()) activeTurns.delete(turn.chatId);
+    activeTurns.clear();
     ui.dispose();
     clearStatus();
   }
@@ -331,6 +341,16 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
           await persistCurrentConfig(config);
         }
       } catch (err) { indexLog.debug("resolve botUsername on startup failed (non-critical)", { err }); }
+    }
+    if (config.botToken) {
+      const pairedConfig = ensureTelegramPairingCode(config);
+      if (pairedConfig !== config) {
+        config = pairedConfig;
+        await persistCurrentConfig(config);
+      }
+      if (config.allowedUserId === undefined) {
+        getActiveSession()?.extensionRunner.getUIContext().notify(formatPairingInstructions(config), "warning");
+      }
     }
     if (config.botToken && isTelegramEnabled() && !polling.isActive()) polling.start();
     try { await syncTelegramCommands(config.botToken, pi); } catch (err) { indexLog.debug("syncTelegramCommands on startup failed (non-critical)", { err }); }

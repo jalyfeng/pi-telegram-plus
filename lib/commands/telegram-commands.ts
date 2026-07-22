@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { bindWorkspaceTelegramConfig, readTelegramConfigStore, unbindWorkspaceTelegramConfig, writeGlobalTelegramConfig } from "../config.ts";
 import { escapeHtml } from "../html.ts";
 import { getTelegramBotUsername } from "../telegram-api.ts";
+import { ensureTelegramPairingCode, formatPairingInstructions } from "../pairing.ts";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramTransport } from "../types.ts";
 import type { TelegramPollingRuntime } from "../polling.ts";
 import { log } from "../logger.ts";
@@ -29,9 +30,9 @@ async function globalConnectAndStart(
   token: string,
   botUsername: string | undefined,
 ): Promise<void> {
-  const config = deps.getConfig();
-  deps.setConfig({ ...config, botToken: token, botUsername, telegramEnabled: true });
-  await writeGlobalTelegramConfig({ botToken: token, botUsername, telegramEnabled: true });
+  const config = ensureTelegramPairingCode({ ...deps.getConfig(), botToken: token, botUsername, telegramEnabled: true });
+  deps.setConfig(config);
+  await writeGlobalTelegramConfig(config);
   deps.getPolling().start();
   await deps.syncTelegramCommands();
   deps.refreshStatus();
@@ -62,7 +63,7 @@ async function handleTgGlobalSetup(
   if (!(await configureGlobalTelegramToken(ui, deps))) return;
   deps.clearStatusError();
   deps.startStatusHeartbeat();
-  ui.notify("Telegram global bot token saved and connected.", "info");
+  ui.notify(`Telegram global bot token saved and connected.\n${formatPairingInstructions(deps.getConfig())}`, "info");
 }
 
 async function handleTgGlobalConnect(
@@ -81,7 +82,7 @@ async function handleTgGlobalConnect(
   } catch (err) { tgCmdLog.debug("global connect swallowed error (reported via polling onError)", { err }); }
   deps.clearStatusError();
   deps.startStatusHeartbeat();
-  ui.notify("Telegram global bot connected.", "info");
+  ui.notify(`Telegram global bot connected.\n${formatPairingInstructions(deps.getConfig())}`, "info");
 }
 
 async function handleTgGlobalDisconnect(
@@ -133,19 +134,19 @@ export function registerTelegramCommands(
       if (!token) return;
       const botUsername = await getTelegramBotUsername(token).catch(tgCmdLog.swallow("warn", "getTelegramBotUsername failed during workspace token setup", { workspacePath }));
       await deps.getPolling().stop();
-      deps.switchResolvedConfig(await bindWorkspaceTelegramConfig(workspacePath, {
+      deps.switchResolvedConfig(await bindWorkspaceTelegramConfig(workspacePath, ensureTelegramPairingCode({
         botToken: token,
         botUsername,
         telegramEnabled: true,
         tool: config.tool,
         thinking: config.thinking,
         messageMode: config.messageMode,
-      }));
+      })));
       deps.getPolling().start();
       await deps.syncTelegramCommands();
       deps.startStatusHeartbeat();
       deps.refreshStatus();
-      ui.notify(`Telegram workspace bot bound:\n${escapeHtml(workspacePath)}\n${botUsername ? `@${botUsername}` : "bot username unknown"}`, "info");
+      ui.notify(`Telegram workspace bot bound:\n${escapeHtml(workspacePath)}\n${botUsername ? `@${botUsername}` : "bot username unknown"}\n${formatPairingInstructions(deps.getConfig())}`, "info");
     },
   });
 

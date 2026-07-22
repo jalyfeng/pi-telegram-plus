@@ -149,13 +149,47 @@ async function acquirePollingLock(token: string): Promise<{ owns: () => Promise<
 }
 
 
-export function createTelegramPollingRuntime(deps: {
+export type TelegramUpdateBatchDeps = {
   getConfig: () => TelegramConfig;
   setConfig: (config: TelegramConfig) => void;
   persistConfig: (config: TelegramConfig) => Promise<void>;
   handleUpdate: (update: TelegramUpdate) => Promise<void>;
-  reloadConfig?: () => Promise<void>;
   onError: (error: unknown) => void;
+};
+
+/**
+ * Process one getUpdates batch in strict order. If handling or persisting an
+ * update fails, stop immediately: later updates must not advance lastUpdateId
+ * past the failed update, otherwise Telegram will never deliver it again.
+ *
+ * @internal Exported for tests; not part of the public package API.
+ */
+export async function processTelegramUpdatesBatch(
+  updates: TelegramUpdate[],
+  deps: TelegramUpdateBatchDeps,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const update of updates) {
+    if (signal?.aborted) return;
+    try {
+      await deps.handleUpdate(update);
+    } catch (error) {
+      deps.onError(error);
+      return;
+    }
+    const nextConfig = { ...deps.getConfig(), lastUpdateId: update.update_id };
+    try {
+      await deps.persistConfig(nextConfig);
+      deps.setConfig(nextConfig);
+    } catch (error) {
+      deps.onError(error);
+      return;
+    }
+  }
+}
+
+export function createTelegramPollingRuntime(deps: TelegramUpdateBatchDeps & {
+  reloadConfig?: () => Promise<void>;
   onSuccess?: () => void;
 }): TelegramPollingRuntime {
   let abort: AbortController | undefined;
@@ -210,24 +244,7 @@ export function createTelegramPollingRuntime(deps: {
         backoffMs = MIN_BACKOFF_MS;
         deps.onSuccess?.();
 
-        for (const update of updates) {
-          if (signal.aborted) return;
-          try {
-            await deps.handleUpdate(update);
-          } catch (error) {
-            deps.onError(error);
-            // Do not advance offset on failure; retry on next poll loop.
-            continue;
-          }
-          const nextConfig = { ...deps.getConfig(), lastUpdateId: update.update_id };
-          try {
-            await deps.persistConfig(nextConfig);
-            deps.setConfig(nextConfig);
-          } catch (error) {
-            deps.onError(error);
-            continue;
-          }
-        }
+        await processTelegramUpdatesBatch(updates, deps, signal);
       } catch (error) {
         if (signal.aborted) return;
         deps.onError(error);

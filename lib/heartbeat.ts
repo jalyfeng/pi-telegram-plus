@@ -11,8 +11,8 @@ export type StatusState = Parameters<typeof formatTelegramStatusLine>[1];
 
 export type HeartbeatDeps = {
   getConfig: () => TelegramConfig;
-  getActiveTurn: () => TelegramTurn | undefined;
-  sendChatAction: (chatId: number, action: string) => Promise<void>;
+  getActiveTurns: () => TelegramTurn[];
+  sendChatAction: (chatId: number, action: string, messageThreadId?: number) => Promise<void>;
   ensurePollingStarted: () => void;
 };
 
@@ -22,14 +22,17 @@ export function createHeartbeat(deps: HeartbeatDeps) {
   let typingInFlight = false;
   let typingGeneration = 0;
 
+  const turnKey = (turn: TelegramTurn): string => `${turn.chatId}:${turn.messageThreadId ?? "main"}`;
+
   const sendTypingPulse = async (generation: number): Promise<void> => {
-    const turn = deps.getActiveTurn();
-    if (!turn || typingInFlight || generation !== typingGeneration) return;
+    const turns = deps.getActiveTurns();
+    if (turns.length === 0 || typingInFlight || generation !== typingGeneration) return;
     typingInFlight = true;
     try {
-      if (generation === typingGeneration && deps.getActiveTurn() === turn) {
-        await deps.sendChatAction(turn.chatId, "typing");
-      }
+      const activeTurnKeys = new Set(deps.getActiveTurns().map(turnKey));
+      await Promise.all(turns
+        .filter((turn) => generation === typingGeneration && activeTurnKeys.has(turnKey(turn)))
+        .map((turn) => deps.sendChatAction(turn.chatId, "typing", turn.messageThreadId)));
     } catch (err) {
       // Non-critical: the next pulse can retry while the turn is still processing.
       heartbeatLog.debug("typing pulse sendChatAction failed", { err });
@@ -46,10 +49,10 @@ export function createHeartbeat(deps: HeartbeatDeps) {
   };
 
   const syncTypingWithStatus = (state: StatusState): void => {
-    const turn = deps.getActiveTurn();
+    const turns = deps.getActiveTurns();
     // Typing strictly mirrors activeTurns.size > 0 — the same condition
     // that drives the TUI [Working...] status.
-    const shouldType = !!(state.processing && turn);
+    const shouldType = state.processing && turns.length > 0;
     if (!shouldType) {
       stopTyping();
       return;

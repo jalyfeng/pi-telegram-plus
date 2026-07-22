@@ -79,6 +79,31 @@ describe("createTelegramTransport — network-failure suppression & logging", ()
     expect(logText).not.toMatch(/HTML .*rejected/);
   });
 
+  it("sendText includes Telegram topic and source-message reply context", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const stub = vi.fn(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(init.body as string));
+      return telegramResponse(true, { message_id: 9 });
+    });
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport } = makeTransport();
+    await transport.sendText(123, "hello", 456, 789);
+    await transport.sendChatAction(123, "typing", 456);
+
+    expect(bodies[0]).toMatchObject({
+      chat_id: 123,
+      message_thread_id: 456,
+      reply_parameters: { message_id: 789 },
+      text: "hello",
+    });
+    expect(bodies[1]).toMatchObject({
+      chat_id: 123,
+      message_thread_id: 456,
+      action: "typing",
+    });
+  });
+
   it("editText swallows network failures (no console.warn, no log warn)", async () => {
     const failingFetch = vi.fn(async () => { throw new TypeError("fetch failed"); });
     globalThis.fetch = failingFetch as unknown as FetchImpl;

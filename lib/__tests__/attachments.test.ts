@@ -1,7 +1,7 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { registerTelegramAttachmentTool, sendQueuedTelegramAttachments } from "../attachments.ts";
+import { isSensitiveAttachmentRealPath, registerTelegramAttachmentTool, sendQueuedTelegramAttachments } from "../attachments.ts";
 import type { TelegramTurn, TelegramTransport } from "../types.ts";
 
 describe("tg attachment tool and queue sender", () => {
@@ -80,6 +80,57 @@ describe("tg attachment tool and queue sender", () => {
     expect(turn.queuedAttachments).toHaveLength(0);
     expect(calls).toContain("upload_document");
     expect(calls).toContain("document");
+  });
+
+  it("sends active-turn attachments to the turn's Telegram topic", async () => {
+    const tmp = await mkdtemp("/tmp/pi-tg-attach-thread-");
+    tempDirs.push(tmp);
+    const filePath = join(tmp, "thread.txt");
+    await writeFile(filePath, "hello topic");
+
+    const calls: Array<Record<string, unknown>> = [];
+    let toolDef!: { execute: (toolCallId: string, params: { paths: string[] }) => Promise<unknown> };
+    const transport: TelegramTransport = {
+      ...createTransportStub([]),
+      sendChatAction: async (chatId, action, messageThreadId) => { calls.push({ kind: "action", chatId, action, messageThreadId }); },
+      sendDocument: async (chatId, path, caption, _signal, messageThreadId, replyToMessageId) => { calls.push({ kind: "document", chatId, path, caption, messageThreadId, replyToMessageId }); },
+    };
+    registerTelegramAttachmentTool({ registerTool: (tool: any) => { toolDef = tool; } } as any, {
+      getActiveTurn: () => ({ chatId: 123, messageThreadId: 88, sourceMessageId: 8801, queuedAttachments: [] }),
+      transport,
+    });
+
+    await toolDef.execute("call", { paths: [filePath] });
+
+    expect(calls).toEqual([
+      expect.objectContaining({ kind: "action", chatId: 123, action: "upload_document", messageThreadId: 88 }),
+      expect.objectContaining({ kind: "document", chatId: 123, messageThreadId: 88, replyToMessageId: 8801 }),
+    ]);
+  });
+
+  it("rejects symlinks that resolve into sensitive paths", async () => {
+    const tmp = await mkdtemp("/tmp/pi-tg-attach-symlink-");
+    tempDirs.push(tmp);
+    const linkPath = join(tmp, "safe-looking.txt");
+    await symlink("/etc/passwd", linkPath);
+
+    const calls: string[] = [];
+    let toolDef!: { execute: (toolCallId: string, params: { paths: string[] }) => Promise<unknown> };
+    registerTelegramAttachmentTool({ registerTool: (tool: any) => { toolDef = tool; } } as any, {
+      getActiveTurn: () => ({ chatId: 123, queuedAttachments: [] }),
+      transport: createTransportStub(calls),
+    });
+
+    await expect(toolDef.execute("call", { paths: [linkPath] })).rejects.toThrow(/sensitive/);
+    expect(calls).toEqual([]);
+  });
+
+  it("uses path boundaries for sensitive prefixes", () => {
+    expect(isSensitiveAttachmentRealPath("/etc/passwd", "/home/alice")).toBe(true);
+    expect(isSensitiveAttachmentRealPath("/etc", "/home/alice")).toBe(true);
+    expect(isSensitiveAttachmentRealPath("/etc2/passwd", "/home/alice")).toBe(false);
+    expect(isSensitiveAttachmentRealPath("/home/alice/.ssh/id_rsa", "/home/alice")).toBe(true);
+    expect(isSensitiveAttachmentRealPath("/home/alice/.ssh2/id_rsa", "/home/alice")).toBe(false);
   });
 
   it("sends attachments directly when no active turn but default chat id is configured", async () => {

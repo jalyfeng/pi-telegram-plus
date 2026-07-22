@@ -192,8 +192,26 @@ describe("registerInfoCommands /status handler", () => {
     await status!.handler("", { ui });
 
     expect(sendText).toHaveBeenCalledTimes(1);
-    expect(sendText).toHaveBeenCalledWith(42, expected);
+    expect(sendText).toHaveBeenCalledWith(42, expected, undefined, undefined);
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("uses active Telegram turn thread/source context for direct /status sends", async () => {
+    const session = makeSession();
+    const { registry, handlers } = makeRegistry();
+    const { ui } = makeUi();
+    const { transport, sendText } = makeTransport();
+    registerInfoCommands(registry, {
+      getSession: () => session,
+      getTransport: () => transport,
+      getActiveChatId: () => 42,
+      getActiveTurn: () => ({ chatId: 99, messageThreadId: 7, sourceMessageId: 700, queuedAttachments: [] }),
+    });
+
+    const expected = buildStatusSnapshot(session);
+    await handlers.get("status")!.handler("", { ui });
+
+    expect(sendText).toHaveBeenCalledWith(99, expected, 7, 700);
   });
 
   it("falls back to ui.notify when no transport is provided", async () => {

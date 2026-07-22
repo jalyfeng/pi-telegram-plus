@@ -190,6 +190,263 @@ describe("createTelegramController media message behavior", () => {
     expect(prompts[0]).toContain("photo (1 photo frame(s))");
   });
 
+  it("includes replied-to Telegram message text in the agent prompt", async () => {
+    const prompts: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async () => [{ message_id: 1 }],
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => "queue",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 2,
+      chat: { id: 999 },
+      from: { id: 100, username: "alice" },
+      text: "What do you think?",
+      reply_to_message: {
+        message_id: 1,
+        from: { id: 200, username: "bob" },
+        text: "Original Telegram message",
+      },
+    });
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain("[telegram quoted message]");
+    expect(prompts[0]).toContain("message_id: 1");
+    expect(prompts[0]).toContain("from: @bob id:200");
+    expect(prompts[0]).toContain("Original Telegram message");
+    expect(prompts[0]).toContain("[telegram message]\nWhat do you think?");
+  });
+
+  it("includes Telegram selected quote text even without reply_to_message", async () => {
+    const prompts: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async () => [{ message_id: 1 }],
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => "queue",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 2,
+      chat: { id: 999 },
+      text: "Explain the selected quote",
+      quote: { text: "Selected quoted Telegram text", position: 5, is_manual: true },
+    });
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain("[telegram quoted text]");
+    expect(prompts[0]).toContain("Selected quoted Telegram text");
+    expect(prompts[0]).toContain("position: 5");
+    expect(prompts[0]).toContain("manual: true");
+    expect(prompts[0]).toContain("[telegram message]\nExplain the selected quote");
+  });
+
+  it("includes replied-to Telegram message id even when Telegram omits quoted content", async () => {
+    const prompts: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async () => [{ message_id: 1 }],
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => "queue",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 2,
+      chat: { id: 999 },
+      text: "Can you see what I replied to?",
+      reply_to_message: { message_id: 1 },
+    });
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain("[telegram quoted message]");
+    expect(prompts[0]).toContain("message_id: 1");
+    expect(prompts[0]).toContain("content: unavailable from Telegram update");
+    expect(prompts[0]).toContain("[telegram message]\nCan you see what I replied to?");
+  });
+
+  it("includes replied-to Telegram attachment summaries without downloading them", async () => {
+    const prompts: string[] = [];
+    const saved: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async () => [{ message_id: 1 }],
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      getMessageMode: () => "queue",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      saveIncomingTelegramAttachment: async (fileId) => {
+        saved.push(fileId);
+        return `/tmp/${fileId}`;
+      },
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 2,
+      chat: { id: 999 },
+      text: "Describe the quoted image",
+      reply_to_message: {
+        message_id: 1,
+        caption: "Quoted image caption",
+        photo: [{ file_id: "quoted-photo", file_size: 123 }],
+      },
+    });
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain("[telegram quoted message]");
+    expect(prompts[0]).toContain("caption:\nQuoted image caption");
+    expect(prompts[0]).toContain("[telegram quoted attachment]");
+    expect(prompts[0]).toContain("photo (1 photo frame(s))");
+    expect(saved).toEqual([]);
+  });
+
   it("downloads and records incoming photo attachment path", async () => {
     const prompts: string[] = [];
     const sent: string[] = [];
@@ -505,6 +762,8 @@ describe("createTelegramController media message behavior", () => {
     await vi.waitFor(() => expect(sendText).toHaveBeenCalledWith(
       999,
       "⚠️ Your message could not be delivered to π. Please retry.",
+      undefined,
+      1,
     ));
   });
 
@@ -599,7 +858,7 @@ describe("createTelegramController media message behavior", () => {
     expect(prompts).toEqual(["A"]);
     expect(firstResolved).toBe(true);
     expect(session.abort).toHaveBeenCalledTimes(1);
-    expect(sendText).toHaveBeenCalledWith(999, "⏹️ Interrupt requested.");
+    expect(sendText).toHaveBeenCalledWith(999, "⏹️ Interrupt requested.", undefined, 3);
   });
 
   it("does not block message handling while a command handler is waiting", async () => {
@@ -821,8 +1080,8 @@ describe("createTelegramController media message behavior", () => {
     })).resolves.toBeUndefined();
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(transport.sendText).toHaveBeenCalledWith(999, expect.stringContaining("Command failed"));
-    expect(transport.sendText).toHaveBeenCalledWith(999, expect.stringContaining("command boom"));
+    expect(transport.sendText).toHaveBeenCalledWith(999, expect.stringContaining("Command failed"), undefined, 1);
+    expect(transport.sendText).toHaveBeenCalledWith(999, expect.stringContaining("command boom"), undefined, 1);
   });
 
   it("sets Telegram command UI context to rpc mode and restores the previous mode", async () => {
@@ -1146,7 +1405,7 @@ describe("createTelegramController — callback keyboard cleanup ownership", () 
       message: { chat: { id: 1 }, message_id: 55 },
       data: encodeUiCallback("f:1:o:0"),
     } as any);
-    expect(transport.sendText).toHaveBeenCalledWith(1, "This prompt is no longer active.");
+    expect(transport.sendText).toHaveBeenCalledWith(1, "This prompt is no longer active.", undefined, 55);
     expect(transport.removeInlineKeyboard).not.toHaveBeenCalled();
   });
 });

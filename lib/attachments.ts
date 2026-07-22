@@ -1,4 +1,5 @@
-import { stat } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { realpath, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -21,12 +22,35 @@ function outboundAttachmentLimit(): number {
 
 const SENSITIVE_PATH_PREFIXES = ["/etc", "/.ssh", "/root/.ssh"];
 
-function isSensitivePath(resolved: string): boolean {
-  const home = process.env.HOME ?? "";
+function canonicalizeExistingPath(path: string): string {
+  try { return realpathSync(path); }
+  catch { return path; }
+}
+
+function isPathAtOrInside(path: string, root: string): boolean {
+  return path === root || path.startsWith(`${root}/`);
+}
+
+/**
+ * Check the canonical path of an outbound attachment. Callers should pass a
+ * realpath() result so symlinks cannot hide sensitive targets.
+ *
+ * @internal Exported for tests; not part of the public module API.
+ */
+export function isSensitiveAttachmentRealPath(realPath: string, home = process.env.HOME ?? ""): boolean {
+  const roots = new Set<string>();
   for (const prefix of SENSITIVE_PATH_PREFIXES) {
-    if (resolved.startsWith(prefix)) return true;
+    roots.add(prefix);
+    roots.add(canonicalizeExistingPath(prefix));
   }
-  if (home && resolved.startsWith(home + "/.ssh")) return true;
+  if (home) {
+    const homeSsh = resolve(home, ".ssh");
+    roots.add(homeSsh);
+    roots.add(canonicalizeExistingPath(homeSsh));
+  }
+  for (const root of roots) {
+    if (isPathAtOrInside(realPath, root)) return true;
+  }
   return false;
 }
 
@@ -42,6 +66,8 @@ function sizeLimitError(path: string, size: number, max: number): string {
 type ResolvedTelegramAttachment = {
   path: string;
   fileName: string;
+  messageThreadId?: number;
+  replyToMessageId?: number;
 };
 
 async function sendTelegramAttachment(
@@ -58,18 +84,18 @@ async function sendTelegramAttachment(
     }
     if (isPhotoPath(attachment.path)) {
       try {
-        await transport.sendChatAction(chatId, "upload_photo");
-        await transport.sendPhoto(chatId, attachment.path, attachment.fileName, true);
+        await transport.sendChatAction(chatId, "upload_photo", attachment.messageThreadId);
+        await transport.sendPhoto(chatId, attachment.path, attachment.fileName, true, undefined, attachment.messageThreadId, attachment.replyToMessageId);
         return;
       } catch (err) {
         attachLog.warn("sendPhoto failed; falling back to sendDocument", { chatId, fileName: attachment.fileName, err });
-        await transport.sendChatAction(chatId, "upload_document");
-        await transport.sendDocument(chatId, attachment.path, attachment.fileName);
+        await transport.sendChatAction(chatId, "upload_document", attachment.messageThreadId);
+        await transport.sendDocument(chatId, attachment.path, attachment.fileName, undefined, attachment.messageThreadId, attachment.replyToMessageId);
         return;
       }
     }
-    await transport.sendChatAction(chatId, "upload_document");
-    await transport.sendDocument(chatId, attachment.path, attachment.fileName);
+    await transport.sendChatAction(chatId, "upload_document", attachment.messageThreadId);
+    await transport.sendDocument(chatId, attachment.path, attachment.fileName, undefined, attachment.messageThreadId, attachment.replyToMessageId);
     return;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -107,20 +133,27 @@ export function registerTelegramAttachmentTool(
     }),
     async execute(_toolCallId, params) {
       const maxBytes = outboundAttachmentLimit();
+      const activeTurn = deps.getActiveTurn();
       const pendingAttachments: ResolvedTelegramAttachment[] = [];
       for (const rawPath of params.paths) {
         const resolved = resolve(rawPath);
-        if (isSensitivePath(resolved)) throw new Error(`Attachment path not allowed (sensitive): ${rawPath}`);
-        const stats = await stat(resolved);
+        const canonical = await realpath(resolved);
+        if (isSensitiveAttachmentRealPath(canonical)) throw new Error(`Attachment path not allowed (sensitive): ${rawPath}`);
+        const stats = await stat(canonical);
         if (!stats.isFile()) throw new Error(`Not a file: ${rawPath}`);
         if (stats.size > maxBytes) throw new Error(sizeLimitError(rawPath, stats.size, maxBytes));
-        pendingAttachments.push({ path: resolved, fileName: basename(resolved) });
+        pendingAttachments.push({
+          path: canonical,
+          fileName: basename(canonical),
+          messageThreadId: activeTurn?.messageThreadId,
+          replyToMessageId: activeTurn?.sourceMessageId,
+        });
       }
 
       if (params.paths.length > MAX_ATTACHMENTS_PER_TURN) {
         throw new Error(`Attachment limit reached (${MAX_ATTACHMENTS_PER_TURN})`);
       }
-      const turn = deps.getActiveTurn();
+      const turn = activeTurn;
       const chatId = turn?.chatId ?? deps.getDefaultChatId?.();
       if (chatId === undefined) {
         throw new Error("tg_attach can only be used with an active Telegram chat or configured default chat id");
@@ -129,7 +162,7 @@ export function registerTelegramAttachmentTool(
       for (const attachment of pendingAttachments) {
         await sendTelegramAttachment(chatId, attachment, deps.transport, maxBytes, async (message) => {
           failed.push(message);
-          await deps.transport.sendText(chatId, message).catch(attachLog.swallow("warn", "sendText attachment error notice failed", { chatId }));
+          await deps.transport.sendText(chatId, message, turn?.messageThreadId, turn?.sourceMessageId).catch(attachLog.swallow("warn", "sendText attachment error notice failed", { chatId, messageThreadId: turn?.messageThreadId }));
         });
       }
       return {
@@ -151,8 +184,12 @@ export async function sendQueuedTelegramAttachments(
   turn.attachmentsSent = true;
   const maxBytes = outboundAttachmentLimit();
   for (const attachment of turn.queuedAttachments) {
-    await sendTelegramAttachment(turn.chatId, attachment, transport, maxBytes, async (message) => {
-      await transport.sendText(turn.chatId, message).catch(attachLog.swallow("warn", "sendText attachment error notice failed", { chatId: turn.chatId }));
+    await sendTelegramAttachment(turn.chatId, {
+      ...attachment,
+      messageThreadId: turn.messageThreadId,
+      replyToMessageId: turn.sourceMessageId,
+    }, transport, maxBytes, async (message) => {
+      await transport.sendText(turn.chatId, message, turn.messageThreadId, turn.sourceMessageId).catch(attachLog.swallow("warn", "sendText attachment error notice failed", { chatId: turn.chatId, messageThreadId: turn.messageThreadId }));
     });
   }
 }

@@ -144,6 +144,11 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
     return token;
   };
 
+  const messageTargetFields = (messageThreadId?: number, replyToMessageId?: number): Record<string, unknown> => ({
+    ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+    ...(replyToMessageId !== undefined ? { reply_parameters: { message_id: replyToMessageId } } : {}),
+  });
+
   /** True when an error represents a network-level failure (fetch rejected,
    *  DNS, connection refused/timeout, …). When the bot is unreachable the
    *  plain-text fallback retry will fail identically, so callers should skip
@@ -174,7 +179,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
   };
 
   return {
-    async sendText(chatId, text) {
+    async sendText(chatId, text, messageThreadId, replyToMessageId) {
       const sent: TelegramSentMessage[] = [];
       // Use the semantic HTML splitter so multi-message sends cut at block
       // boundaries (every chunk is independently valid Telegram HTML) instead
@@ -185,6 +190,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
           chat_id: chatId,
           text: chunk,
           parse_mode: "HTML",
+          ...messageTargetFields(messageThreadId, replyToMessageId),
         };
         const msg = await callApi<TelegramSentMessage>("sendMessage", body)
           .catch((err) => {
@@ -196,6 +202,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
             return callApi<TelegramSentMessage>("sendMessage", {
               chat_id: chatId,
               text: stripHtml(chunk),
+              ...messageTargetFields(messageThreadId, replyToMessageId),
             });
           });
         sent.push(msg);
@@ -203,7 +210,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
       return sent;
     },
 
-    async sendButtons(chatId, text, rows) {
+    async sendButtons(chatId, text, rows, messageThreadId, replyToMessageId) {
       // Button messages cannot be split without duplicating keyboards, so keep
       // title text short. The UI layer already truncates button labels.
       const reply_markup = buildInlineKeyboard(rows);
@@ -213,6 +220,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
         text: first,
         parse_mode: "HTML",
         reply_markup,
+        ...messageTargetFields(messageThreadId, replyToMessageId),
       }).catch((err) => {
         if (isNetworkError(err)) throw err;
         warnHtmlFallback("sendButtons", err, first);
@@ -220,6 +228,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
           chat_id: chatId,
           text: stripHtml(first),
           reply_markup,
+          ...messageTargetFields(messageThreadId, replyToMessageId),
         });
       });
     },
@@ -285,7 +294,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
       }).catch(apiLog.swallow("warn", "deleteMessage failed", { chatId, messageId }));
     },
 
-    async sendDocument(chatId, path, caption, signal) {
+    async sendDocument(chatId, path, caption, signal, messageThreadId, replyToMessageId) {
       const token = requireToken();
       const maxRetries = cfg().retryCount ?? 3;
       const data = await readFile(path);
@@ -294,6 +303,8 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
         try {
           const form = new FormData();
           form.set("chat_id", String(chatId));
+          if (messageThreadId !== undefined) form.set("message_thread_id", String(messageThreadId));
+          if (replyToMessageId !== undefined) form.set("reply_parameters", JSON.stringify({ message_id: replyToMessageId }));
           if (caption) form.set("caption", caption);
           const documentBlob = new Blob([data], {
             type: inferMimeTypeFromPath(path) ?? "application/octet-stream",
@@ -321,7 +332,7 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
       throw lastError;
     },
 
-    async sendPhoto(chatId, data, caption, isPath = false, signal) {
+    async sendPhoto(chatId, data, caption, isPath = false, signal, messageThreadId, replyToMessageId) {
       const token = requireToken();
       const maxRetries = cfg().retryCount ?? 3;
       let lastError: unknown;
@@ -329,6 +340,8 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
         try {
           const form = new FormData();
           form.set("chat_id", String(chatId));
+          if (messageThreadId !== undefined) form.set("message_thread_id", String(messageThreadId));
+          if (replyToMessageId !== undefined) form.set("reply_parameters", JSON.stringify({ message_id: replyToMessageId }));
           if (caption) form.set("caption", caption);
           if (isPath) {
             const bytes = await readFile(data);
@@ -364,11 +377,12 @@ export function createTelegramTransport(getConfig: () => TelegramConfig): Telegr
       throw lastError;
     },
 
-    async sendChatAction(chatId, action) {
+    async sendChatAction(chatId, action, messageThreadId) {
       await telegramApi(requireToken(), "sendChatAction", {
         chat_id: chatId,
         action,
-      }).catch(apiLog.swallow("debug", "sendChatAction failed", { chatId, action }));
+        ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+      }).catch(apiLog.swallow("debug", "sendChatAction failed", { chatId, action, messageThreadId }));
     },
   };
 }

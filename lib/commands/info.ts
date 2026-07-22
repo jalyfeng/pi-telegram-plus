@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import type { CommandRegistry } from "./register.ts";
 import { escapeHtml } from "../html.ts";
-import type { CapturedAgentSession, TelegramTransport } from "../types.ts";
+import type { CapturedAgentSession, TelegramTransport, TelegramTurn } from "../types.ts";
 
 function formatFooterLikeTokenCount(value: number): string {
   if (value < 1_000) return value.toString();
@@ -91,6 +91,8 @@ export function registerInfoCommands(
     getTransport?: () => TelegramTransport | undefined;
     /** Optional active chat id used for direct sends. */
     getActiveChatId?: () => number | undefined;
+    /** Optional Telegram turn used to preserve thread/source message context. */
+    getActiveTurn?: () => TelegramTurn | undefined;
   },
 ): void {
   // ── /copy ──────────────────────────────────────────────────────────────
@@ -121,9 +123,10 @@ export function registerInfoCommands(
 
       const html = buildStatusSnapshot(session);
       const transport = deps.getTransport?.();
-      const chatId = deps.getActiveChatId?.();
+      const turn = deps.getActiveTurn?.();
+      const chatId = turn?.chatId ?? deps.getActiveChatId?.();
       if (transport && chatId !== undefined) {
-        await transport.sendText(chatId, html).catch(() => {
+        await transport.sendText(chatId, html, turn?.messageThreadId, turn?.sourceMessageId).catch(() => {
           // Fall back to the standard notify path if the direct send fails.
           ui.notify(html.replace(/<[^>]+>/g, ""), "info");
         });

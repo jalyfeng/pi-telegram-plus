@@ -212,17 +212,25 @@ function formatToolBrief(toolName: string, args: unknown): string {
   return summary ? `🔧 ${toolName}: ${summary}` : `🔧 ${toolName}`;
 }
 
+function summarizeFailureText(text: string): string {
+  const lines = text.split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
+  if (lines.length === 0) return "";
+  const diagnostic = [...lines].reverse().find((line) => /\b(aborted|cancelled|canceled|failed|error)\b/i.test(line));
+  return diagnostic ?? lines[0];
+}
+
 function summarizeToolResult(result: unknown, max = 96): string {
-  if (typeof result === "string") {
-    const text = result.trim();
-    return text.length <= max ? text : text.slice(0, max - 1) + "…";
-  }
+  if (typeof result === "string") return shortenSummary(summarizeFailureText(result.trim()), max);
   if (!result || typeof result !== "object") return stringifyShort(result, max);
   const r = result as Record<string, unknown>;
   const candidates = [r.errorMessage, r.message, r.error, r.stderr, r.stdout, r.text, r.output, r.result];
   const found = candidates.find((value) => typeof value === "string" && value.trim());
-  const text = typeof found === "string" ? firstLine(found) : stringifyShort(result, max);
-  return shortenSummary(text, max);
+  if (typeof found === "string") return shortenSummary(summarizeFailureText(found), max);
+
+  const parts = extractToolResultParts(result);
+  if (parts.body.trim()) return shortenSummary(summarizeFailureText(parts.body), max);
+
+  return shortenSummary(stringifyShort(result, max), max);
 }
 
 function formatToolFailureBrief(toolName: string, result: unknown, args?: unknown): string {
@@ -239,38 +247,58 @@ export function registerTelegramRenderer(
   deps: {
     getConfig: () => TelegramConfig;
     transport: TelegramTransport;
-    getActiveTurn: (chatId?: number) => TelegramTurn | undefined;
+    getActiveTurn: (chatId?: number, messageThreadId?: number) => TelegramTurn | undefined;
+    hasActiveTurns?: () => boolean;
   },
 ): void {
   const sentInlineEvents = new Set<string>();
   const toolUpdateAt = new Map<string, number>();
   const toolArgs = new Map<string, unknown>();
 
-  const currentChats = () => {
+  const defaultChats = () => {
+    if (deps.hasActiveTurns?.()) return [];
     const cfg = deps.getConfig();
     return cfg.botToken && cfg.activeChatId !== undefined ? [cfg.activeChatId] : [];
   };
 
-  const send = async (html: string) => {
-    const chatIds = currentChats();
+  const eventChatIds = () => {
+    const turn = deps.getActiveTurn();
+    return turn ? [turn.chatId] : defaultChats();
+  };
+
+  const eventTargetKey = () => {
+    const turn = deps.getActiveTurn();
+    if (turn) return `chat:${turn.chatId}:${turn.messageThreadId ?? "main"}`;
+    const chatIds = defaultChats();
+    return chatIds.length === 0 ? undefined : `default:${chatIds.join(",")}`;
+  };
+
+  const sendDefault = async (html: string) => {
+    const chatIds = defaultChats();
     if (chatIds.length === 0) return [];
     return [await deps.transport.sendText(chatIds[0], html)];
+  };
+
+  const sendNewToEventTarget = async (html: string) => {
+    const turn = deps.getActiveTurn();
+    if (turn) return [await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId)];
+    return sendDefault(html);
   };
 
   const sendToTurn = async (html: string, options: { final?: boolean } = {}) => {
     const turn = deps.getActiveTurn();
     if (!turn) {
-      await send(html);
+      await sendDefault(html);
       return;
     }
     if (turn.replaceMessageId === undefined) {
-      await deps.transport.sendText(turn.chatId, html);
+      await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId);
       return;
     }
     if (options.final && Buffer.byteLength(html, "utf8") > EDIT_LIMIT) {
       await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Assistant</b>\n\nFinal answer follows in separate message(s).").catch(renderLog.swallow("warn", "editText final-answer pointer failed", { chatId: turn.chatId, messageId: turn.replaceMessageId }));
       turn.replaceMessageId = undefined;
-      await deps.transport.sendText(turn.chatId, html);
+      await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId);
       return;
     }
     try {
@@ -279,13 +307,16 @@ export function registerTelegramRenderer(
       // Edit failed (message deleted / too many edits). Fall back to a new message.
       renderLog.debug("editText failed; falling back to sendText", { chatId: turn.chatId, messageId: turn.replaceMessageId, err });
       turn.replaceMessageId = undefined;
-      await deps.transport.sendText(turn.chatId, html);
+      await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId);
     }
   };
 
   const sendInlineEvent = async (event: string) => {
-    if (!event || sentInlineEvents.has(event)) return;
-    sentInlineEvents.add(event);
+    const keyPrefix = eventTargetKey();
+    if (!event || !keyPrefix) return;
+    const key = `${keyPrefix}:${event}`;
+    if (sentInlineEvents.has(key)) return;
+    sentInlineEvents.add(key);
     await sendToTurn(`<blockquote>${escapeHtml(event)}</blockquote>`);
   };
 
@@ -355,15 +386,15 @@ ${partial}`);
       const rendered = markdownToTelegramHtml(parts.body);
       const expandable = rendered.length > 600 || rendered.split("\n").length > 8;
       const tag = expandable ? "<blockquote expandable>" : "<blockquote>";
-      await send(`${tag}${header}\n${rendered}</blockquote>`);
+      await sendNewToEventTarget(`${tag}${header}\n${rendered}</blockquote>`);
     } else {
       await sendInlineEvent(`${status}: ${event.toolName}`);
     }
+    const eventTurn = deps.getActiveTurn();
     for (const image of parts.images) {
-      const chatIds = currentChats();
-      for (const chatId of chatIds) {
-        await deps.transport.sendChatAction(chatId, "upload_photo");
-        await deps.transport.sendPhoto(chatId, image.data, "image").catch(renderLog.swallow("warn", "sendPhoto failed", { chatId }));
+      for (const chatId of eventChatIds()) {
+        await deps.transport.sendChatAction(chatId, "upload_photo", eventTurn?.messageThreadId);
+        await deps.transport.sendPhoto(chatId, image.data, "image", false, undefined, eventTurn?.messageThreadId, eventTurn?.sourceMessageId).catch(renderLog.swallow("warn", "sendPhoto failed", { chatId }));
       }
     }
     } catch (err) { renderLog.warn("tool-result image upload failed", { err }); }
@@ -390,24 +421,24 @@ ${partial}`);
 
     const turn = deps.getActiveTurn();
     if (codeFiles.length > 0) {
-      const chatIds = turn ? [turn.chatId] : currentChats();
+      const chatIds = turn ? [turn.chatId] : defaultChats();
       for (const chatId of chatIds) {
         for (const block of codeFiles) {
           const filePath = await writeTempCodeFile(block.fileName, block.content).catch(renderLog.swallow("warn", "writeTempCodeFile failed", { fileName: block.fileName }));
           if (!filePath) continue;
-          await deps.transport.sendChatAction(chatId, "upload_document");
+          await deps.transport.sendChatAction(chatId, "upload_document", turn?.messageThreadId);
           const lines = block.content.split("\n").length;
           const caption = `📎 ${block.lang || "code"} block (${lines} lines)`;
-          await deps.transport.sendDocument(chatId, filePath, caption).catch(renderLog.swallow("warn", "sendDocument code block failed", { chatId, fileName: block.fileName }));
+          await deps.transport.sendDocument(chatId, filePath, caption, undefined, turn?.messageThreadId, turn?.sourceMessageId).catch(renderLog.swallow("warn", "sendDocument code block failed", { chatId, fileName: block.fileName }));
           await rm(filePath, { force: true }).catch(renderLog.swallow("debug", "rm temp code file failed", { filePath }));
         }
       }
     }
     for (const image of images) {
-      const chatIds = turn ? [turn.chatId] : currentChats();
+      const chatIds = turn ? [turn.chatId] : defaultChats();
       for (const chatId of chatIds) {
-        await deps.transport.sendChatAction(chatId, "upload_photo");
-        await deps.transport.sendPhoto(chatId, image.data, "image").catch(() => deps.transport.sendText(chatId, "[image output could not be sent]"));
+        await deps.transport.sendChatAction(chatId, "upload_photo", turn?.messageThreadId);
+        await deps.transport.sendPhoto(chatId, image.data, "image", false, undefined, turn?.messageThreadId, turn?.sourceMessageId).catch(() => deps.transport.sendText(chatId, "[image output could not be sent]", turn?.messageThreadId, turn?.sourceMessageId));
       }
     }
     if (!hasBody && turn?.replaceMessageId !== undefined && images.length > 0) {
