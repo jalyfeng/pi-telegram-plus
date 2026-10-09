@@ -39,7 +39,6 @@ describe("Telegram command menu", () => {
             authorizeUser: async () => true,
             setActiveChatId: async () => undefined,
             getBotUsername: () => "test_bot",
-            getMessageMode: () => "queue",
             telegramCommands,
             getActiveTurn: () => undefined,
             beginTelegramTurn: () => undefined,

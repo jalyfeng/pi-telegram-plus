@@ -57,7 +57,6 @@ describe("Telegram controller thread routing", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: (chatId, messageThreadId) => activeTurns.get(turnKey(chatId, messageThreadId)),
       beginTelegramTurn: (chatId, replaceMessageId, messageThreadId, sourceMessageId) => {

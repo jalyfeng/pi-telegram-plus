@@ -53,14 +53,21 @@ All pi session lifecycle commands are available via Telegram — start, fork, cl
 ### 🧠 Model & Authentication Management
 Switch the current model, toggle scoped model sets, adjust the thinking level, and complete OAuth or API key authentication with full interactive flows — all from Telegram. See **Model & Authentication Commands** in the Usage Guide.
 
-### 📨 Message Modes
-Three modes for handling incoming messages while the agent is running:
+### 📨 Message Delivery (TUI Parity)
+Messages sent from Telegram behave **exactly like typing in the pi terminal**:
 
-- **`steer`** (default) — New messages inject into the current turn via `streamingBehavior: "steer"`. The agent stays streaming while receiving new input.
-- **`queue`** — Messages wait in a per-chat queue for the current turn to finish.
-- **`main`** — Messages wait until the main thread is idle, then start a fresh main-thread turn. While a background workflow is running, `steer`/`queue` messages can be drained into a **workflow agent's** turn and silently swallowed from the user's perspective; `main` mode guarantees main-thread delivery instead.
+- **Main thread running** — the message steers into the main turn, like typing while the agent works.
+- **Background workflow running** (main loop idle) — the message is held (`⏳ π is busy — holding your message…`) and delivered as a **fresh main-thread turn** with a plain prompt once the main loop settles. It is never injected into a workflow agent's conversation.
+- **Everything idle** — the message starts a fresh main-thread turn immediately.
 
-> When a message is submitted while background tasks are running, `steer`/`queue` modes send a transparency notice telling you the message may be injected into a background task; `main` mode sends a "holding your message" notice until it delivers. Switch modes with `/tg-config mode <queue|steer|main>`.
+### 🤖 Workflow Rendering (TUI Parity)
+The terminal never shows subagent turns as part of the main conversation — workflow progress lives in its own panel. Telegram does the same:
+
+- Subagent turns, messages, and tool calls are **never rendered** to the chat.
+- A single `🤖 Workflow running…` line appears per workflow window.
+- The main thread's own messages (before and after a workflow) render normally.
+
+Tool and thinking rendering stay configurable via `/tg-config tool` and `/tg-config thinking` (`hidden|brief|full`).
 
 ### 🖥️ Interactive Telegram UI
 Full interactive UI components built on inline keyboards:
@@ -216,7 +223,7 @@ Quoted attachments are represented as metadata (`[telegram quoted attachment]`, 
 
 | Command | Description |
 |---------|-------------|
-| `/tg-config` | Configure rendering levels and message mode |
+| `/tg-config` | Configure tool and thinking rendering levels |
 | `/tg-switch [instance-id\|current]` | Switch the active local pi instance that owns this bot token (bot menu: `/tg_switch`). No args opens an inline selector; an id/prefix targets one live instance; `current` re-replays the active owner. Must be run on the currently active instance. See **Multi-instance Coordination**. |
 
 ### Utility Commands

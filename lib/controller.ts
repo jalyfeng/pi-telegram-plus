@@ -6,7 +6,6 @@ import type {
   TelegramCallbackQuery,
   TelegramDocument,
   TelegramMessage,
-  TelegramMessageMode,
   TelegramPhotoSize,
   TelegramTransport,
   TelegramTurn,
@@ -301,7 +300,6 @@ export function createTelegramController(deps: {
   authorizeUser(userId: number | undefined, text?: string): Promise<boolean | "paired">;
   setActiveChatId(chatId: number): Promise<void>;
   getBotUsername(): string | undefined;
-  getMessageMode: () => TelegramMessageMode;
   telegramCommands: Map<string, TelegramCommandHandler>;
   getActiveTurn(chatId: number, messageThreadId?: number): TelegramTurn | undefined;
   beginTelegramTurn(chatId: number, replaceMessageId?: number, messageThreadId?: number, sourceMessageId?: number): TelegramTurn | undefined;
@@ -376,7 +374,7 @@ export function createTelegramController(deps: {
             await waitFn.call(ctx);
           } catch (err) {
             // Session disposed / torn down during the wait — nothing to deliver to.
-            ctrlLog.debug("waitForIdle during main-mode hold interrupted", { chatId, messageThreadId, err });
+            ctrlLog.debug("waitForIdle during main-delivery hold interrupted", { chatId, messageThreadId, err });
             return;
           }
         } else {
@@ -386,6 +384,12 @@ export function createTelegramController(deps: {
         // setTimeout(0 / 50ms) after a turn ends. Yield one macrotask window
         // so the loop only proceeds when the stream stays idle.
         await sleep(120);
+        // A main turn (e.g. a goal continuation) started while we waited —
+        // behave like the terminal and steer into it instead of holding.
+        if (idleFn && !idleFn.call(ctx)) {
+          await session.prompt(text, { source: "interactive", streamingBehavior: "steer" as const });
+          return;
+        }
         continue;
       }
       try {
@@ -394,11 +398,37 @@ export function createTelegramController(deps: {
       } catch (err) {
         // A goal continuation or workflow step may have started between our
         // idle check and prompt dispatch. Loop and wait again.
-        ctrlLog.debug("main-mode prompt raced with a new turn; waiting again", { chatId, messageThreadId, attempt, err });
+        ctrlLog.debug("main-delivery prompt raced with a new turn; waiting again", { chatId, messageThreadId, attempt, err });
         await sleep(120);
       }
     }
-    await reportPromptFailure("main-mode", chatId, messageThreadId, sourceMessageId, new Error("main-mode delivery attempts exhausted"));
+    await reportPromptFailure("main-delivery", chatId, messageThreadId, sourceMessageId, new Error("main-mode delivery attempts exhausted"));
+  };
+
+  // Hold-and-deliver path shared by "main" and idle-"tui": wait until the
+  // main loop is idle, then submit a plain prompt so the message always
+  // starts a fresh main-thread turn.
+  const runMainDelivery = async (text: string, chatId: number, replaceMessageId: number | undefined, messageThreadId: number | undefined, sourceMessageId: number | undefined) => {
+    const turn = deps.beginTelegramTurn(chatId, replaceMessageId, messageThreadId, sourceMessageId);
+    if (!turn) {
+      // Target already has an active turn — reject with a busy message.
+      if (replaceMessageId !== undefined) await deps.transport.editText(chatId, replaceMessageId, "⏳ π is busy. Try again shortly.");
+      else await deps.transport.sendText(chatId, "⏳ π is busy. Try again shortly.", messageThreadId, sourceMessageId);
+      return;
+    }
+    const session = deps.getSession();
+    if (!session) return;
+    const telegramUi = deps.ui.create(chatId, messageThreadId, sourceMessageId);
+    try {
+      await runWithTelegramTurn(turn, () => runWithTelegramUi({
+        session,
+        ui: telegramUi,
+        turn,
+        run: () => deliverToMainThread(text, chatId, messageThreadId, sourceMessageId),
+      }));
+    } finally {
+      deps.endTelegramTurn(chatId, turn);
+    }
   };
 
   const runPrompt = async (text: string, chatId: number, replaceMessageId?: number, messageThreadId?: number, sourceMessageId?: number) => {
@@ -409,46 +439,27 @@ export function createTelegramController(deps: {
       return;
     }
 
-    const mode = deps.getMessageMode();
-    const isSteer = mode === "steer" && session.isStreaming;
-
-    // Transparency for background workflows (pi issue #10610 / repo issue #10):
-    // while background workflow agents run, session.isStreaming stays true even
-    // though the main thread is idle, and a steer/followUp message drains into a
-    // workflow agent's turn. We cannot change the drain target from here, but we
-    // can tell the user what is happening instead of silently swallowing the
-    // message.
-    if (mode !== "main" && session.isStreaming && !deps.getActiveTurn(chatId, messageThreadId)) {
-      await deps.transport.sendText(
-        chatId,
-        "⏳ π is busy — your message may be injected into a background task instead of the main thread. Use /tg-config mode main to hold messages until the main thread is idle.",
-        messageThreadId,
-        sourceMessageId,
-      ).catch(ctrlLog.swallow("warn", "sendText busy-notice failed", { chatId, messageThreadId, sourceMessageId }));
+    // TUI parity: a message behaves exactly like typing in the terminal.
+    // While the main loop runs its own turn, steer into it; while background
+    // agents run with the main loop idle, hold and deliver a plain prompt once
+    // the main loop settles. ctx.isIdle() distinguishes the two —
+    // session.isStreaming alone cannot (it stays true for background runs).
+    let mainBusy = session.isStreaming;
+    try {
+      const probeCtx = session.extensionRunner.createCommandContext();
+      const idleFn = typeof (probeCtx as any).isIdle === "function" ? (probeCtx as any).isIdle : undefined;
+      mainBusy = idleFn ? !idleFn.call(probeCtx) : session.isStreaming;
+    } catch {
+      mainBusy = session.isStreaming;
     }
+    const isSteer = mainBusy;
 
-    // In main mode, hold the message until the main loop is idle, then submit
-    // a plain prompt so the message always starts a fresh main-thread turn — it
-    // is never steered or queued into a background workflow agent's turn.
-    if (mode === "main") {
-      const turn = deps.beginTelegramTurn(chatId, replaceMessageId, messageThreadId, sourceMessageId);
-      if (!turn) {
-        // Target already has an active turn — reject with a busy message.
-        if (replaceMessageId !== undefined) await deps.transport.editText(chatId, replaceMessageId, "⏳ π is busy. Try again shortly.");
-        else await deps.transport.sendText(chatId, "⏳ π is busy. Try again shortly.", messageThreadId, sourceMessageId);
-        return;
-      }
-      const telegramUi = deps.ui.create(chatId, messageThreadId, sourceMessageId);
-      try {
-        await runWithTelegramTurn(turn, () => runWithTelegramUi({
-          session,
-          ui: telegramUi,
-          turn,
-          run: () => deliverToMainThread(text, chatId, messageThreadId, sourceMessageId),
-        }));
-      } finally {
-        deps.endTelegramTurn(chatId, turn);
-      }
+    // While the main loop is idle, hold the message until it settles, then
+    // submit a plain prompt so the message always starts a fresh main-thread
+    // turn; it is never steered or queued into a background workflow agent's
+    // turn.
+    if (!mainBusy) {
+      await runMainDelivery(text, chatId, replaceMessageId, messageThreadId, sourceMessageId);
       return;
     }
 
@@ -491,46 +502,11 @@ export function createTelegramController(deps: {
       }));
       return;
     }
-
-    const turn = deps.beginTelegramTurn(chatId, replaceMessageId, messageThreadId, sourceMessageId);
-    if (!turn) {
-      // Target already has an active turn — reject with a busy message.
-      if (replaceMessageId !== undefined) await deps.transport.editText(chatId, replaceMessageId, "⏳ π is busy. Try again shortly.");
-      else await deps.transport.sendText(chatId, "⏳ π is busy. Try again shortly.", messageThreadId, sourceMessageId);
-      return;
-    }
-
-    const telegramUi = deps.ui.create(chatId, messageThreadId, sourceMessageId);
-    try {
-      await runWithTelegramTurn(turn, () => runWithTelegramUi({
-        session,
-        ui: telegramUi,
-        turn,
-        run: async () => {
-          // Always provide a delivery mode. AgentSession re-checks isStreaming
-          // after awaiting input hooks, so a goal continuation can start after
-          // our snapshot above and before prompt dispatch.
-          await session.prompt(text, {
-            source: "interactive",
-            streamingBehavior: mode === "queue" ? "followUp" : "steer",
-          });
-        },
-      }));
-    } finally {
-      deps.endTelegramTurn(chatId, turn);
-    }
   };
 
   const submitText = async (text: string, chatId: number, replaceMessageId?: number, messageThreadId?: number, sourceMessageId?: number) => {
-    const mode = deps.getMessageMode();
-    if (mode === "steer") {
-      const task = runPrompt(text, chatId, replaceMessageId, messageThreadId, sourceMessageId);
-      void task.catch((err) => reportPromptFailure("steer-mode", chatId, messageThreadId, sourceMessageId, err));
-      return;
-    }
-
-    // In queue mode (and main mode), chain behind the previous prompt for
-    // this chat/thread so multiple messages wait in order.
+    // Chain behind the previous prompt for this chat/thread so multiple
+    // messages are delivered to the main thread in order.
     const key = targetKey(chatId, messageThreadId);
     const generation = getInterruptGeneration(key);
     const task = getOrCreateTail(key)
@@ -538,7 +514,7 @@ export function createTelegramController(deps: {
         if (generation !== getInterruptGeneration(key)) return;
         return runPrompt(text, chatId, replaceMessageId, messageThreadId, sourceMessageId);
       })
-      .catch((err) => reportPromptFailure("queue-mode", chatId, messageThreadId, sourceMessageId, err));
+      .catch((err) => reportPromptFailure("prompt-delivery", chatId, messageThreadId, sourceMessageId, err));
     setTail(key, task);
   };
 

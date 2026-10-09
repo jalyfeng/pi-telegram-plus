@@ -1,11 +1,10 @@
 import type { CommandRegistry, TgConfigDeps } from "./register.ts";
-import type { TelegramConfig, TelegramMessageMode, TelegramRenderLevel } from "../types.ts";
-import { RENDER_LEVELS, MODE_VALUES } from "../types.ts";
+import type { TelegramConfig, TelegramRenderLevel } from "../types.ts";
+import { RENDER_LEVELS } from "../types.ts";
 
 const KEY_LABELS: Record<string, string> = {
   tool: "🔧 Tool rendering",
   thinking: "💭 Thinking rendering",
-  mode: "📨 Message mode",
   retry: "🔄 Retry count",
 };
 
@@ -37,16 +36,6 @@ export function registerTgConfigCommands(
           await deps.persistConfig(next);
           ui.notify(`${key} set to ${value}`, "info");
           return;
-        } else if (key === "mode") {
-          if (!(MODE_VALUES as readonly string[]).includes(value)) {
-            ui.notify("Invalid. Use: /tg-config mode <queue|steer|main>", "error");
-            return;
-          }
-          const next = { ...config, messageMode: value as TelegramMessageMode };
-          deps.setConfig(next);
-          await deps.persistConfig(next);
-          ui.notify(`mode set to ${value}`, "info");
-          return;
         } else if (key === "retry") {
           const n = parseInt(value, 10);
           if (!Number.isInteger(n) || n < 0 || n > 10) {
@@ -59,7 +48,7 @@ export function registerTgConfigCommands(
           ui.notify(`retryCount set to ${n}`, "info");
           return;
         } else {
-          ui.notify("Invalid key. Use: tool, thinking, mode, or retry", "error");
+          ui.notify("Invalid key. Use: tool, thinking, or retry", "error");
           return;
         }
       }
@@ -68,13 +57,11 @@ export function registerTgConfigCommands(
       const config = deps.getConfig();
       const currentTool = config.tool ?? "brief";
       const currentThinking = config.thinking ?? "brief";
-      const currentMode = config.messageMode ?? "steer";
       const currentRetry = config.retryCount ?? 3;
 
       const choice = await ui.select("⚙️ Telegram Config", [
         `${KEY_LABELS.tool}: ${currentTool}`,
         `${KEY_LABELS.thinking}: ${currentThinking}`,
-        `${KEY_LABELS.mode}: ${currentMode}`,
         `${KEY_LABELS.retry}: ${currentRetry}`,
       ]);
       if (!choice) return;
@@ -88,9 +75,6 @@ export function registerTgConfigCommands(
       } else if (choice.startsWith(KEY_LABELS.thinking)) {
         selectedKey = "thinking";
         current = currentThinking;
-      } else if (choice.startsWith(KEY_LABELS.mode)) {
-        selectedKey = "mode";
-        current = currentMode;
       } else if (choice.startsWith(KEY_LABELS.retry)) {
         // Retry count is a number, not a select from list
         const input = await ui.input("Retry count (0-10)", `Current: ${currentRetry}`);
@@ -109,7 +93,7 @@ export function registerTgConfigCommands(
         return;
       }
 
-      const values = selectedKey === "mode" ? [...MODE_VALUES] : [...RENDER_LEVELS];
+      const values = [...RENDER_LEVELS];
       const labels = values.map((v) => (v === current ? `● ${v}` : `  ${v}`));
 
       const valueChoice = await ui.select(KEY_LABELS[selectedKey], labels);
@@ -119,7 +103,7 @@ export function registerTgConfigCommands(
       if (idx < 0 || idx >= values.length) return;
       const selectedValue = values[idx];
 
-      const next = { ...config, [selectedKey === "mode" ? "messageMode" : selectedKey]: selectedValue };
+      const next = { ...config, [selectedKey]: selectedValue };
       deps.setConfig(next);
       await deps.persistConfig(next);
       ui.notify(`${KEY_LABELS[selectedKey]} set to ${selectedValue}`, "info");

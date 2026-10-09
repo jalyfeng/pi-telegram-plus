@@ -141,7 +141,6 @@ export function registerTelegramCommands(
         telegramEnabled: true,
         tool: config.tool,
         thinking: config.thinking,
-        messageMode: config.messageMode,
       })));
       deps.getPolling().start();
       await deps.syncTelegramCommands();

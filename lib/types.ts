@@ -1,10 +1,8 @@
 import type { AgentSession, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 
 export type TelegramRenderLevel = "hidden" | "brief" | "full";
-export type TelegramMessageMode = "queue" | "steer" | "main";
 
 export const RENDER_LEVELS: readonly TelegramRenderLevel[] = ["hidden", "brief", "full"] as const;
-export const MODE_VALUES: readonly TelegramMessageMode[] = ["queue", "steer", "main"] as const;
 
 export type TelegramConfigStore = {
   version: 2;
@@ -38,14 +36,6 @@ export type TelegramConfig = {
   tool?: TelegramRenderLevel;
   /** How to render thinking blocks in Telegram. */
   thinking?: TelegramRenderLevel;
-  /** How to handle incoming messages while the agent is running.
-   *  "steer" — messages inject into the current turn via streamingBehavior (default).
-   *  "queue" — messages wait for the current turn to finish.
-   *  "main"  — messages wait until the main thread is idle (background workflow
-   *            agents are running), then start a fresh main-thread turn. The
-   *            message is never injected into a workflow agent's conversation.
-   */
-  messageMode?: TelegramMessageMode;
   /** Number of retries for failed Telegram API calls (0 = no retry, default 3). */
   retryCount?: number;
 };

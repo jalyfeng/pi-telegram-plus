@@ -260,6 +260,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
       return getCurrentActiveTurn();
     },
     hasActiveTurns: () => activeTurns.size > 0,
+    getSession: getActiveSession,
   });
 
   const controller = createTelegramController({
@@ -311,7 +312,6 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
       refreshStatus();
     },
     getBotUsername: () => config.botUsername,
-    getMessageMode: () => config.messageMode ?? "steer",
   });
 
   const maxConfiguredUpdateId = (token: string): number | undefined => {

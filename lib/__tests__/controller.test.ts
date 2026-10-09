@@ -107,7 +107,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -169,7 +168,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -229,7 +227,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -295,7 +292,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -356,7 +352,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -417,7 +412,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       saveIncomingTelegramAttachment: async (fileId) => {
@@ -495,7 +489,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       saveIncomingTelegramAttachment: async (fileId, fileName, kind) => {
@@ -569,7 +562,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -592,10 +584,8 @@ describe("createTelegramController media message behavior", () => {
     await gate;
   });
 
-  it.each([
-    ["steer", "steer"],
-    ["queue", "followUp"],
-  ] as const)("delivers goal-running messages in %s mode with %s behavior", async (mode, expectedBehavior) => {
+  it("steers goal-running messages into the main turn (TUI parity)", async () => {
+    const expectedBehavior = "steer";
     const prompt = vi.fn(async (_text: string, options?: { streamingBehavior?: string }) => {
       if (!options?.streamingBehavior) {
         throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
@@ -636,7 +626,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => mode,
       telegramCommands: new Map(),
       // Goal turns are started by pi-goal, so they are streaming without an
       // entry in this extension's TelegramTurn bookkeeping map.
@@ -657,6 +646,7 @@ describe("createTelegramController media message behavior", () => {
 
   it("survives a goal continuation starting while input hooks are being dispatched", async () => {
     let streamingReads = 0;
+    let idleReads = 0;
     let session: any;
     const prompt = vi.fn(async (_text: string, options?: { streamingBehavior?: string }) => {
       // Mirrors AgentSession.prompt(): isStreaming is checked again only after
@@ -673,7 +663,12 @@ describe("createTelegramController media message behavior", () => {
         getUIContext: () => undefined,
         setUIContext: () => undefined,
         getCommand: () => undefined,
-        createCommandContext: () => ({ waitForIdle: async () => undefined }) as any,
+        createCommandContext: () => ({
+          // The goal continuation starts after the first idle probe: the main
+          // loop flips to busy while the message is held for settlement.
+          isIdle: () => idleReads++ < 2,
+          waitForIdle: async () => undefined,
+        }) as any,
       },
     };
     const sendText = vi.fn(async () => [{ message_id: 1 }]);
@@ -701,7 +696,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "steer",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number) => ({ chatId, queuedAttachments: [] }),
@@ -751,7 +745,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "steer",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number) => ({ chatId, queuedAttachments: [] }),
@@ -821,7 +814,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -911,7 +903,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: command,
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -991,7 +982,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: command,
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -1066,7 +1056,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: command,
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -1134,7 +1123,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: command,
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -1199,7 +1187,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: command,
       getActiveTurn: () => undefined,
       beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
@@ -1277,7 +1264,6 @@ describe("createTelegramController media message behavior", () => {
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: command,
       getActiveTurn: () => undefined,
       beginTelegramTurn: () => ({ chatId: 555, queuedAttachments: [], replaceMessageId: undefined }),
@@ -1335,7 +1321,7 @@ describe("createTelegramController media message behavior", () => {
     const controller = createTelegramController({
       getSession: () => session, transport, ui: uiRuntime,
       authorizeUser: async () => true, setActiveChatId: async () => undefined,
-      getBotUsername: () => "test-bot", getMessageMode: () => "queue",
+      getBotUsername: () => "test-bot",
       telegramCommands: command, getActiveTurn: () => undefined,
       beginTelegramTurn: () => ({ chatId: 1, queuedAttachments: [], replaceMessageId: undefined }),
       endTelegramTurn: () => undefined,
@@ -1376,7 +1362,6 @@ describe("createTelegramController — callback keyboard cleanup ownership", () 
       authorizeUser: async () => true,
       setActiveChatId: async () => undefined,
       getBotUsername: () => "test-bot",
-      getMessageMode: () => "queue",
       telegramCommands: new Map(),
       getActiveTurn: () => undefined,
       beginTelegramTurn: () => ({ chatId: 1, queuedAttachments: [], replaceMessageId: undefined }),

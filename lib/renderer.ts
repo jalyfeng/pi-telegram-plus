@@ -249,11 +249,55 @@ export function registerTelegramRenderer(
     transport: TelegramTransport;
     getActiveTurn: (chatId?: number, messageThreadId?: number) => TelegramTurn | undefined;
     hasActiveTurns?: () => boolean;
+    getSession?: () => { isStreaming: boolean; extensionRunner: { createCommandContext(): unknown } } | undefined;
   },
 ): void {
   const sentInlineEvents = new Set<string>();
   const toolUpdateAt = new Map<string, number>();
   const toolArgs = new Map<string, unknown>();
+
+  // ── Workflow / subagent rendering filter ────────────────────────────────
+  // The TUI never shows subagent turns as part of the main conversation —
+  // workflow progress lives in its own panel. Mirror that in Telegram:
+  // while an agent-spawning tool (subagent/workflow/…) executes, and while
+  // background agents keep the session streaming with the main loop idle,
+  // suppress their events. The main turn's own messages before/after the
+  // workflow window render normally. "full" restores the legacy behavior.
+  const AGENT_SPAWNING_TOOLS = new Set([
+    "subagent",
+    "workflow",
+    "workflow_control",
+    "subagent_wait",
+    "subagent_supervisor",
+    "intercom",
+  ]);
+  let spawningToolDepth = 0;
+  let workflowNoticeSent = false;
+
+  const isBackgroundAgentActivity = (): boolean => {
+    if (spawningToolDepth > 0) return true;
+    const session = deps.getSession?.();
+    if (!session || !session.isStreaming) return false;
+    try {
+      const ctx = session.extensionRunner.createCommandContext();
+      const idleFn = typeof (ctx as any).isIdle === "function" ? (ctx as any).isIdle : undefined;
+      return idleFn ? idleFn.call(ctx) === true : false;
+    } catch {
+      return false;
+    }
+  };
+
+  const maybeSendWorkflowNotice = async () => {
+    if (workflowNoticeSent) return;
+    workflowNoticeSent = true;
+    // A persistent line per workflow window (not an inline event — those are
+    // deduplicated per target and would swallow the next window's notice).
+    await sendNewToEventTarget("🤖 <b>Workflow running…</b>");
+  };
+
+  const onSpawningWindowClosed = () => {
+    workflowNoticeSent = false;
+  };
 
   const defaultChats = () => {
     if (deps.hasActiveTurns?.()) return [];
@@ -335,8 +379,33 @@ export function registerTelegramRenderer(
     } catch (err) { renderLog.warn("render status-clear handler failed", { err }); }
   });
 
+  pi.on("agent_start", async () => {
+    try {
+    sentInlineEvents.clear();
+    toolArgs.clear();
+    toolUpdateAt.clear();
+    workflowNoticeSent = false;
+    const turn = deps.getActiveTurn();
+    if (!turn) return;
+    if (turn.replaceMessageId !== undefined) await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Working…</b>");
+    } catch (err) { renderLog.warn("render status-clear handler failed", { err }); }
+  });
+
   pi.on("tool_execution_start", async (event) => {
     try {
+    // Agent-spawning tools: their execution window belongs to subagent
+    // activity, not to the main conversation. Suppress the call itself and
+    // everything nested inside it (TUI parity: workflow lives in its panel).
+    if (AGENT_SPAWNING_TOOLS.has(event.toolName)) {
+      spawningToolDepth += 1;
+      workflowNoticeSent = false;
+      await maybeSendWorkflowNotice();
+      return;
+    }
+    if (isBackgroundAgentActivity()) {
+      await maybeSendWorkflowNotice();
+      return;
+    }
     const level = renderLevel(deps.getConfig(), "tool");
     if (level === "hidden") return;
     toolArgs.set(event.toolCallId, event.args);
@@ -350,6 +419,7 @@ ${stringifyShort(event.args, 1200)}`;
 
   pi.on("tool_execution_update", async (event) => {
     try {
+    if (isBackgroundAgentActivity()) return;
     const level = renderLevel(deps.getConfig(), "tool");
     if (level !== "full") return;
     const now = Date.now();
@@ -365,6 +435,15 @@ ${partial}`);
 
   pi.on("tool_execution_end", async (event) => {
     try {
+    if (AGENT_SPAWNING_TOOLS.has(event.toolName)) {
+      spawningToolDepth = Math.max(0, spawningToolDepth - 1);
+      if (spawningToolDepth === 0) onSpawningWindowClosed();
+      return;
+    }
+    if (isBackgroundAgentActivity()) {
+      await maybeSendWorkflowNotice();
+      return;
+    }
     const level = renderLevel(deps.getConfig(), "tool");
     toolUpdateAt.delete(event.toolCallId);
     const args = toolArgs.get(event.toolCallId);
@@ -404,6 +483,13 @@ ${partial}`);
     try {
     const message = event.message as AnyMessage;
     if (message.role !== "assistant") return;
+    // Subagent turns emit assistant messages in the same session stream.
+    // The TUI never shows them as conversation — suppress them while agent
+    // activity is in flight and the main loop is idle.
+    if (isBackgroundAgentActivity()) {
+      await maybeSendWorkflowNotice();
+      return;
+    }
     const config = deps.getConfig();
     const thinkingLevel = renderLevel(config, "thinking");
     const toolLevel = renderLevel(config, "tool");
