@@ -80,19 +80,28 @@ async function testVersion(version) {
   try {
     await copyWorkspace(workDir);
     // The matrix owns the pi version under test. Drop the repo's pinned
-    // devDependency first: combining it with an explicit @<version> install
-    // triggers an npm 10 arborist crash ("Cannot read properties of null
-    // (reading 'edgesOut')") on lockfile-less trees.
+    // devDependency and peer declarations first: combining them with an
+    // explicit @<version> install triggers an npm 10 arborist crash
+    // ("Cannot read properties of null (reading 'edgesOut')") on
+    // lockfile-less trees, and --legacy-peer-deps silently skips the
+    // optional root peer instead of installing it.
     const pkgPath = join(workDir, "package.json");
     const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
     if (pkg.devDependencies?.["@earendil-works/pi-coding-agent"]) {
       delete pkg.devDependencies["@earendil-works/pi-coding-agent"];
-      await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
     }
+    if (pkg.peerDependencies?.["@earendil-works/pi-coding-agent"]) {
+      delete pkg.peerDependencies["@earendil-works/pi-coding-agent"];
+    }
+    if (pkg.peerDependenciesMeta?.["@earendil-works/pi-coding-agent"]) {
+      delete pkg.peerDependenciesMeta["@earendil-works/pi-coding-agent"];
+    }
+    await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
     const packageLock = join(workDir, "package-lock.json");
     if (existsSync(packageLock)) await rm(packageLock, { force: true });
     await run("npm", [
       "install",
+      "--legacy-peer-deps",
       "--package-lock=false",
       "--ignore-scripts",
       "--no-audit",
