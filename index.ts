@@ -743,7 +743,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     }
     if (config.botToken && !config.botUsername) {
       try {
-        const botUsername = await getTelegramBotUsername(config.botToken);
+        const botUsername = await getTelegramBotUsername(config.botToken, config.apiBase);
         if (botUsername) {
           config = { ...config, botUsername };
           await persistCurrentConfig(config);
@@ -761,7 +761,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
       }
     }
     requestCoordinatorReconcile();
-    try { await syncTelegramCommands(config.botToken, pi); } catch (err) { indexLog.debug("syncTelegramCommands on startup failed (non-critical)", { err }); }
+    try { await syncTelegramCommands(config.botToken, pi, config.apiBase); } catch (err) { indexLog.debug("syncTelegramCommands on startup failed (non-critical)", { err }); }
     lastStatusError = undefined;
     heartbeat.startStatusHeartbeat(refreshStatus);
     refreshStatus();

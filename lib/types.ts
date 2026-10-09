@@ -38,6 +38,8 @@ export type TelegramConfig = {
   thinking?: TelegramRenderLevel;
   /** Number of retries for failed Telegram API calls (0 = no retry, default 3). */
   retryCount?: number;
+  /** Override the Telegram Bot API base URL (e.g. a self-hosted local Bot API server or a test mock). Defaults to https://api.telegram.org. */
+  apiBase?: string;
 };
 
 export type TelegramPhotoSize = {

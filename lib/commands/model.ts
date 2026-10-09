@@ -150,8 +150,11 @@ export function registerModelCommands(
     },
   });
 
-  // ── /thinking ────────────────────────────────────────────────────────
-  registry.registerCommand("thinking", {
+  // ── /tg-thinking ─────────────────────────────────────────────────────
+  // Named tg-thinking: pi 1.x ships a built-in /thinking interactive
+  // command, and a name collision would silently drop ours from the
+  // command registry / autocomplete.
+  registry.registerCommand("tg-thinking", {
     description: "Show or change thinking level",
     handler: async (args, ctx) => {
       const ui = ctx.ui;

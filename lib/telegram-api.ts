@@ -60,15 +60,21 @@ function inferMimeTypeFromPath(path: string): string | undefined {
   }
 }
 
+function telegramApiBase(apiBase?: string): string {
+  const base = apiBase ?? process.env.PI_TELEGRAM_API_BASE ?? "https://api.telegram.org";
+  return base.replace(/\/+$/, "");
+}
+
 export async function telegramApi<T>(
   token: string,
   method: string,
   body: Record<string, unknown>,
   signal?: AbortSignal,
+  apiBase?: string,
 ): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    response = await fetch(`${telegramApiBase(apiBase)}/bot${token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -84,12 +90,13 @@ export async function telegramApi<T>(
   return json.result;
 }
 
-export async function getTelegramFile(token: string, fileId: string, signal?: AbortSignal): Promise<TelegramFileInfo> {
+export async function getTelegramFile(token: string, fileId: string, signal?: AbortSignal, apiBase?: string): Promise<TelegramFileInfo> {
   return telegramApi<TelegramFileInfo>(
     token,
     "getFile",
     { file_id: fileId },
     signal,
+    apiBase,
   );
 }
 
@@ -144,7 +151,7 @@ export function createTelegramTransport(
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         ensureSendAllowed(lease);
-        return await telegramApi<T>(token, method, body, requestSignal);
+        return await telegramApi<T>(token, method, body, requestSignal, cfg().apiBase);
       } catch (error) {
         lastError = error;
         if (error instanceof TelegramSendSuppressedError || attempt >= maxRetries || requestSignal?.aborted) throw error;
@@ -355,7 +362,7 @@ export function createTelegramTransport(
           form.set("document", documentBlob, basename(path));
           try {
             ensureSendAllowed(lease);
-            const response = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+            const response = await fetch(`${telegramApiBase(cfg().apiBase)}/bot${token}/sendDocument`, {
               method: "POST",
               body: form,
               signal: sendSignal,
@@ -404,7 +411,7 @@ export function createTelegramTransport(
           }
           try {
             ensureSendAllowed(lease);
-            const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+            const response = await fetch(`${telegramApiBase(cfg().apiBase)}/bot${token}/sendPhoto`, {
               method: "POST",
               body: form,
               signal: sendSignal,
@@ -437,15 +444,15 @@ export function createTelegramTransport(
   };
 }
 
-export async function getTelegramBotUsername(token: string): Promise<string | undefined> {
-  const result = await telegramApi<{ username?: string }>(token, "getMe", {});
+export async function getTelegramBotUsername(token: string, apiBase?: string): Promise<string | undefined> {
+  const result = await telegramApi<{ username?: string }>(token, "getMe", {}, undefined, apiBase);
   return result.username;
 }
 
-export async function setTelegramMyCommands(token: string, commands: Array<{ command: string; description: string }>): Promise<void> {
+export async function setTelegramMyCommands(token: string, commands: Array<{ command: string; description: string }>, apiBase?: string): Promise<void> {
   await telegramApi(token, "setMyCommands", {
     commands,
-  });
+  }, undefined, apiBase);
 }
 
 export async function getTelegramUpdates(
@@ -462,5 +469,6 @@ export async function getTelegramUpdates(
       allowed_updates: ["message", "callback_query"],
     },
     signal,
+    config.apiBase,
   );
 }

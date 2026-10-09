@@ -125,7 +125,7 @@ are bridged to Telegram inline buttons so remote turns can interact with them:
 
 ### Command naming
 
-- Commands that mirror pi's native slash commands keep the same names (`/model`, `/session`, `/status`, `/stop`, `/thinking`, etc.) so Telegram behaves like a remote pi control surface instead of a separate bot-specific CLI.
+- Commands that mirror pi's native slash commands keep the same names (`/model`, `/session`, `/status`, `/stop`, `/tg-thinking`, etc.) so Telegram behaves like a remote pi control surface instead of a separate bot-specific CLI.
 - Commands that configure or manage the Telegram bridge itself use the `/tg-*` prefix (`/tg-global-setup`, `/tg-config`, `/tg-list`, `/tg-switch`, etc.).
 - `/pair <code>` is a Telegram-only bootstrap authorization message handled before normal command dispatch. It is intentionally short and not `/tg-pair` because the setup prompt is copied into Telegram during first-time pairing, before any user is authorized.
 - Telegram Bot API command menus do not allow hyphens, so the bot menu may show underscore aliases such as `/tg_config`, `/tg_switch`, or `/tg_global_setup`; the controller accepts both underscore and hyphen forms.
@@ -189,7 +189,7 @@ Quoted attachments are represented as metadata (`[telegram quoted attachment]`, 
 
 - `/model` — View available models / switch current model via interactive selection
 - `/scoped-models` — Toggle scoped model sets
-- `/thinking` — Adjust thinking level (off/minimal/low/medium/high/xhigh)
+- `/tg-thinking` — Adjust thinking level (off/minimal/low/medium/high/xhigh)
 - `/login` — OAuth or API key authentication with full interactive flow
 - `/logout` — Remove stored credentials
 

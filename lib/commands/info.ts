@@ -233,7 +233,7 @@ export function registerInfoCommands(
           "These are TUI-only. In Telegram, use slash commands.",
           "",
           "Send / to see available commands.",
-          "Send /model, /thinking, /compact, /new, etc.",
+          "Send /model, /tg-thinking, /compact, /new, etc.",
         ].join("\n"),
         "info",
       );

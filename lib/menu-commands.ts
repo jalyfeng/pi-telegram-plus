@@ -69,9 +69,9 @@ export function buildTelegramMenuCommands(pi: ExtensionAPI): Array<{ command: st
   return Array.from(commands, ([command, description]) => ({ command, description })).slice(0, 100);
 }
 
-export async function syncTelegramCommands(botToken: string | undefined, pi: ExtensionAPI): Promise<void> {
+export async function syncTelegramCommands(botToken: string | undefined, pi: ExtensionAPI, apiBase?: string): Promise<void> {
   if (!botToken) return;
   try {
-    await setTelegramMyCommands(botToken, buildTelegramMenuCommands(pi));
+    await setTelegramMyCommands(botToken, buildTelegramMenuCommands(pi), apiBase);
   } catch (err) { menuLog.warn("syncTelegramCommands failed", { err }); }
 }
