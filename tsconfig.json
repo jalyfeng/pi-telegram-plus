@@ -12,6 +12,6 @@
     "forceConsistentCasingInFileNames": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["index.ts", "lib/**/*.ts", "pi-host.d.ts"],
+  "include": ["index.ts", "lib/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

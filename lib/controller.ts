@@ -341,6 +341,66 @@ export function createTelegramController(deps: {
       .catch(ctrlLog.swallow("warn", "sendText prompt-failure notice failed", { chatId, messageThreadId, sourceMessageId }));
   };
 
+  // Main-mode delivery: wait until the main loop is idle, then submit a plain
+  // prompt (no streamingBehavior) so core starts a fresh main-thread turn.
+  // While background workflow agents run, session.isStreaming stays true and
+  // core rejects plain prompts; steer/followUp would drain into a workflow
+  // agent's turn instead (repo issue #10).
+  const deliverToMainThread = async (text: string, chatId: number, messageThreadId: number | undefined, sourceMessageId: number | undefined): Promise<void> => {
+    const session = deps.getSession();
+    if (!session) return;
+    const ctx = session.extensionRunner.createCommandContext();
+    const idleFn = typeof (ctx as any).isIdle === "function" ? (ctx as any).isIdle : undefined;
+    const waitFn = typeof (ctx as any).waitForIdle === "function" ? (ctx as any).waitForIdle : undefined;
+
+    let heldNoticeSent = false;
+    const sendHeldNotice = async (): Promise<void> => {
+      if (heldNoticeSent) return;
+      heldNoticeSent = true;
+      await deps.transport.sendText(
+        chatId,
+        "⏳ π is busy — holding your message until the main thread is idle.",
+        messageThreadId,
+        sourceMessageId,
+      ).catch(ctrlLog.swallow("warn", "sendText held-notice failed", { chatId, messageThreadId, sourceMessageId }));
+    };
+
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    const maxDeliveryAttempts = 20;
+    for (let attempt = 0; attempt < maxDeliveryAttempts; attempt += 1) {
+      if (session.isStreaming) {
+        await sendHeldNotice();
+        if (waitFn) {
+          try {
+            await waitFn.call(ctx);
+          } catch (err) {
+            // Session disposed / torn down during the wait — nothing to deliver to.
+            ctrlLog.debug("waitForIdle during main-mode hold interrupted", { chatId, messageThreadId, err });
+            return;
+          }
+        } else {
+          await sleep(500);
+        }
+        // Settle window: pi-goal schedules continuation turns via
+        // setTimeout(0 / 50ms) after a turn ends. Yield one macrotask window
+        // so the loop only proceeds when the stream stays idle.
+        await sleep(120);
+        continue;
+      }
+      try {
+        await session.prompt(text, { source: "interactive" });
+        return;
+      } catch (err) {
+        // A goal continuation or workflow step may have started between our
+        // idle check and prompt dispatch. Loop and wait again.
+        ctrlLog.debug("main-mode prompt raced with a new turn; waiting again", { chatId, messageThreadId, attempt, err });
+        await sleep(120);
+      }
+    }
+    await reportPromptFailure("main-mode", chatId, messageThreadId, sourceMessageId, new Error("main-mode delivery attempts exhausted"));
+  };
+
   const runPrompt = async (text: string, chatId: number, replaceMessageId?: number, messageThreadId?: number, sourceMessageId?: number) => {
     const session = deps.getSession();
     if (!session) {
@@ -351,6 +411,46 @@ export function createTelegramController(deps: {
 
     const mode = deps.getMessageMode();
     const isSteer = mode === "steer" && session.isStreaming;
+
+    // Transparency for background workflows (pi issue #10610 / repo issue #10):
+    // while background workflow agents run, session.isStreaming stays true even
+    // though the main thread is idle, and a steer/followUp message drains into a
+    // workflow agent's turn. We cannot change the drain target from here, but we
+    // can tell the user what is happening instead of silently swallowing the
+    // message.
+    if (mode !== "main" && session.isStreaming && !deps.getActiveTurn(chatId, messageThreadId)) {
+      await deps.transport.sendText(
+        chatId,
+        "⏳ π is busy — your message may be injected into a background task instead of the main thread. Use /tg-config mode main to hold messages until the main thread is idle.",
+        messageThreadId,
+        sourceMessageId,
+      ).catch(ctrlLog.swallow("warn", "sendText busy-notice failed", { chatId, messageThreadId, sourceMessageId }));
+    }
+
+    // In main mode, hold the message until the main loop is idle, then submit
+    // a plain prompt so the message always starts a fresh main-thread turn — it
+    // is never steered or queued into a background workflow agent's turn.
+    if (mode === "main") {
+      const turn = deps.beginTelegramTurn(chatId, replaceMessageId, messageThreadId, sourceMessageId);
+      if (!turn) {
+        // Target already has an active turn — reject with a busy message.
+        if (replaceMessageId !== undefined) await deps.transport.editText(chatId, replaceMessageId, "⏳ π is busy. Try again shortly.");
+        else await deps.transport.sendText(chatId, "⏳ π is busy. Try again shortly.", messageThreadId, sourceMessageId);
+        return;
+      }
+      const telegramUi = deps.ui.create(chatId, messageThreadId, sourceMessageId);
+      try {
+        await runWithTelegramTurn(turn, () => runWithTelegramUi({
+          session,
+          ui: telegramUi,
+          turn,
+          run: () => deliverToMainThread(text, chatId, messageThreadId, sourceMessageId),
+        }));
+      } finally {
+        deps.endTelegramTurn(chatId, turn);
+      }
+      return;
+    }
 
     // In steer mode, reuse the existing active turn for this chat/thread.
     // Steer messages inject into a running stream — they must not acquire a
@@ -429,10 +529,10 @@ export function createTelegramController(deps: {
       return;
     }
 
+    // In queue mode (and main mode), chain behind the previous prompt for
+    // this chat/thread so multiple messages wait in order.
     const key = targetKey(chatId, messageThreadId);
     const generation = getInterruptGeneration(key);
-
-    // In queue mode, chain behind the previous prompt for this chat/thread.
     const task = getOrCreateTail(key)
       .then(() => {
         if (generation !== getInterruptGeneration(key)) return;

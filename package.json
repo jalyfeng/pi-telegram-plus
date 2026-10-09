@@ -19,8 +19,7 @@
   "files": [
     "index.ts",
     "lib/**/*.ts",
-    "!lib/__tests__/",
-    "pi-host.d.ts"
+    "!lib/__tests__/"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",

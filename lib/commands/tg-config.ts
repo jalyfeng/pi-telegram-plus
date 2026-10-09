@@ -39,7 +39,7 @@ export function registerTgConfigCommands(
           return;
         } else if (key === "mode") {
           if (!(MODE_VALUES as readonly string[]).includes(value)) {
-            ui.notify("Invalid. Use: /tg-config mode <queue|steer>", "error");
+            ui.notify("Invalid. Use: /tg-config mode <queue|steer|main>", "error");
             return;
           }
           const next = { ...config, messageMode: value as TelegramMessageMode };

@@ -54,10 +54,13 @@ All pi session lifecycle commands are available via Telegram — start, fork, cl
 Switch the current model, toggle scoped model sets, adjust the thinking level, and complete OAuth or API key authentication with full interactive flows — all from Telegram. See **Model & Authentication Commands** in the Usage Guide.
 
 ### 📨 Message Modes
-Two modes for handling incoming messages while the agent is running:
+Three modes for handling incoming messages while the agent is running:
 
 - **`steer`** (default) — New messages inject into the current turn via `streamingBehavior: "steer"`. The agent stays streaming while receiving new input.
 - **`queue`** — Messages wait in a per-chat queue for the current turn to finish.
+- **`main`** — Messages wait until the main thread is idle, then start a fresh main-thread turn. While a background workflow is running, `steer`/`queue` messages can be drained into a **workflow agent's** turn and silently swallowed from the user's perspective; `main` mode guarantees main-thread delivery instead.
+
+> When a message is submitted while background tasks are running, `steer`/`queue` modes send a transparency notice telling you the message may be injected into a background task; `main` mode sends a "holding your message" notice until it delivers. Switch modes with `/tg-config mode <queue|steer|main>`.
 
 ### 🖥️ Interactive Telegram UI
 Full interactive UI components built on inline keyboards:
