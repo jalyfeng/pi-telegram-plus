@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { cp, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,6 +79,16 @@ async function testVersion(version) {
   console.log(`temp: ${workDir}`);
   try {
     await copyWorkspace(workDir);
+    // The matrix owns the pi version under test. Drop the repo's pinned
+    // devDependency first: combining it with an explicit @<version> install
+    // triggers an npm 10 arborist crash ("Cannot read properties of null
+    // (reading 'edgesOut')") on lockfile-less trees.
+    const pkgPath = join(workDir, "package.json");
+    const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
+    if (pkg.devDependencies?.["@earendil-works/pi-coding-agent"]) {
+      delete pkg.devDependencies["@earendil-works/pi-coding-agent"];
+      await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+    }
     const packageLock = join(workDir, "package-lock.json");
     if (existsSync(packageLock)) await rm(packageLock, { force: true });
     await run("npm", [
