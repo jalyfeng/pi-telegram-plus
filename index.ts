@@ -718,11 +718,23 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     try {
       switchResolvedConfig(await readResolvedTelegramConfig(currentSessionCwd()));
     } catch (error) {
-      switchResolvedConfig({ store: { version: 2, global: {}, workspaces: [] }, scope: "global", config: {} });
-      getActiveSession()?.extensionRunner.getUIContext().notify(
-        `Telegram config is not v2 yet. Run /tg-global-setup to recreate it. ${error instanceof Error ? error.message : String(error)}`,
-        "error",
-      );
+      // A transient read failure (e.g. racing a concurrent instance's
+      // config write) must not nuke the runtime config: keep the previous
+      // resolved config so the bot keeps polling, and surface the REAL
+      // error instead of the misleading "not v2" wording.
+      indexLog.error("readTelegramConfigStore failed on session_start; keeping previous config", { err: error });
+      if (!resolvedConfig) {
+        switchResolvedConfig({ store: { version: 2, global: {}, workspaces: [] }, scope: "global", config: {} });
+        getActiveSession()?.extensionRunner.getUIContext().notify(
+          `Telegram config could not be loaded. Run /tg-global-setup to recreate it. ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      } else {
+        getActiveSession()?.extensionRunner.getUIContext().notify(
+          `Telegram config could not be refreshed; keeping the previous configuration. ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+      }
     }
     const startupConfig = enableConfiguredTelegramOnStartup(config);
     if (startupConfig !== config) {

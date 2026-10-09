@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramConfigStore, TelegramWorkspaceConfig } from "./types.ts";
@@ -66,10 +66,50 @@ function assertV2Store(value: unknown): TelegramConfigStore {
   };
 }
 
+function isLegacyFlatConfig(value: unknown): value is TelegramConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return !("version" in record) && !("global" in record) && !("workspaces" in record);
+}
+
+/**
+ * Best-effort migration of pre-v2 store files (a flat TelegramConfig object
+ * without the version/global/workspaces wrapper, as written by early plugin
+ * versions) into the current v2 shape.
+ */
+function migrateToV2(value: unknown): TelegramConfigStore {
+  if (value && typeof value === "object" && (value as { version?: unknown }).version === 2) {
+    return assertV2Store(value);
+  }
+  if (isLegacyFlatConfig(value)) {
+    return { version: 2, global: value, workspaces: [] };
+  }
+  throw new Error("Unsupported Telegram config format. Please recreate ~/.pi/agent/tg.json as version 2 or run /tg-global-setup.");
+}
+
 export async function readTelegramConfigStore(): Promise<TelegramConfigStore> {
   const path = getTelegramConfigPath();
   if (!existsSync(path)) return emptyStore();
-  return assertV2Store(JSON.parse(await readFile(path, "utf8")));
+  const raw = await readFile(path, "utf8");
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    // A concurrent writer using a non-atomic (truncate+write) strategy can
+    // expose an empty or partial file for a moment. Retry once after a tick;
+    // the writer either finished or left the previous complete content.
+    await sleep(25);
+    value = JSON.parse(await readFile(path, "utf8"));
+  }
+  const migrated = migrateToV2(value);
+  // Upgrade legacy files on disk so the next read hits the v2 fast path.
+  const isMigration = !value || typeof value !== "object" || (value as { version?: unknown }).version !== 2;
+  if (isMigration) {
+    await withTelegramConfigLock(async () => {
+      await writeTelegramConfigStore(migrated);
+    }).catch(configLog.swallow("warn", "persist migrated Telegram config failed", { path }));
+  }
+  return migrated;
 }
 
 export async function writeTelegramConfigStore(store: TelegramConfigStore): Promise<void> {
@@ -80,7 +120,14 @@ export async function writeTelegramConfigStore(store: TelegramConfigStore): Prom
     global: store.global ?? {},
     workspaces: store.workspaces ?? [],
   };
-  await writeFile(path, JSON.stringify(normalized, null, 2) + "\n", { mode: 0o600 });
+  // Atomic replace: write a temp file and rename it over the target. A plain
+  // truncate+write leaves a window where concurrent readers (e.g. another pi
+  // instance's session_start read) see an empty or partial file and fail to
+  // parse it. rename() is atomic on POSIX, so readers always observe either
+  // the previous or the next complete content.
+  const tmpPath = `${path}.tmp`;
+  await writeFile(tmpPath, JSON.stringify(normalized, null, 2) + "\n", { mode: 0o600 });
+  await rename(tmpPath, path);
   await chmod(path, 0o600).catch(configLog.swallow("warn", "chmod config file failed", { path }));
 }
 
