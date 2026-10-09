@@ -31,11 +31,6 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # The optional peer is required at test/typecheck time (same strategy
-      # as scripts/test-pi-versions.mjs). Keep in sync with that matrix.
-      - name: Install pi peer for tests
-        run: npm install --no-save --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.81.1
-
       - name: Run tests
         run: npm test
 
