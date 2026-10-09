@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_PI_VERSIONS = ["0.80.7", "0.80.10", "0.81.1", "0.84.0", "0.85.1"];
+const DEFAULT_PI_VERSIONS = ["0.80.7", "0.80.10", "0.81.1", "0.84.0", "0.85.1", "1.0.4", "1.1.0"];
 const TEST_DEPS = [
   "typebox@1.1.39",
   "marked@18.0.4",
