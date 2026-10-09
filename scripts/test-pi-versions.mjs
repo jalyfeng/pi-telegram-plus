@@ -93,6 +93,9 @@ async function testVersion(version) {
     if (pkg.peerDependencies?.["@earendil-works/pi-coding-agent"]) {
       delete pkg.peerDependencies["@earendil-works/pi-coding-agent"];
     }
+    if (pkg.peerDependencies?.["typebox"]) {
+      delete pkg.peerDependencies["typebox"];
+    }
     if (pkg.peerDependenciesMeta?.["@earendil-works/pi-coding-agent"]) {
       delete pkg.peerDependenciesMeta["@earendil-works/pi-coding-agent"];
     }
