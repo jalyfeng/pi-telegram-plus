@@ -3,8 +3,8 @@ node_modules/
 .pnp
 .pnp.js
 
-# ── Package lock (keep out of version control for library projects) ─────
-package-lock.json
+# ── Package lock (committed: reproducible installs across npm versions) ──
+# package-lock.json is intentionally kept in version control.
 
 # ── pi coding agent ─────────────────────────────────────────────────────
 .pi/
