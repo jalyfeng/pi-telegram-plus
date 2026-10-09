@@ -41,8 +41,13 @@
     "url": "https://github.com/jalyfeng/pi-telegram-plus"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.76.0 <0.82.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.7 <0.85.0 || >=0.85.1 <0.86.0",
     "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   },
   "dependencies": {
     "marked": "^18.0.4"

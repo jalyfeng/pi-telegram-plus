@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { enableConfiguredTelegramOnStartup, resolveTelegramConfigStore } from "../config.ts";
 import type { TelegramConfigStore } from "../types.ts";
@@ -18,9 +19,13 @@ describe("enableConfiguredTelegramOnStartup", () => {
 
 describe("resolveTelegramConfigStore", () => {
   const emptyStore: TelegramConfigStore = { version: 2, global: {}, workspaces: [] };
+  const parentPath = resolve("test-fixtures");
+  const projectPath = resolve("test-fixtures", "project");
+  const subPath = resolve("test-fixtures", "project", "subdir");
+  const otherPath = resolve("test-fixtures", "other", "project");
 
   it("returns global scope when no workspaces", () => {
-    const result = resolveTelegramConfigStore(emptyStore, "/any/path");
+    const result = resolveTelegramConfigStore(emptyStore, projectPath);
     expect(result.scope).toBe("global");
     expect(result.config).toEqual({});
   });
@@ -31,7 +36,7 @@ describe("resolveTelegramConfigStore", () => {
       global: { botToken: "tok", botUsername: "bot" },
       workspaces: [],
     };
-    const result = resolveTelegramConfigStore(store, "/any/path");
+    const result = resolveTelegramConfigStore(store, projectPath);
     expect(result.scope).toBe("global");
     expect(result.config.botToken).toBe("tok");
     expect(result.config.botUsername).toBe("bot");
@@ -42,12 +47,12 @@ describe("resolveTelegramConfigStore", () => {
       version: 2,
       global: { botToken: "global-tok" },
       workspaces: [
-        { path: "/Users/test/project", config: { botToken: "ws-tok" } },
+        { path: projectPath, config: { botToken: "ws-tok" } },
       ],
     };
-    const result = resolveTelegramConfigStore(store, "/Users/test/project");
+    const result = resolveTelegramConfigStore(store, projectPath);
     expect(result.scope).toBe("workspace");
-    expect(result.workspacePath).toBe("/Users/test/project");
+    expect(result.workspacePath).toBe(projectPath);
     expect(result.config.botToken).toBe("ws-tok");
   });
 
@@ -56,10 +61,10 @@ describe("resolveTelegramConfigStore", () => {
       version: 2,
       global: {},
       workspaces: [
-        { path: "/Users/test/project", config: { botToken: "ws-tok" } },
+        { path: projectPath, config: { botToken: "ws-tok" } },
       ],
     };
-    const result = resolveTelegramConfigStore(store, "/Users/test/project/subdir");
+    const result = resolveTelegramConfigStore(store, subPath);
     expect(result.scope).toBe("workspace");
     expect(result.config.botToken).toBe("ws-tok");
   });
@@ -69,10 +74,10 @@ describe("resolveTelegramConfigStore", () => {
       version: 2,
       global: { botToken: "global-tok" },
       workspaces: [
-        { path: "/Users/test/project", config: { botToken: "ws-tok" } },
+        { path: projectPath, config: { botToken: "ws-tok" } },
       ],
     };
-    const result = resolveTelegramConfigStore(store, "/Users/other/project");
+    const result = resolveTelegramConfigStore(store, otherPath);
     expect(result.scope).toBe("global");
     expect(result.config.botToken).toBe("global-tok");
   });
@@ -82,11 +87,11 @@ describe("resolveTelegramConfigStore", () => {
       version: 2,
       global: {},
       workspaces: [
-        { path: "/Users/test", config: { botToken: "short" } },
-        { path: "/Users/test/project", config: { botToken: "long" } },
+        { path: parentPath, config: { botToken: "short" } },
+        { path: projectPath, config: { botToken: "long" } },
       ],
     };
-    const result = resolveTelegramConfigStore(store, "/Users/test/project");
+    const result = resolveTelegramConfigStore(store, projectPath);
     expect(result.scope).toBe("workspace");
     expect(result.config.botToken).toBe("long");
   });
@@ -96,11 +101,10 @@ describe("resolveTelegramConfigStore", () => {
       version: 2,
       global: {},
       workspaces: [
-        { path: "/Users/test/project", config: { botToken: "tok" } },
+        { path: projectPath, config: { botToken: "tok" } },
       ],
     };
-    // Same path should match
-    const result = resolveTelegramConfigStore(store, "/Users/test/project/");
+    const result = resolveTelegramConfigStore(store, projectPath + "/");
     expect(result.scope).toBe("workspace");
   });
 });

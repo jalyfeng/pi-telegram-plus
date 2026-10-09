@@ -1,5 +1,6 @@
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { isSensitiveAttachmentRealPath, registerTelegramAttachmentTool, sendQueuedTelegramAttachments } from "../attachments.ts";
 import type { TelegramTurn, TelegramTransport } from "../types.ts";
@@ -51,7 +52,7 @@ describe("tg attachment tool and queue sender", () => {
   });
 
   it("sends attachments immediately when an active Telegram turn exists", async () => {
-    const tmp = await mkdtemp("/tmp/pi-tg-attach-foreign-");
+    const tmp = await mkdtemp(join(tmpdir(), "pi-tg-attach-foreign-"));
     tempDirs.push(tmp);
     const filePath = join(tmp, "outside.txt");
     await writeFile(filePath, "hello");
@@ -109,10 +110,8 @@ describe("tg attachment tool and queue sender", () => {
   });
 
   it("rejects symlinks that resolve into sensitive paths", async () => {
-    const tmp = await mkdtemp("/tmp/pi-tg-attach-symlink-");
+    const tmp = await mkdtemp(join(tmpdir(), "pi-tg-attach-symlink-"));
     tempDirs.push(tmp);
-    const linkPath = join(tmp, "safe-looking.txt");
-    await symlink("/etc/passwd", linkPath);
 
     const calls: string[] = [];
     let toolDef!: { execute: (toolCallId: string, params: { paths: string[] }) => Promise<unknown> };
@@ -121,16 +120,73 @@ describe("tg attachment tool and queue sender", () => {
       transport: createTransportStub(calls),
     });
 
-    await expect(toolDef.execute("call", { paths: [linkPath] })).rejects.toThrow(/sensitive/);
-    expect(calls).toEqual([]);
+    const fakeHome = join(tmp, "fake-home");
+    const fakeSsh = join(fakeHome, ".ssh");
+    await mkdir(fakeSsh, { recursive: true });
+    const sensitiveFile = join(fakeSsh, "id_rsa");
+    await writeFile(sensitiveFile, "secret", "utf8");
+
+    let linkPath: string;
+    const originalUserProfile = process.env.USERPROFILE;
+    const originalHome = process.env.HOME;
+
+    try {
+      process.env.USERPROFILE = fakeHome;
+      process.env.HOME = fakeHome;
+
+      if (process.platform === "win32") {
+        // Directory junctions do not require elevated privileges on Windows.
+        const junctionDir = join(tmp, "safe-looking-dir");
+        await symlink(fakeSsh, junctionDir, "junction");
+        linkPath = join(junctionDir, "id_rsa");
+      } else {
+        linkPath = join(tmp, "safe-looking.txt");
+        await symlink(sensitiveFile, linkPath);
+      }
+
+      await expect(toolDef.execute("call", { paths: [linkPath] })).rejects.toThrow(/sensitive/);
+      expect(calls).toEqual([]);
+    } finally {
+      if (originalUserProfile !== undefined) process.env.USERPROFILE = originalUserProfile;
+      else delete process.env.USERPROFILE;
+      if (originalHome !== undefined) process.env.HOME = originalHome;
+      else delete process.env.HOME;
+    }
   });
 
   it("uses path boundaries for sensitive prefixes", () => {
-    expect(isSensitiveAttachmentRealPath("/etc/passwd", "/home/alice")).toBe(true);
-    expect(isSensitiveAttachmentRealPath("/etc", "/home/alice")).toBe(true);
-    expect(isSensitiveAttachmentRealPath("/etc2/passwd", "/home/alice")).toBe(false);
-    expect(isSensitiveAttachmentRealPath("/home/alice/.ssh/id_rsa", "/home/alice")).toBe(true);
-    expect(isSensitiveAttachmentRealPath("/home/alice/.ssh2/id_rsa", "/home/alice")).toBe(false);
+    const testHome = resolve("test-fixtures", "home-alice");
+    const testHomeSsh = resolve(testHome, ".ssh");
+    const testHomeSshKey = resolve(testHomeSsh, "id_rsa");
+    const testHomeSshSibling = resolve(testHome, ".ssh2", "id_rsa");
+    const testHomeSshBackup = resolve(testHome, ".ssh-backup", "id_rsa");
+    const testAllowed = resolve(testHome, "documents", "notes.txt");
+
+    // Sensitive directory itself and files below it are blocked
+    expect(isSensitiveAttachmentRealPath(testHomeSsh, testHome)).toBe(true);
+    expect(isSensitiveAttachmentRealPath(testHomeSshKey, testHome)).toBe(true);
+
+    // Sibling prefixes are not falsely blocked
+    expect(isSensitiveAttachmentRealPath(testHomeSshSibling, testHome)).toBe(false);
+    expect(isSensitiveAttachmentRealPath(testHomeSshBackup, testHome)).toBe(false);
+
+    // Regular allowed paths are not blocked
+    expect(isSensitiveAttachmentRealPath(testAllowed, testHome)).toBe(false);
+
+    // Unix system paths boundary checks
+    expect(isSensitiveAttachmentRealPath("/etc/passwd", testHome)).toBe(true);
+    expect(isSensitiveAttachmentRealPath("/etc", testHome)).toBe(true);
+    expect(isSensitiveAttachmentRealPath("/etc2/passwd", testHome)).toBe(false);
+
+    // Home discovery when HOME environment variable is absent
+    const originalHome = process.env.HOME;
+    try {
+      delete process.env.HOME;
+      expect(isSensitiveAttachmentRealPath(resolve(homedir(), ".ssh", "id_rsa"))).toBe(true);
+      expect(isSensitiveAttachmentRealPath(resolve(homedir(), ".ssh-backup", "id_rsa"))).toBe(false);
+    } finally {
+      if (originalHome !== undefined) process.env.HOME = originalHome;
+    }
   });
 
   it("sends attachments directly when no active turn but default chat id is configured", async () => {

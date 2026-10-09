@@ -11,18 +11,21 @@
 ## Compatibility
 
 - Requires Node.js `>=22.19.0`.
-- Supported pi coding agent range: `@earendil-works/pi-coding-agent >=0.76.0 <0.82.0`.
+- Supported pi coding agent range: `@earendil-works/pi-coding-agent >=0.80.7 <0.85.0 || >=0.85.1 <0.86.0`.
 - Release validation uses temporary clean installs for representative pi versions and a manual Telegram smoke test on the latest verified pi.
 - pi `0.74.x` is intentionally unsupported because its public TypeScript surface is incompatible with this extension.
+- pi versions older than `0.80.7` are no longer supported.
+- pi `0.85.0` is excluded because its published package imports the undeclared `@earendil-works/pi-server` runtime dependency.
 - Future pi minor versions should be treated as unverified until the compatibility matrix passes.
 
-| pi coding agent | Automated clean install (`typecheck` + tests) | Manual Telegram E2E |
+| pi coding agent | Automated clean install (`typecheck` + tests) | Manual Telegram end-to-end test |
 |-----------------|-----------------------------------------------|---------------------|
-| `0.76.0` | passed | not run |
-| `0.78.0` | passed | not run |
 | `0.80.7` | passed | not run |
 | `0.80.10` | passed | not run |
 | `0.81.1` | passed | passed — `/status`, `/debug`, agent prompt, `read`, `bash` + `/stop`, `tg_attach`, inbound attachment save, `/tg-config` inline callback |
+| `0.84.0` | passed | not run |
+| `0.85.0` | excluded — published package imports undeclared `@earendil-works/pi-server` runtime dependency | not run |
+| `0.85.1` | passed | passed — Telegram command handling and UI notifications |
 
 ---
 

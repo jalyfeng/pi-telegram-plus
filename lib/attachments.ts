@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -28,7 +29,23 @@ function canonicalizeExistingPath(path: string): string {
 }
 
 function isPathAtOrInside(path: string, root: string): boolean {
-  return path === root || path.startsWith(`${root}/`);
+  if (path === root) return true;
+  if (root.endsWith("/") || root.endsWith("\\")) {
+    return path.startsWith(root);
+  }
+  if (path.startsWith(`${root}/`) || path.startsWith(`${root}\\`)) {
+    return true;
+  }
+  if (process.platform === "win32") {
+    const lowerPath = path.toLowerCase();
+    const lowerRoot = root.toLowerCase();
+    if (lowerPath === lowerRoot) return true;
+    if (lowerRoot.endsWith("/") || lowerRoot.endsWith("\\")) {
+      return lowerPath.startsWith(lowerRoot);
+    }
+    return lowerPath.startsWith(`${lowerRoot}/`) || lowerPath.startsWith(`${lowerRoot}\\`);
+  }
+  return false;
 }
 
 /**
@@ -37,7 +54,7 @@ function isPathAtOrInside(path: string, root: string): boolean {
  *
  * @internal Exported for tests; not part of the public module API.
  */
-export function isSensitiveAttachmentRealPath(realPath: string, home = process.env.HOME ?? ""): boolean {
+export function isSensitiveAttachmentRealPath(realPath: string, home = homedir()): boolean {
   const roots = new Set<string>();
   for (const prefix of SENSITIVE_PATH_PREFIXES) {
     roots.add(prefix);

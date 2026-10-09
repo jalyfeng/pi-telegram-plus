@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TelegramInstanceCoordinator, telegramTokenHash } from "../instance-coordinator.ts";
+import { TelegramInstanceCoordinator, isLockContentionError, telegramTokenHash } from "../instance-coordinator.ts";
 
 const TOKEN = "123456:very-secret-token";
 const STARTED_AT = "2026-01-01T00:00:00.000Z";
@@ -199,5 +199,35 @@ describe("TelegramInstanceCoordinator", () => {
         expect(names).not.toContain(basename(oldCandidate));
 
         await rm(freshCandidate, { recursive: true, force: true });
+    });
+
+    describe("isLockContentionError", () => {
+        it("classifies EEXIST and ENOTEMPTY as lock contention across platforms", async () => {
+            const nonExistent = join(rootDir, "missing-lock");
+            expect(await isLockContentionError({ code: "EEXIST" }, nonExistent, "linux")).toBe(true);
+            expect(await isLockContentionError({ code: "ENOTEMPTY" }, nonExistent, "linux")).toBe(true);
+            expect(await isLockContentionError({ code: "EEXIST" }, nonExistent, "win32")).toBe(true);
+            expect(await isLockContentionError({ code: "ENOTEMPTY" }, nonExistent, "win32")).toBe(true);
+        });
+
+        it("treats Windows EPERM as contention when destination lock path exists", async () => {
+            const existingLock = join(rootDir, "existing-lock");
+            await mkdir(existingLock);
+            expect(await isLockContentionError({ code: "EPERM" }, existingLock, "win32")).toBe(true);
+        });
+
+        it("does not treat EPERM as contention when destination does not exist", async () => {
+            const missingLock = join(rootDir, "missing-lock");
+            expect(await isLockContentionError({ code: "EPERM" }, missingLock, "win32")).toBe(false);
+            expect(await isLockContentionError({ code: "EPERM" }, missingLock, "linux")).toBe(false);
+        });
+
+        it("does not treat unexpected permission or filesystem errors as contention", async () => {
+            const existingLock = join(rootDir, "existing-lock-for-perm");
+            await mkdir(existingLock);
+            expect(await isLockContentionError({ code: "EACCES" }, existingLock, "win32")).toBe(false);
+            expect(await isLockContentionError({ code: "EACCES" }, existingLock, "linux")).toBe(false);
+            expect(await isLockContentionError(new Error("Generic failure"), existingLock, "win32")).toBe(false);
+        });
     });
 });

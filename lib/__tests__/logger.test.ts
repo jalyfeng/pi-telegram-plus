@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readFile, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   __drainAndListFiles,
@@ -36,7 +36,7 @@ afterEach(async () => {
 async function readTodayLog(): Promise<string> {
   await drain();
   const files = await __drainAndListFiles(dir);
-  const base = files.find((f) => /^\S+\/pi-telegram-plus-\d{4}-\d{2}-\d{2}\.log$/.test(f));
+  const base = files.find((f) => /^pi-telegram-plus-\d{4}-\d{2}-\d{2}\.log$/.test(basename(f)));
   if (!base) throw new Error("no base log file produced");
   return readFile(base, "utf8");
 }
@@ -101,22 +101,28 @@ describe("logger — file sink", () => {
     const api = log.child("api");
     for (let i = 0; i < 30; i++) api.info(`event ${i}`, { i });
     await drain();
-    const files = (await __drainAndListFiles(dir)).map((f) => f.split("/").pop()!);
+    const files = await __drainAndListFiles(dir);
+    const basenames = files.map((f) => basename(f));
     // Base file plus at least one rotation suffix.
-    expect(files.some((f) => /^\S+-\d{4}-\d{2}-\d{2}\.log$/.test(f))).toBe(true);
-    expect(files.some((f) => /^\S+-\d{4}-\d{2}-\d{2}\.1\.log$/.test(f))).toBe(true);
+    expect(basenames.some((f) => /^\S+-\d{4}-\d{2}-\d{2}\.log$/.test(f))).toBe(true);
+    expect(basenames.some((f) => /^\S+-\d{4}-\d{2}-\d{2}\.1\.log$/.test(f))).toBe(true);
     // Base file must be under the cap (rotation triggers before exceeding).
-    const base = files.find((f) => /^\S+-\d{4}-\d{2}-\d{2}\.log$/.test(f))!;
-    expect((await stat(join(dir, base))).size).toBeLessThanOrEqual(120);
+    const base = files.find((f) => /^\S+-\d{4}-\d{2}-\d{2}\.log$/.test(basename(f)))!;
+    expect((await stat(base)).size).toBeLessThanOrEqual(120);
   });
 
   it("never throws and degrades to no-op if the log dir cannot be created", async () => {
     // Point at a path under a file (not a dir) so mkdir fails.
-    initLogger({ dir: "/dev/null/impossible", level: "debug" });
+    await mkdir(dir, { recursive: true });
+    const blockerFile = join(dir, "blocker");
+    const blockedDir = join(blockerFile, "logs");
+    await writeFile(blockerFile, "blocking regular file", "utf8");
+
+    initLogger({ dir: blockedDir, level: "debug" });
     expect(() => log.error("anything")).not.toThrow();
     await drain();
     // No file written; the call was a no-op.
-    expect(await __drainAndListFiles("/dev/null/impossible")).toEqual([]);
+    expect(await __drainAndListFiles(blockedDir)).toEqual([]);
   });
 
   it("getLogLevel / getLogDir / isLoggingEnabled reflect init", () => {

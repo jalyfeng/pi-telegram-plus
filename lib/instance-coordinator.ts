@@ -89,6 +89,37 @@ function isErrno(error: unknown, code: string): boolean {
     return (error as NodeJS.ErrnoException)?.code === code;
 }
 
+async function pathExists(path: string): Promise<boolean> {
+    try {
+        await stat(path);
+        return true;
+    } catch (error) {
+        if (isErrno(error, "ENOENT")) return false;
+        throw error;
+    }
+}
+
+/**
+ * Distinguish expected lock contention from unexpected filesystem permission failures.
+ * On Windows, rename onto an existing destination directory throws EPERM instead of
+ * EEXIST/ENOTEMPTY. EPERM is treated as normal contention only if the destination path exists.
+ *
+ * @internal Exported for unit tests of platform error handling.
+ */
+export async function isLockContentionError(
+    error: unknown,
+    lockPath: string,
+    platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+    if (isErrno(error, "EEXIST") || isErrno(error, "ENOTEMPTY")) {
+        return true;
+    }
+    if (platform === "win32" && isErrno(error, "EPERM")) {
+        return await pathExists(lockPath);
+    }
+    return false;
+}
+
 async function removeCoordinatorArtifact(path: string, reason: string): Promise<void> {
     await rm(path, { recursive: true, force: true }).catch(coordinatorLog.swallow("debug", reason, { path }));
 }
@@ -351,7 +382,37 @@ export class TelegramInstanceCoordinator {
                         await stageCandidate();
                         continue;
                     }
-                    if (!isErrno(error, "EEXIST") && !isErrno(error, "ENOTEMPTY")) throw error;
+                    if (!await isLockContentionError(error, this.lockPath)) {
+                        // On Windows, if destination was in the middle of deletion by another process,
+                        // NTFS transiently throws EPERM while in delete-pending state.
+                        if (process.platform === "win32" && isErrno(error, "EPERM")) {
+                            await sleep(LOCK_RETRY_MS);
+                            if (timedOut()) {
+                                throw error;
+                            }
+                            if (await isLockContentionError(error, this.lockPath)) {
+                                // Destination now exists, normal lock contention
+                            } else {
+                                try {
+                                    await rename(candidatePath, this.lockPath);
+                                    acquired = true;
+                                    break;
+                                } catch (retryErr) {
+                                    if (isErrno(retryErr, "ENOENT")) {
+                                        await stageCandidate();
+                                        continue;
+                                    }
+                                    if (await isLockContentionError(retryErr, this.lockPath)) {
+                                        // Contention on retry
+                                    } else {
+                                        throw retryErr;
+                                    }
+                                }
+                            }
+                        } else {
+                            throw error;
+                        }
+                    }
                     const currentOwner = await this.readJson<CoordinatorLockOwner>(ownerPath);
                     const modifiedAt = await stat(this.lockPath).then((value) => value.mtimeMs).catch(() => this.now());
                     const stale = this.now() - modifiedAt > LOCK_STALE_MS
@@ -365,9 +426,7 @@ export class TelegramInstanceCoordinator {
                             await removeCoordinatorArtifact(stalePath, "remove stale coordinator lock failed");
                             continue;
                         } catch (renameError) {
-                            if (!isErrno(renameError, "ENOENT")
-                                && !isErrno(renameError, "EEXIST")
-                                && !isErrno(renameError, "ENOTEMPTY")) {
+                            if (!isErrno(renameError, "ENOENT") && !await isLockContentionError(renameError, stalePath)) {
                                 throw renameError;
                             }
                         }

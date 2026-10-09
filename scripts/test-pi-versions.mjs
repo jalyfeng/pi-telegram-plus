@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_PI_VERSIONS = ["0.76.0", "0.78.0", "0.80.7", "0.80.10", "0.81.1"];
+const DEFAULT_PI_VERSIONS = ["0.80.7", "0.80.10", "0.81.1", "0.84.0", "0.85.1"];
 const TEST_DEPS = [
   "typebox@1.1.39",
   "marked@18.0.4",
@@ -26,8 +26,20 @@ function parseVersions() {
 }
 
 function run(command, args, cwd, label) {
+  let resolvedCommand = command;
+  let resolvedArgs = args;
+
+  if (command === "npm") {
+    if (process.env.npm_execpath) {
+      resolvedCommand = process.execPath;
+      resolvedArgs = [process.env.npm_execpath, ...args];
+    } else {
+      throw new Error("npm_execpath is not set. Run this script via npm (e.g. 'npm run test:pi-versions').");
+    }
+  }
+
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, args, {
+    const child = spawn(resolvedCommand, resolvedArgs, {
       cwd,
       stdio: "inherit",
       env: { ...process.env, FORCE_COLOR: process.env.FORCE_COLOR ?? "1" },

@@ -115,6 +115,7 @@ export type PiRunnerCompat = {
   setUIContext?(ui?: unknown, mode?: PiExtensionMode): void;
   createContext?(): { mode?: PiExtensionMode };
   mode?: PiExtensionMode;
+  uiContext?: unknown;
 };
 
 export type PiExtensionMode = "tui" | "rpc" | "json" | "print" | string;
@@ -298,13 +299,105 @@ export function getRunnerMode(runner: PiRunnerCompat | undefined, fallback: PiEx
   return typeof runner?.mode === "string" ? runner.mode : fallback;
 }
 
+const PI_PROMPT_METHODS = new Set(["select", "confirm", "input", "editor", "custom"]);
+
+export function isRoutedUi(ui: unknown): boolean {
+  return typeof ui === "object" && ui !== null && (ui as any).__piTelegramPlusRoutedUi === true;
+}
+
+function createPromptPreservingRoutedUi(routedUi: object, wrappedUi: object): unknown {
+  return new Proxy({}, {
+    get(_target, prop, receiver) {
+      if (typeof prop === "string" && PI_PROMPT_METHODS.has(prop)) {
+        const value = Reflect.get(wrappedUi, prop);
+        return typeof value === "function" ? value.bind(wrappedUi) : value;
+      }
+      return Reflect.get(routedUi, prop, receiver);
+    },
+    set(_target, prop, value, receiver) {
+      if (typeof prop === "string" && PI_PROMPT_METHODS.has(prop)) {
+        return Reflect.set(wrappedUi, prop, value);
+      }
+      return Reflect.set(routedUi, prop, value, receiver);
+    },
+    has(_target, prop) {
+      if (typeof prop === "string" && PI_PROMPT_METHODS.has(prop)) {
+        return prop in wrappedUi;
+      }
+      return prop in routedUi;
+    },
+    ownKeys(_target) {
+      const keys = new Set(Reflect.ownKeys(routedUi));
+      for (const method of PI_PROMPT_METHODS) {
+        if (method in wrappedUi) {
+          keys.add(method);
+        }
+      }
+      return Array.from(keys);
+    },
+    getOwnPropertyDescriptor(_target, prop) {
+      if (typeof prop === "string" && PI_PROMPT_METHODS.has(prop)) {
+        const desc = Reflect.getOwnPropertyDescriptor(wrappedUi, prop);
+        if (desc) return { ...desc, configurable: true };
+        if (prop in wrappedUi) {
+          return {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: Reflect.get(wrappedUi, prop),
+          };
+        }
+      }
+      const desc = Reflect.getOwnPropertyDescriptor(routedUi, prop);
+      if (desc) return { ...desc, configurable: true };
+      if (prop in routedUi) {
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: Reflect.get(routedUi, prop),
+        };
+      }
+      return undefined;
+    },
+  });
+}
+
 export function setRunnerUiContext(
   runner: PiRunnerCompat | undefined,
   ui: unknown,
   mode: PiExtensionMode = TELEGRAM_EXTENSION_MODE,
 ): void {
-  if (typeof runner?.setUIContext !== "function") return;
-  runner.setUIContext(ui, mode);
+  if (!runner) return;
+  if (typeof runner.setUIContext === "function") {
+    runner.setUIContext(ui as any, mode);
+  }
+  // On Pi 0.85+, runner.setUIContext wraps the provided UI with prompt-tracking handlers
+  // ({ ...ui, select, confirm, ... }). The object spread flattens dynamically routed
+  // methods at registration time. Wrap runner.uiContext in a composite proxy so prompt
+  // lifecycle events are preserved while other UI methods route dynamically.
+  if (isRoutedUi(ui) && (runner as any).uiContext !== undefined) {
+    const wrappedUi = (runner as any).uiContext;
+    if (wrappedUi && wrappedUi !== ui) {
+      (runner as any).uiContext = createPromptPreservingRoutedUi(ui as object, wrappedUi as object);
+    }
+  }
+}
+
+export function restoreRunnerUiContext(
+  runner: PiRunnerCompat | undefined,
+  ui: unknown,
+  mode: PiExtensionMode,
+): void {
+  if (!runner) return;
+  if (typeof runner.setUIContext === "function") {
+    runner.setUIContext(ui as any, mode);
+  }
+  // Restore the exact base UI context captured prior to Telegram turns, preventing
+  // wrapUIPromptContext from accumulating nested wrappers across multiple turns.
+  if ((runner as any).uiContext !== undefined) {
+    (runner as any).uiContext = ui;
+  }
 }
 
 function redactKnownTokenPrefix(value: string): string {
