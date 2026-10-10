@@ -1,4 +1,4 @@
-name: Bump version & create release tag
+name: Release & publish
 
 on:
   workflow_dispatch:
@@ -13,12 +13,15 @@ on:
           - minor
           - major
 
+# Workflow-level: bump job needs contents:write to push the release commit + tag.
 permissions:
   contents: write
 
 jobs:
   bump:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +38,7 @@ jobs:
         run: npm version ${{ inputs.bump }} --no-git-tag-version
 
       - name: Commit, tag and push
+        id: tag
         run: |
           VERSION=$(node -p "require('./package.json').version")
           git add package.json
@@ -42,3 +46,49 @@ jobs:
           git tag "v${VERSION}"
           git push origin HEAD:master
           git push origin "v${VERSION}"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+  # Publish runs as a downstream job in the SAME workflow run, so it is NOT
+  # affected by the GITHUB_TOKEN "push does not trigger other workflows" rule.
+  # (The bump job's tag push uses GITHUB_TOKEN, which would not launch a
+  # separate on:push:tags workflow — that was why the old two-workflow setup
+  # failed to auto-publish. Inlining publish here fixes it.)
+  publish:
+    needs: bump
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Verify version matches tag
+        env:
+          GITHUB_REF_NAME: ${{ needs.bump.outputs.tag }}
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag v${TAG_VERSION} does not match package.json version ${PKG_VERSION}"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Trusted publishing (OIDC): no token needed. Provenance is generated automatically.
+      - name: Publish to npm
+        run: npm publish
