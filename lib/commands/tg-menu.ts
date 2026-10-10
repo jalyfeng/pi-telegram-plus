@@ -186,7 +186,7 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
     const effectiveBotId = boundBotId ?? registry.defaultBotId;
     const effectiveBot = effectiveBotId ? registry.bots.find((b) => b.id === effectiveBotId) : undefined;
     const hasBinding = !!project;
-    const enabled = deps.getConfig().telegramEnabled !== false;
+    const enabled = project?.binding.enabled !== false; // binding is the source of truth (config may lag a persist cycle)
 
     const botLabel = effectiveBot
       ? `Bot: ${effectiveBot.name}${!hasBinding ? " (default)" : ""}`

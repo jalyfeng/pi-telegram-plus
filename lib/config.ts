@@ -153,6 +153,24 @@ export async function removeProjectBinding(projectDir: string): Promise<void> {
   await rm(path, { force: true }).catch(configLog.swallow("warn", "remove project binding failed", { path }));
 }
 
+/**
+ * Read-modify-write a project binding UNDER the config lock, so it serializes
+ * with persistProjectRuntimeState (which also writes the binding under the
+ * lock). Without this, an unguarded writeProjectBinding races with a concurrent
+ * persist that read the old binding, and the persist's late write reverts the
+ * change (e.g. toggling enabled=false got reverted to true).
+ */
+export async function updateProjectBindingLocked(
+  projectDir: string,
+  mutate: (existing: ProjectTelegramBinding) => ProjectTelegramBinding,
+): Promise<void> {
+  await withTelegramConfigLock(async () => {
+    const current = await readProjectBinding(projectDir);
+    const next = mutate(current?.binding ?? {});
+    await writeProjectBinding(projectDir, next);
+  });
+}
+
 // ── Resolution ────────────────────────────────────────────────────────────
 
 /**
@@ -355,7 +373,7 @@ export async function bindProjectTelegram(
     ...(options?.tool === undefined ? {} : { tool: options.tool }),
     ...(options?.thinking === undefined ? {} : { thinking: options.thinking }),
   };
-  await writeProjectBinding(projectDir, binding);
+  await updateProjectBindingLocked(projectDir, () => binding);
   return resolveTelegramConfig(projectDir);
 }
 

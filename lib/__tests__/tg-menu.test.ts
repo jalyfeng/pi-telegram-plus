@@ -15,7 +15,7 @@ vi.mock("../telegram-api.ts", () => ({
 import { registerTgMenuCommand, type SwitchInstanceDeps } from "../commands/tg-menu.ts";
 import type { TelegramCommandDeps } from "../commands/telegram-commands.ts";
 import type { TgConfigDeps } from "../commands/register.ts";
-import { readBotRegistry, readProjectBinding, addBot } from "../config.ts";
+import { readBotRegistry, readProjectBinding, addBot, writeProjectBinding } from "../config.ts";
 import type { BotRecord, ResolvedTelegramConfig, TelegramConfig } from "../types.ts";
 
 function makeBot(overrides: Partial<BotRecord> = {}): BotRecord {
@@ -278,16 +278,16 @@ describe("/tg multi-level menu", () => {
     expect(notifyCalls.some((c) => c.message.includes("Project bound to bot"))).toBe(true);
   });
 
-  it("Project → Enabled toggle → enables and creates binding", async () => {
+  it("Project → Enabled toggle → enables a disabled binding", async () => {
     const bot = makeBot({ name: "default-bot", token: "t-d" });
     await addBot(bot);
-    config = { telegramEnabled: false }; // start disabled
+    // seed a disabled binding (binding is the source of truth for the toggle)
+    await writeProjectBinding(projectDir, { botId: bot.id, enabled: false });
     const { ui, notifyCalls } = makeScriptedUi({
       select: ["📁 Project", "Enabled: ○ off", "⬅️ Back", "❌ Close"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     const binding = await readProjectBinding(projectDir);
-    expect(binding?.binding.botId).toBe(bot.id);
     expect(binding?.binding.enabled).toBe(true);
     expect(notifyCalls.some((c) => c.message.includes("enabled for current project"))).toBe(true);
   });

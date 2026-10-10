@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { addBot, bindProjectTelegram, findBotByIdOrName, readBotRegistry, removeBot, setDefaultBot, unbindProjectTelegram, updateBot, writeProjectBinding, readProjectBinding, readResolvedTelegramConfig } from "../config.ts";
+import { addBot, bindProjectTelegram, findBotByIdOrName, readBotRegistry, removeBot, setDefaultBot, unbindProjectTelegram, updateBot, updateProjectBindingLocked, readProjectBinding, readResolvedTelegramConfig } from "../config.ts";
 import { escapeHtml } from "../html.ts";
 import { getTelegramBotUsername } from "../telegram-api.ts";
 import { createTelegramPairingCode, ensureTelegramPairingCode, formatPairingInstructions } from "../pairing.ts";
@@ -264,13 +264,13 @@ export async function enableProjectFlow(
   const workspacePath = resolve(cwd);
   const project = await readProjectBinding(workspacePath);
   if (project) {
-    await writeProjectBinding(project.path, { ...project.binding, enabled: true });
+    await updateProjectBindingLocked(project.path, (b) => ({ ...b, enabled: true }));
   } else {
     if (!registry.defaultBotId) {
       ui.notify("No default bot set. Use /tg-bot-default to set one, or /tg → Bots → Set default.", "error");
       return;
     }
-    await writeProjectBinding(workspacePath, { botId: registry.defaultBotId, enabled: true });
+    await updateProjectBindingLocked(workspacePath, () => ({ botId: registry.defaultBotId, enabled: true }));
   }
   deps.switchResolvedConfig(await readResolvedTelegramConfig(workspacePath));
   deps.setConfig({ ...deps.getConfig(), telegramEnabled: true });
@@ -289,8 +289,19 @@ export async function disableProjectFlow(
 ): Promise<void> {
   const workspacePath = resolve(cwd);
   const project = await readProjectBinding(workspacePath);
+  const wasEnabled = deps.getConfig().telegramEnabled !== false;
+  // Disabling changes routing (enabled true→false) and disconnects the bot, so an
+  // in-progress /tg menu ends and can no longer render. Notify BEFORE the switch
+  // (while still the active owner) so the message is delivered, and tell the user
+  // how to re-enable (the menu can't, once disconnected).
+  if (wasEnabled && project) {
+    ui.notify(
+      `Disabling bot for this project. If /tg is open it will close; re-enable via /tg-cwd-connect in the TUI or /tg → Project → Enabled after restarting pi.`,
+      "info",
+    );
+  }
   if (project) {
-    await writeProjectBinding(project.path, { ...project.binding, enabled: false });
+    await updateProjectBindingLocked(project.path, (b) => ({ ...b, enabled: false }));
   } else {
     deps.setConfig({ ...deps.getConfig(), telegramEnabled: false });
   }
