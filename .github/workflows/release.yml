@@ -71,12 +71,14 @@ jobs:
 
       - name: Verify version matches tag
         env:
-          GITHUB_REF_NAME: ${{ needs.bump.outputs.tag }}
+          # Use a non-reserved name; the runner's GITHUB_REF_NAME cannot be
+          # overridden by step env and would stay "master" (the workflow ref).
+          RELEASE_TAG: ${{ needs.bump.outputs.tag }}
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${RELEASE_TAG#v}"
           PKG_VERSION=$(node -p "require('./package.json').version")
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Tag v${TAG_VERSION} does not match package.json version ${PKG_VERSION}"
+            echo "::error::Tag ${RELEASE_TAG} does not match package.json version ${PKG_VERSION}"
             exit 1
           fi
 
