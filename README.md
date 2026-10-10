@@ -203,8 +203,8 @@ Opens an inline-keyboard menu with four submenus (each with a **⬅️ Back** op
 
 | Menu | Actions |
 |------|--------|
-| **🤖 Bots** | **List bots** — show all registered bots (name, @username, default marker, pairing status) · **➕ Add bot** — prompt for name + token, create pairing code · **Set default** — select a bot as the default · **Update bot** — select a bot, then update token / name / allowedUserId / apiBase · **Remove bot** — select a bot, confirm, remove (warns if default) |
-| **📁 Project** | **Show binding** — current project binding + default bot (same as `/tg-list`) · **Bind to bot** — select a bot to bind this project to (writes `.pi/telegram.json`) · **Enable** — enable the bot for this project (creates minimal binding with default bot if none) · **Disable** — disable the bot for this project · **Unbind** — confirm, remove the project binding (falls back to default bot) |
+| **🤖 Bots** | **➕ Add bot** — prompt for name + token, create pairing code · **Bot list** — list registered bots (★ default marker, @username, pairing status); select a bot to open its action menu: **Set default** / **Update** (token / name / allowedUserId / apiBase) / **Remove** (confirm; warns if default) |
+| **📁 Project** | **Bot: <current>** — shows the bound bot (or `(default)`); press to change binding (pick another bot or **Unbind**) · **Enabled: ● on / ○ off** — toggle the bot on/off for this project |
 | **⚙️ Config** | **Tool: <current>** — select hidden / brief / full · **Thinking: <current>** — select hidden / brief / full · **Retry: <current>** — input a number 0–10 |
 | **🔄 Switch instance** | List live pi instances sharing this bot token; select one to switch (same logic as `/tg-switch`). Must be run on the currently active instance. |
 | **❌ Close** | Exit the menu. |
@@ -242,7 +242,7 @@ All flat commands remain registered and dispatchable (TUI + typing them in Teleg
 | `/tg-config [key] [value]` | Configure tool and thinking rendering levels and retry count. Direct-set: `/tg-config tool full`, `/tg-config retry 5`. No args opens an interactive selector. |
 | `/tg-switch [instance-id|current]` | Switch the active local pi instance that owns this bot token. No args opens an inline selector; an id/prefix targets one live instance; `current` re-replays the active owner. Must be run on the currently active instance. See **Multi-instance Coordination**. |
 
-**How it works:** Bots are registered once with `/tg-bot-add` or `/tg → Bots → Add bot` (token, username, pairing, etc. stored centrally). Projects reference a bot by id via `/tg-bind-cwd` or `/tg → Project → Bind to bot` — no token re-paste or re-pairing needed. Unbound projects fall back to the **default bot** (`/tg-bot-default` or `/tg → Bots → Set default`), which is the equivalent of the former "global" bot.
+**How it works:** Bots are registered once with `/tg-bot-add` or `/tg → Bots → Add bot` (token, username, pairing, etc. stored centrally). Projects reference a bot by id via `/tg-bind-cwd` or `/tg → Project → Bot: <current> → pick a bot` — no token re-paste or re-pairing needed. Unbound projects fall back to the **default bot** (`/tg-bot-default` or `/tg → Bots → Bot list → <bot> → Set default`), which is the equivalent of the former "global" bot.
 
 #### Pairing / authorization
 

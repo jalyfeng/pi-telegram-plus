@@ -27,23 +27,11 @@ function makeBot(overrides: Partial<BotRecord> = {}): BotRecord {
   };
 }
 
-/** Choice label for "Set default" / "Bind to bot" menus (includes username). */
+/** Choice label for bot-list / picker menus (matches formatBotLabel in tg-menu.ts). */
 function botChoiceFull(bot: BotRecord, isDefault: boolean): string {
   const marker = isDefault ? " ★ default" : "";
   const username = bot.botUsername ? `@${bot.botUsername}` : "no username";
   return `${bot.name}${marker} · ${username} · ${bot.id.slice(0, 8)}`;
-}
-
-/** Choice label for "Bind to bot" via bindProjectFlow (marker is " ★" not " ★ default"). */
-function botChoiceBind(bot: BotRecord, isDefault: boolean): string {
-  const marker = isDefault ? " ★" : "";
-  const username = bot.botUsername ? `@${bot.botUsername}` : "no username";
-  return `${bot.name}${marker} · ${username} · ${bot.id.slice(0, 8)}`;
-}
-
-/** Choice label for "Update bot" / "Remove bot" menus (name + id only). */
-function botChoiceSimple(bot: BotRecord): string {
-  return `${bot.name} · ${bot.id.slice(0, 8)}`;
 }
 
 /** Scripted mock UI: returns values from the script in order, one per call. */
@@ -176,14 +164,13 @@ describe("/tg multi-level menu", () => {
     expect(ui.select).toHaveBeenCalledTimes(1);
   });
 
-  it("Bots → List bots → shows bots then returns to Bots menu", async () => {
-    await addBot(makeBot({ name: "alpha", token: "t1", botUsername: "alphabot" }));
-    const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "List bots", "⬅️ Back", "❌ Close"],
-    });
+  it("Bots → Bot list → shows bots as selectable options", async () => {
+    const bot = makeBot({ name: "alpha", token: "t1", botUsername: "alphabot" });
+    await addBot(bot);
+    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back", "⬅️ Back", "❌ Close"] });
     await commands.get("tg")!("", makeCtx(ui));
-    expect(ui.select).toHaveBeenCalledTimes(4);
-    expect(notifyCalls.some((c) => c.message.includes("alpha"))).toBe(true);
+    const botListCall = ui.select.mock.calls[2]; // 3rd select = Bot list (after main + Bots submenu)
+    expect(botListCall[1]).toContain(botChoiceFull(bot, true));
   });
 
   it("Bots → Add bot → adds bot to registry", async () => {
@@ -201,153 +188,138 @@ describe("/tg multi-level menu", () => {
     expect(notifyCalls.some((c) => c.message.includes("Bot added"))).toBe(true);
   });
 
-  it("Bots → Set default → sets default bot", async () => {
+  it("Bots → Bot list → bot → Set default → sets default bot", async () => {
     const bot1 = makeBot({ name: "a" });
     const bot2 = makeBot({ name: "b" });
     await addBot(bot1);
     await addBot(bot2);
-
     // bot1 is the default (first added). bot2 is not default.
     const bot2Choice = botChoiceFull(bot2, false);
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "Set default", bot2Choice, "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", bot2Choice, "Set default", "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
     });
     await commands.get("tg")!("", makeCtx(ui));
-
     const registry = await readBotRegistry();
     expect(registry.defaultBotId).toBe(bot2.id);
     expect(notifyCalls.some((c) => c.message.includes("Default bot set to"))).toBe(true);
   });
 
-  it("Bots → Remove bot → confirms and removes", async () => {
+  it("Bots → Bot list → bot → Remove → confirms and removes", async () => {
     const bot = makeBot({ name: "toremove" });
     await addBot(bot);
-
-    const botChoice = botChoiceSimple(bot);
+    const botChoice = botChoiceFull(bot, true);
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "Remove bot", botChoice, "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoice, "Remove", "⬅️ Back", "❌ Close"],
       confirm: [true],
     });
     await commands.get("tg")!("", makeCtx(ui));
-
     const registry = await readBotRegistry();
     expect(registry.bots).toHaveLength(0);
     expect(notifyCalls.some((c) => c.message.includes("Bot removed"))).toBe(true);
   });
 
-  it("Bots → Remove bot → cancel confirm does not remove", async () => {
+  it("Bots → Bot list → bot → Remove → cancel confirm does not remove", async () => {
     const bot = makeBot({ name: "keep" });
     await addBot(bot);
-
-    const botChoice = botChoiceSimple(bot);
+    const botChoice = botChoiceFull(bot, true);
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "Remove bot", botChoice, "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoice, "Remove", "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
       confirm: [false],
     });
     await commands.get("tg")!("", makeCtx(ui));
-
     const registry = await readBotRegistry();
     expect(registry.bots).toHaveLength(1);
   });
 
-  it("Bots → Update bot → updates allowedUserId", async () => {
+  it("Bots → Bot list → bot → Update → updates allowedUserId", async () => {
     const bot = makeBot({ name: "mybot", token: "tok-x" });
     await addBot(bot);
-
-    const botChoice = botChoiceSimple(bot);
+    const botChoice = botChoiceFull(bot, true);
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "Update bot", botChoice, "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoice, "Update", "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
       input: ["allowedUserId", "99999"],
     });
     await commands.get("tg")!("", makeCtx(ui));
-
     const registry = await readBotRegistry();
     expect(registry.bots[0].allowedUserId).toBe(99999);
   });
 
-  it("Project → Show binding → shows project info", async () => {
-    const bot = makeBot({ name: "proj-bot", token: "t-p" });
+  it("Bots → Bot list → bot → per-bot action menu shows Set default/Update/Remove", async () => {
+    const bot = makeBot({ name: "zeta", token: "t-z" });
     await addBot(bot);
-
-    const { ui, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "Show binding", "⬅️ Back", "❌ Close"],
+    const { ui } = makeScriptedUi({
+      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
     });
     await commands.get("tg")!("", makeCtx(ui));
-    expect(notifyCalls.some((c) => c.message.includes("Project:"))).toBe(true);
+    const detailCall = ui.select.mock.calls[3]; // 4th select = bot detail (main + Bots + Bot list + detail)
+    expect(detailCall[1]).toEqual(["Set default", "Update", "Remove", "⬅️ Back"]);
   });
 
-  it("Project → Bind to bot → writes .pi/telegram.json", async () => {
+  it("Project → shows current binding in the Bot label", async () => {
+    const bot = makeBot({ name: "proj-bot", token: "t-p" });
+    await addBot(bot);
+    const { ui } = makeScriptedUi({ select: ["📁 Project", "⬅️ Back", "❌ Close"] });
+    await commands.get("tg")!("", makeCtx(ui));
+    const projectCall = ui.select.mock.calls[1]; // 2nd select = Project submenu (after main)
+    expect(projectCall[1]).toContain("Bot: proj-bot (default)");
+  });
+
+  it("Project → Bot label → pick bot → writes .pi/telegram.json", async () => {
     const bot = makeBot({ name: "bind-bot", token: "t-b" });
     await addBot(bot);
-
-    // bot is default (first added). bindProjectFlow uses " ★" marker.
-    const botChoice = botChoiceBind(bot, true);
+    const botChoice = botChoiceFull(bot, true);
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "Bind to bot", botChoice, "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "Bot: bind-bot (default)", botChoice, "⬅️ Back", "❌ Close"],
     });
     await commands.get("tg")!("", makeCtx(ui));
-
     const binding = await readProjectBinding(projectDir);
     expect(binding?.binding.botId).toBe(bot.id);
     expect(binding?.binding.enabled).toBe(true);
     expect(notifyCalls.some((c) => c.message.includes("Project bound to bot"))).toBe(true);
   });
 
-  it("Project → Enable → creates minimal binding with default bot", async () => {
+  it("Project → Enabled toggle → enables and creates binding", async () => {
     const bot = makeBot({ name: "default-bot", token: "t-d" });
     await addBot(bot);
-
+    config = { telegramEnabled: false }; // start disabled
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "Enable", "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "Enabled: ○ off", "⬅️ Back", "❌ Close"],
     });
     await commands.get("tg")!("", makeCtx(ui));
-
     const binding = await readProjectBinding(projectDir);
     expect(binding?.binding.botId).toBe(bot.id);
     expect(binding?.binding.enabled).toBe(true);
     expect(notifyCalls.some((c) => c.message.includes("enabled for current project"))).toBe(true);
   });
 
-  it("Project → Disable → disables binding", async () => {
+  it("Project → Enabled toggle → disables binding", async () => {
     const bot = makeBot({ name: "dis-bot", token: "t-d" });
     await addBot(bot);
-
-    // First enable via bind
-    const botChoice = botChoiceBind(bot, true);
-    const { ui: ui1 } = makeScriptedUi({
-      select: ["📁 Project", "Bind to bot", botChoice, "⬅️ Back"],
-    });
+    const botChoice = botChoiceFull(bot, true);
+    // bind first
+    const { ui: ui1 } = makeScriptedUi({ select: ["📁 Project", "Bot: dis-bot (default)", botChoice, "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui1));
-
-    // Now disable
-    const { ui: ui2, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "Disable", "⬅️ Back", "❌ Close"],
-    });
+    // toggle off
+    const { ui: ui2, notifyCalls } = makeScriptedUi({ select: ["📁 Project", "Enabled: ● on", "⬅️ Back", "❌ Close"] });
     await commands.get("tg")!("", makeCtx(ui2));
-
     const binding = await readProjectBinding(projectDir);
     expect(binding?.binding.enabled).toBe(false);
     expect(notifyCalls.some((c) => c.message.includes("disabled for current project"))).toBe(true);
   });
 
-  it("Project → Unbind → confirms and removes binding", async () => {
+  it("Project → Bot label → Unbind → confirms and removes binding", async () => {
     const bot = makeBot({ name: "unbind-bot", token: "t-u" });
     await addBot(bot);
-
-    // First bind
-    const botChoice = botChoiceBind(bot, true);
-    const { ui: ui1 } = makeScriptedUi({
-      select: ["📁 Project", "Bind to bot", botChoice, "⬅️ Back"],
-    });
+    const botChoice = botChoiceFull(bot, true);
+    // bind first
+    const { ui: ui1 } = makeScriptedUi({ select: ["📁 Project", "Bot: unbind-bot (default)", botChoice, "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui1));
-
-    // Now unbind
+    // unbind via Bot label → Unbind
     const { ui: ui2, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "Unbind", "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "Bot: unbind-bot", "Unbind", "⬅️ Back", "❌ Close"],
       confirm: [true],
     });
     await commands.get("tg")!("", makeCtx(ui2));
-
     const binding = await readProjectBinding(projectDir);
     expect(binding).toBeUndefined();
     expect(notifyCalls.some((c) => c.message.includes("Removed Telegram project binding"))).toBe(true);
@@ -411,19 +383,18 @@ describe("/tg multi-level menu", () => {
     expect(ui.select).toHaveBeenCalledTimes(3);
   });
 
-  it("Bots submenu with no bots shows info message", async () => {
-    const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "List bots", "⬅️ Back", "❌ Close"],
-    });
+  it("Bots → Bot list with no bots shows info message", async () => {
+    const { ui, notifyCalls } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back", "❌ Close"] });
     await commands.get("tg")!("", makeCtx(ui));
     expect(notifyCalls.some((c) => c.message.includes("No bots registered"))).toBe(true);
   });
 
-  it("Bots → Set default with no bots shows info message", async () => {
-    const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "Set default", "⬅️ Back", "❌ Close"],
-    });
+  it("Bots → Bot list → no bots → info (replaces old Set default with no bots)", async () => {
+    // With no bots, Bot list shows the info message; Set default is only reachable
+    // per-bot, so the old 'Set default with no bots' path no longer exists.
+    const { ui, notifyCalls } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back", "❌ Close"] });
     await commands.get("tg")!("", makeCtx(ui));
+    expect(ui.select).toHaveBeenCalledTimes(4);
     expect(notifyCalls.some((c) => c.message.includes("No bots registered"))).toBe(true);
   });
 

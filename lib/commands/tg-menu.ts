@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import { readBotRegistry } from "../config.ts";
+import { readBotRegistry, readProjectBinding } from "../config.ts";
 import type { TelegramInstanceMetadata } from "../instance-coordinator.ts";
 import type { TelegramInstanceCoordinator } from "../instance-coordinator.ts";
 import type { MenuUi, TelegramCommandDeps } from "./telegram-commands.ts";
 import type { TgConfigDeps } from "./register.ts";
+import type { BotRecord, BotRegistry } from "../types.ts";
 import { configToolFlow, configThinkingFlow, configRetryFlow } from "./tg-config.ts";
 import {
-  listBotsFlow,
   addBotFlow,
   setBotDefaultFlow,
   updateBotFlow,
@@ -16,7 +16,6 @@ import {
   enableProjectFlow,
   disableProjectFlow,
   unbindProjectFlow,
-  showProjectBindingFlow,
 } from "./telegram-commands.ts";
 
 /** Format a live instance for display in the switch selector. Exported so the
@@ -40,25 +39,21 @@ const MAIN_MENU_OPTIONS = [
 ] as const;
 
 const BOTS_MENU_OPTIONS = [
-  "List bots",
   "➕ Add bot",
-  "Set default",
-  "Update bot",
-  "Remove bot",
-  "⬅️ Back",
-] as const;
-
-const PROJECT_MENU_OPTIONS = [
-  "Show binding",
-  "Bind to bot",
-  "Enable",
-  "Disable",
-  "Unbind",
+  "Bot list",
   "⬅️ Back",
 ] as const;
 
 const CONFIG_MENU_PREFIX = "⚙️ Telegram Config";
 const BACK_LABEL = "⬅️ Back";
+const UNBIND_LABEL = "Unbind";
+
+/** Format a registered bot for display in bot-list / pickers. */
+function formatBotLabel(bot: BotRecord, registry: BotRegistry): string {
+  const marker = registry.defaultBotId === bot.id ? " ★ default" : "";
+  const username = bot.botUsername ? `@${bot.botUsername}` : "no username";
+  return `${bot.name}${marker} · ${username} · ${bot.id.slice(0, 8)}`;
+}
 
 // ── Switch instance flow deps ──────────────────────────────────────────────
 
@@ -126,84 +121,106 @@ async function botsMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): Pro
     const choice = await ui.select("🤖 Bots", [...BOTS_MENU_OPTIONS]);
     if (!choice || choice === BACK_LABEL) return true; // back to main
 
-    switch (choice) {
-      case "List bots":
-        await listBotsFlow(ui);
-        break;
-      case "➕ Add bot":
-        await addBotFlow(ui, deps);
-        break;
-      case "Set default": {
-        const registry = await readBotRegistry();
-        if (registry.bots.length === 0) {
-          ui.notify("No bots registered. Add a bot first.", "info");
-          break;
-        }
-        const choices = registry.bots.map((b) => {
-          const marker = registry.defaultBotId === b.id ? " ★ default" : "";
-          const username = b.botUsername ? `@${b.botUsername}` : "no username";
-          return `${b.name}${marker} · ${username} · ${b.id.slice(0, 8)}`;
-        });
-        const selected = await ui.select("Select a bot to set as default", [...choices, BACK_LABEL]);
-        if (!selected || selected === BACK_LABEL) break;
-        const bot = registry.bots[choices.indexOf(selected)];
-        if (bot) await setBotDefaultFlow(ui, bot.id);
-        break;
-      }
-      case "Update bot": {
-        const registry = await readBotRegistry();
-        if (registry.bots.length === 0) {
-          ui.notify("No bots registered. Add a bot first.", "info");
-          break;
-        }
-        const botChoices = registry.bots.map((b) => `${b.name} · ${b.id.slice(0, 8)}`);
-        const selected = await ui.select("Select a bot to update", [...botChoices, BACK_LABEL]);
-        if (!selected || selected === BACK_LABEL) break;
-        const bot = registry.bots[botChoices.indexOf(selected)];
-        if (bot) await updateBotFlow(ui, deps, cwd, bot.id);
-        break;
-      }
-      case "Remove bot": {
-        const registry = await readBotRegistry();
-        if (registry.bots.length === 0) {
-          ui.notify("No bots registered.", "info");
-          break;
-        }
-        const botChoices = registry.bots.map((b) => `${b.name} · ${b.id.slice(0, 8)}`);
-        const selected = await ui.select("Select a bot to remove", [...botChoices, BACK_LABEL]);
-        if (!selected || selected === BACK_LABEL) break;
-        const bot = registry.bots[botChoices.indexOf(selected)];
-        if (bot) await removeBotFlow(ui, deps, cwd, bot.id);
-        break;
-      }
+    if (choice === "➕ Add bot") {
+      await addBotFlow(ui, deps);
+    } else if (choice === "Bot list") {
+      await botListMenu(ui, deps, cwd);
     }
+    // loop re-renders the Bots submenu
   }
 }
 
-// ── Project submenu ────────────────────────────────────────────────────────
+// ── Bot list (object-first: pick a bot → per-bot actions) ──────────────────
+
+async function botListMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): Promise<void> {
+  while (true) {
+    const registry = await readBotRegistry();
+    if (registry.bots.length === 0) {
+      ui.notify("No bots registered. Use ➕ Add bot first.", "info");
+      return;
+    }
+    const choices = registry.bots.map((b) => formatBotLabel(b, registry));
+    const selected = await ui.select("Bot list", [...choices, BACK_LABEL]);
+    if (!selected || selected === BACK_LABEL) return; // back to Bots submenu
+    const bot = registry.bots[choices.indexOf(selected)];
+    if (bot) await botDetailMenu(ui, deps, cwd, bot, registry);
+    // loop re-renders the bot list (reflects default/remove changes)
+  }
+}
+
+// ── Per-bot actions ──────────────────────────────────────────────────────────
+
+async function botDetailMenu(
+  ui: MenuUi,
+  deps: TelegramCommandDeps,
+  cwd: string,
+  bot: BotRecord,
+  registry: BotRegistry,
+): Promise<void> {
+  const isDefault = registry.defaultBotId === bot.id;
+  while (true) {
+    const choice = await ui.select(
+      `🤖 ${bot.name}${isDefault ? " ★ default" : ""}`,
+      ["Set default", "Update", "Remove", BACK_LABEL],
+    );
+    if (!choice || choice === BACK_LABEL) return; // back to bot list
+
+    if (choice === "Set default") {
+      await setBotDefaultFlow(ui, bot.id);
+    } else if (choice === "Update") {
+      await updateBotFlow(ui, deps, cwd, bot.id);
+    } else if (choice === "Remove") {
+      await removeBotFlow(ui, deps, cwd, bot.id);
+      return; // removed → back to bot list (re-reads without this bot)
+    }
+    // loop re-renders the per-bot action menu
+  }
+}
+
+// ── Project submenu (two toggles: binding + enabled) ────────────────────────
 
 async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): Promise<boolean> {
   while (true) {
-    const choice = await ui.select("📁 Project", [...PROJECT_MENU_OPTIONS]);
+    const [registry, project] = await Promise.all([readBotRegistry(), readProjectBinding(cwd)]);
+    const boundBotId = project?.binding.botId;
+    const effectiveBotId = boundBotId ?? registry.defaultBotId;
+    const effectiveBot = effectiveBotId ? registry.bots.find((b) => b.id === effectiveBotId) : undefined;
+    const hasBinding = !!project;
+    const enabled = deps.getConfig().telegramEnabled !== false;
+
+    const botLabel = effectiveBot
+      ? `Bot: ${effectiveBot.name}${!hasBinding ? " (default)" : ""}`
+      : "Bot: (none)";
+
+    const choice = await ui.select("📁 Project", [
+      botLabel,
+      `Enabled: ${enabled ? "● on" : "○ off"}`,
+      BACK_LABEL,
+    ]);
     if (!choice || choice === BACK_LABEL) return true; // back to main
 
-    switch (choice) {
-      case "Show binding":
-        await showProjectBindingFlow(ui, cwd);
-        break;
-      case "Bind to bot":
-        await bindProjectFlow(ui, deps, cwd);
-        break;
-      case "Enable":
-        await enableProjectFlow(ui, deps, cwd);
-        break;
-      case "Disable":
-        await disableProjectFlow(ui, deps, cwd);
-        break;
-      case "Unbind":
+    if (choice === botLabel) {
+      if (registry.bots.length === 0) {
+        ui.notify("No bots registered. Use /tg → Bots → Add bot first.", "info");
+        continue;
+      }
+      const choices = registry.bots.map((b) => formatBotLabel(b, registry));
+      const selected = await ui.select("Bind project to bot", [...choices, ...(hasBinding ? [UNBIND_LABEL] : []), BACK_LABEL]);
+      if (!selected || selected === BACK_LABEL) continue;
+      if (selected === UNBIND_LABEL) {
         await unbindProjectFlow(ui, deps, cwd);
-        break;
+      } else {
+        const bot = registry.bots[choices.indexOf(selected)];
+        if (bot) await bindProjectFlow(ui, deps, cwd, bot.id);
+      }
+    } else if (choice.startsWith("Enabled:")) {
+      if (enabled) {
+        await disableProjectFlow(ui, deps, cwd);
+      } else {
+        await enableProjectFlow(ui, deps, cwd);
+      }
     }
+    // loop re-renders Project (reflects new binding / enabled state)
   }
 }
 
