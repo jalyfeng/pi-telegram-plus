@@ -258,6 +258,30 @@ describe("Telegram commands (bot registry + project binding)", () => {
     );
   });
 
+  it("/tg-bind-cwd to a different bot notifies 'Switching bot' before the switch", async () => {
+    const bot1 = makeBot({ name: "b1", token: "t1" });
+    const bot2 = makeBot({ name: "b2", token: "t2" });
+    await addBot(bot1);
+    await addBot(bot2);
+    config = { botToken: "t1", telegramEnabled: true }; // currently on bot1
+
+    const ctx = makeCtx();
+    await commands.get("tg-bind-cwd")!("b2", ctx);
+
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Switching bot to b2"), "info");
+    const binding = await readProjectBinding(projectDir);
+    expect(binding?.binding.botId).toBe(bot2.id);
+  });
+
+  it("/tg-bind-cwd initial bind (no prior bot) does not notify 'Switching bot'", async () => {
+    const bot = makeBot({ name: "mybot", token: "tok-x" });
+    await addBot(bot);
+    // config = {} from beforeEach (no prior botToken)
+    const ctx = makeCtx();
+    await commands.get("tg-bind-cwd")!("mybot", ctx);
+    expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("Switching bot"), "info");
+  });
+
   it("/tg-unbind-cwd removes the project binding", async () => {
     const bot = makeBot({ name: "mybot", token: "tok-x" });
     await addBot(bot);

@@ -222,6 +222,19 @@ export async function bindProjectFlow(
   if (!bot) return;
 
   const workspacePath = resolve(cwd);
+  const prevBotToken = deps.getConfig().botToken;
+  // Binding to a DIFFERENT bot changes routing and moves active ownership to
+  // the new bot. Notify BEFORE the switch (while still the active owner of the
+  // current bot) so the message is delivered — a post-switch notify would be
+  // suppressed until the new bot is claimed, and an in-progress /tg menu ends
+  // on the routing change (the user reopens /tg). Skip for the initial bind
+  // (no prior bot) so that case only gets the normal "Project bound" notice.
+  if (prevBotToken && bot.token !== prevBotToken) {
+    ui.notify(
+      `Switching bot to ${escapeHtml(bot.name)}${bot.botUsername ? ` (@${bot.botUsername})` : ""}. ${escapeHtml(workspacePath)} — if /tg is open, it will close; reopen it to continue.`,
+      "info",
+    );
+  }
   await deps.getPolling().stop();
   deps.switchResolvedConfig(await bindProjectTelegram(workspacePath, bot.id));
   const config = ensureTelegramPairingCode(deps.getConfig());
