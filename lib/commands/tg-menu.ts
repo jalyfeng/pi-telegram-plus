@@ -215,7 +215,11 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
       }
     } else if (choice.startsWith("Enabled:")) {
       if (enabled) {
-        await disableProjectFlow(ui, deps, cwd);
+        const ok = await ui.confirm(
+          "Disable bot for this project?",
+          "Disabling will disconnect the bot — the /tg menu will close and you can't re-enable it from Telegram. Re-enable via /tg-cwd-connect in the TUI or restart pi. Continue?",
+        );
+        if (ok) await disableProjectFlow(ui, deps, cwd);
       } else {
         await enableProjectFlow(ui, deps, cwd);
       }

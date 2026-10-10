@@ -299,12 +299,25 @@ describe("/tg multi-level menu", () => {
     // bind first
     const { ui: ui1 } = makeScriptedUi({ select: ["📁 Project", "Bot: dis-bot (default)", botChoice, "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui1));
-    // toggle off
-    const { ui: ui2, notifyCalls } = makeScriptedUi({ select: ["📁 Project", "Enabled: ● on", "⬅️ Back", "❌ Close"] });
+    // toggle off (with disable confirm)
+    const { ui: ui2, notifyCalls } = makeScriptedUi({ select: ["📁 Project", "Enabled: ● on", "⬅️ Back", "❌ Close"], confirm: [true] });
     await commands.get("tg")!("", makeCtx(ui2));
     const binding = await readProjectBinding(projectDir);
     expect(binding?.binding.enabled).toBe(false);
     expect(notifyCalls.some((c) => c.message.includes("disabled for current project"))).toBe(true);
+  });
+
+  it("Project → Enabled toggle → cancel confirm does not disable", async () => {
+    const bot = makeBot({ name: "dis-bot", token: "t-d" });
+    await addBot(bot);
+    const botChoice = botChoiceFull(bot, true);
+    const { ui: ui1 } = makeScriptedUi({ select: ["📁 Project", "Bot: dis-bot (default)", botChoice, "⬅️ Back"] });
+    await commands.get("tg")!("", makeCtx(ui1));
+    // toggle off but cancel the confirm
+    const { ui: ui2 } = makeScriptedUi({ select: ["📁 Project", "Enabled: ● on", "⬅️ Back", "❌ Close"], confirm: [false] });
+    await commands.get("tg")!("", makeCtx(ui2));
+    const binding = await readProjectBinding(projectDir);
+    expect(binding?.binding.enabled).toBe(true); // unchanged
   });
 
   it("Project → Bot label → Unbind → confirms and removes binding", async () => {
