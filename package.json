@@ -1,8 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/package",
   "name": "pi-telegram-plus",
-  "version": "0.0.8",
-  "description": "Full Telegram control of pi coding agent \u2014 commands, menus, interactive UI, model management, and more",
+  "version": "0.0.9",
+  "description": "Full Telegram control of pi coding agent — commands, menus, interactive UI, model management, and more",
   "keywords": [
     "pi-package",
     "pi-extension",
