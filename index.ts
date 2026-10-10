@@ -4,7 +4,7 @@ import { basename, extname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createActiveTelegramTransport } from "./lib/active-transport.ts";
 import { registerTelegramAttachmentTool } from "./lib/attachments.ts";
-import { enableConfiguredTelegramOnStartup, readResolvedTelegramConfig, persistProjectRuntimeState, getAgentDir } from "./lib/config.ts";
+import { enableConfiguredTelegramOnStartup, readResolvedTelegramConfig, persistProjectRuntimeState, updateBot, getAgentDir } from "./lib/config.ts";
 import { createTelegramController, type TelegramCommandHandler } from "./lib/controller.ts";
 import { escapeHtml } from "./lib/html.ts";
 import { createHeartbeat } from "./lib/heartbeat.ts";
@@ -274,6 +274,15 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
       if (decision.config !== config) {
         config = decision.config;
         await persistCurrentConfig(config);
+        // v3: allowedUserId is bot identity (registry), not a project-binding
+        // field. persistCurrentConfig writes only the project binding, so on a
+        // successful /pair we must also write allowedUserId to the bot record
+        // or the pairing is lost on restart.
+        if (decision.paired && resolvedConfig?.bot && decision.config.allowedUserId !== undefined) {
+          await updateBot(resolvedConfig.bot.id, { allowedUserId: decision.config.allowedUserId })
+            .catch(indexLog.swallow("warn", "persist paired allowedUserId to bot registry failed"));
+          switchResolvedConfig(await readResolvedTelegramConfig(currentSessionCwd()));
+        }
         refreshStatus();
       }
       return decision.paired ? "paired" : true;
