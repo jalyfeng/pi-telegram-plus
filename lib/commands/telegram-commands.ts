@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { addBot, bindProjectTelegram, findBotByIdOrName, readBotRegistry, removeBot, setDefaultBot, unbindProjectTelegram, updateBot, writeProjectBinding, readProjectBinding } from "../config.ts";
 import { escapeHtml } from "../html.ts";
 import { getTelegramBotUsername } from "../telegram-api.ts";
-import { ensureTelegramPairingCode, formatPairingInstructions } from "../pairing.ts";
+import { createTelegramPairingCode, ensureTelegramPairingCode, formatPairingInstructions } from "../pairing.ts";
 import type { BotRecord, ResolvedTelegramConfig, TelegramConfig, TelegramTransport } from "../types.ts";
 import type { TelegramPollingRuntime } from "../polling.ts";
 import { log } from "../logger.ts";
@@ -45,12 +45,8 @@ async function handleTgBotAdd(
   }
   const apiBase = deps.getConfig().apiBase;
   const botUsername = await getTelegramBotUsername(token, apiBase).catch(tgCmdLog.swallow("warn", "getTelegramBotUsername failed during bot-add"));
-  // Ensure pairing code.
-  let pairingCode: string | undefined;
-  const existingAllowed = undefined; // new bot has no allowed user yet
-  if (existingAllowed === undefined) {
-    pairingCode = Math.random().toString().slice(2, 8).padStart(6, "0");
-  }
+  // New bot has no authorized user yet — generate a one-time pairing code.
+  const pairingCode = createTelegramPairingCode();
   const bot: BotRecord = {
     id: randomUUID(),
     name,
@@ -105,9 +101,9 @@ async function handleTgBotUpdate(
     ctx.ui.notify(`Bot not found: ${escapeHtml(query)}`, "error");
     return;
   }
-  const field = await ui.input("Field to update (token, name, allowedUserId, apiBase, retryCount)");
+  const field = await ui.input("Field to update (token, name, allowedUserId, apiBase)");
   if (!field) return;
-  const validFields = ["token", "name", "allowedUserId", "apiBase", "retryCount"];
+  const validFields = ["token", "name", "allowedUserId", "apiBase"];
   if (!validFields.includes(field)) {
     ctx.ui.notify(`Invalid field. Choose from: ${validFields.join(", ")}`, "error");
     return;
@@ -133,11 +129,14 @@ async function handleTgBotUpdate(
     }
     updates.name = value;
   } else if (field === "allowedUserId") {
-    updates.allowedUserId = Number(value);
+    const userId = Number(value);
+    if (!Number.isInteger(userId)) {
+      ctx.ui.notify(`Invalid allowedUserId: must be an integer.`, "error");
+      return;
+    }
+    updates.allowedUserId = userId;
   } else if (field === "apiBase") {
     updates.apiBase = value;
-  } else if (field === "retryCount") {
-    updates.retryCount = Number(value);
   }
   await updateBot(bot.id, updates);
   // If the current resolved bot is the one being updated, reload config.
@@ -254,7 +253,7 @@ async function handleTgBindCwd(
   deps.startStatusHeartbeat();
   deps.refreshStatus();
   ctx.ui.notify(
-    `Project bound to bot: ${escapeHtml(bot.name)}${bot.botUsername ? ` (@${bot.botUsername})` : ""}\n${escapeHtml(workspacePath)}\n${formatPairingInstructions(deps.getConfig())}`,
+    `Project bound to bot: ${escapeHtml(bot.name)}${bot.botUsername ? ` (@${bot.botUsername})` : ""}\n${escapeHtml(workspacePath)}\n${formatPairingInstructions(config)}`,
     "info",
   );
 }

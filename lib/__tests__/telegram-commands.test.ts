@@ -201,6 +201,36 @@ describe("Telegram commands (bot registry + project binding)", () => {
     );
   });
 
+  it("/tg-bot-update updates allowedUserId with a valid integer", async () => {
+    const bot = makeBot({ name: "mybot", token: "tok-x" });
+    await addBot(bot);
+    const ctx = makeCtx();
+    ctx.ui.input.mockResolvedValueOnce("allowedUserId");
+    ctx.ui.input.mockResolvedValueOnce("12345");
+
+    await commands.get("tg-bot-update")!(bot.name, ctx);
+
+    const registry = await readBotRegistry();
+    expect(registry.bots[0].allowedUserId).toBe(12345);
+  });
+
+  it("/tg-bot-update rejects a non-integer allowedUserId", async () => {
+    const bot: BotRecord = { id: crypto.randomUUID(), name: "mybot", token: "tok-x", allowedUserId: 1 };
+    await addBot(bot);
+    const ctx = makeCtx();
+    ctx.ui.input.mockResolvedValueOnce("allowedUserId");
+    ctx.ui.input.mockResolvedValueOnce("not-a-number");
+
+    await commands.get("tg-bot-update")!(bot.name, ctx);
+
+    const registry = await readBotRegistry();
+    expect(registry.bots[0].allowedUserId).toBe(1); // unchanged
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Invalid allowedUserId"),
+      "error",
+    );
+  });
+
   it("/tg-bind-cwd with no bots guides to /tg-bot-add", async () => {
     const ctx = makeCtx();
 

@@ -4,6 +4,21 @@ import { log } from "./logger.ts";
 
 const menuLog = log.child("menu-commands");
 
+// Local-cwd management commands that must NOT appear in the Telegram bot menu
+// (they require interactive prompts / local cwd context). They stay registered
+// as pi slash commands (TUI) and as Telegram-dispatch handlers; only the bot
+// my-commands list excludes them.
+const BOT_MENU_EXCLUDED = new Set([
+  "tg-bot-add",
+  "tg-bot-update",
+  "tg-bot-remove",
+  "tg-bot-default",
+  "tg-bind-cwd",
+  "tg-unbind-cwd",
+  "tg-cwd-connect",
+  "tg-cwd-disconnect",
+]);
+
 const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = [
   // Keep the built-in pi commands in the same order as the TUI slash menu.
   { command: "login", description: "Configure provider authentication" },
@@ -60,7 +75,10 @@ export function buildTelegramMenuCommands(pi: ExtensionAPI): Array<{ command: st
   };
 
   for (const command of TELEGRAM_MENU_COMMANDS) addCommand(command.command, command.description);
-  for (const command of pi.getCommands()) addCommand(command.name, command.description);
+  for (const command of pi.getCommands()) {
+    if (BOT_MENU_EXCLUDED.has(command.name)) continue;
+    addCommand(command.name, command.description);
+  }
 
   // Telegram accepts at most 100 bot commands. Keep the curated built-in-style
   // commands first, then fill the rest with extension/prompt/skill commands.

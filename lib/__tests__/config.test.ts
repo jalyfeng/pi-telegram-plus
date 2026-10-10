@@ -18,8 +18,10 @@ import {
   setDefaultBot,
   updateBot,
   findBotByIdOrName,
+  persistProjectRuntimeState,
+  preserveInMemoryRuntimeState,
 } from "../config.ts";
-import type { BotRecord, BotRegistry, ProjectTelegramBinding } from "../types.ts";
+import type { BotRecord, BotRegistry, ProjectTelegramBinding, TelegramConfig } from "../types.ts";
 
 function makeBot(overrides: Partial<BotRecord> = {}): BotRecord {
   return {
@@ -30,7 +32,6 @@ function makeBot(overrides: Partial<BotRecord> = {}): BotRecord {
     ...(overrides.allowedUserId === undefined ? {} : { allowedUserId: overrides.allowedUserId }),
     ...(overrides.pairingCode === undefined ? {} : { pairingCode: overrides.pairingCode }),
     ...(overrides.apiBase === undefined ? {} : { apiBase: overrides.apiBase }),
-    ...(overrides.retryCount === undefined ? {} : { retryCount: overrides.retryCount }),
   };
 }
 
@@ -89,11 +90,16 @@ describe("materializeTelegramConfig", () => {
     expect(config.telegramEnabled).toBe(true);
   });
 
-  it("carries over apiBase and retryCount from bot record", () => {
-    const bot = makeBot({ apiBase: "http://localhost:8081", retryCount: 5 });
-    const config = materializeTelegramConfig(bot, undefined);
-    expect(config.apiBase).toBe("http://localhost:8081");
-    expect(config.retryCount).toBe(5);
+  it("carries apiBase from bot record and retryCount from project binding", () => {
+    const bot = makeBot({ apiBase: "http://localhost:8081" });
+    // No binding → retryCount comes from nowhere (bot record no longer holds it).
+    const withoutBinding = materializeTelegramConfig(bot, undefined);
+    expect(withoutBinding.apiBase).toBe("http://localhost:8081");
+    expect(withoutBinding.retryCount).toBeUndefined();
+    // retryCount is a per-project pref, materialized from the binding.
+    const withBinding = materializeTelegramConfig(bot, { botId: bot.id, retryCount: 5 });
+    expect(withBinding.apiBase).toBe("http://localhost:8081");
+    expect(withBinding.retryCount).toBe(5);
   });
 });
 
@@ -176,11 +182,25 @@ describe("resolveTelegramConfig — project binding walk-up", () => {
     expect(result.config.tool).toBe("brief");
   });
 
-  it("returns no bot when project binding references a removed bot", async () => {
+  it("falls back to defaultBotId when project binding references a removed bot", async () => {
+    const defaultBot = makeBot({ name: "default", token: "default-tok" });
+    const projectBot = makeBot({ name: "project", token: "project-tok" });
+    await addBot(defaultBot); // becomes default
+    await addBot(projectBot);
+    await writeProjectBinding(projectDir, { botId: projectBot.id, enabled: true });
+    await removeBot(projectBot.id); // project bot removed → binding now dangles
+
+    const result = await resolveTelegramConfig(projectDir);
+    expect(result.hasProjectBinding).toBe(true);
+    expect(result.bot?.id).toBe(defaultBot.id); // fell back to default
+    expect(result.config.botToken).toBe("default-tok");
+  });
+
+  it("returns no bot when a dangling ref has no default to fall back to", async () => {
     const bot = makeBot({ token: "temp-tok" });
     await addBot(bot);
     await writeProjectBinding(projectDir, { botId: bot.id, enabled: true });
-    await removeBot(bot.id);
+    await removeBot(bot.id); // no default remains
 
     const result = await resolveTelegramConfig(projectDir);
     expect(result.bot).toBeUndefined();
@@ -434,7 +454,7 @@ describe("Migration v2 → v3", () => {
       version: 2,
       global: { botToken: "shared-tok", botUsername: "sharedbot" },
       workspaces: [
-        { path: projectDir, config: { botToken: "shared-tok", botUsername: "sharedbot", telegramEnabled: true, tool: "brief" as const, lastUpdateId: 5 } },
+        { path: projectDir, config: { botToken: "shared-tok", botUsername: "sharedbot", telegramEnabled: true, tool: "brief" as const, retryCount: 7, lastUpdateId: 5 } },
       ],
     };
     await writeFile(join(agentDir, "tg.json"), JSON.stringify(v2Store) + "\n");
@@ -450,7 +470,10 @@ describe("Migration v2 → v3", () => {
     expect(binding?.binding.botId).toBe(registry.bots[0].id);
     expect(binding?.binding.enabled).toBe(true);
     expect(binding?.binding.tool).toBe("brief");
+    expect(binding?.binding.retryCount).toBe(7);
     expect(binding?.binding.lastUpdateId).toBe(5);
+    // retryCount is NOT bot identity — it must not land on the bot record.
+    expect((registry.bots[0] as Record<string, unknown>).retryCount).toBeUndefined();
   });
 
   it("migrates v2 workspaces with different tokens → separate bots", async () => {
@@ -573,5 +596,148 @@ describe("Registry persistence (tg.json)", () => {
 
     await Promise.all([writer, reader]);
     expect(failures).toBe(0);
+  });
+});
+
+// ── persistProjectRuntimeState ────────────────────────────────────────────
+describe("persistProjectRuntimeState", () => {
+  let agentDir: string;
+  let projectDir: string;
+  let originalAgentDir: string | undefined;
+
+  beforeEach(async () => {
+    originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+    agentDir = await mkdtemp(join(tmpdir(), "ptp-prs-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    projectDir = await mkdtemp(join(tmpdir(), "ptp-prsproj-"));
+  });
+
+  afterEach(async () => {
+    if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+  });
+
+  it("persists tool, thinking, retryCount, lastUpdateId, activeChatId to the project binding (P1-1)", async () => {
+    const bot = makeBot({ token: "prs-tok" });
+    await addBot(bot);
+    await writeProjectBinding(projectDir, { botId: bot.id, enabled: true });
+    const resolved = await resolveTelegramConfig(projectDir);
+
+    await persistProjectRuntimeState(resolved, {
+      botToken: bot.token,
+      telegramEnabled: true,
+      tool: "full",
+      thinking: "brief",
+      retryCount: 4,
+      lastUpdateId: 42,
+      activeChatId: 99,
+    });
+
+    const binding = await readProjectBinding(projectDir);
+    expect(binding?.binding.tool).toBe("full");
+    expect(binding?.binding.thinking).toBe("brief");
+    expect(binding?.binding.retryCount).toBe(4);
+    expect(binding?.binding.lastUpdateId).toBe(42);
+    expect(binding?.binding.activeChatId).toBe(99);
+    // botId preserved.
+    expect(binding?.binding.botId).toBe(bot.id);
+  });
+
+  it("re-resolved config restores prefs persisted to the binding (P1-1 round-trip)", async () => {
+    const bot = makeBot({ token: "prs-tok" });
+    await addBot(bot);
+    await writeProjectBinding(projectDir, { botId: bot.id, enabled: true });
+    const resolved = await resolveTelegramConfig(projectDir);
+
+    const out = await persistProjectRuntimeState(resolved, {
+      botToken: bot.token,
+      telegramEnabled: true,
+      tool: "full",
+      thinking: "hidden",
+      retryCount: 2,
+      activeChatId: 7,
+    });
+    // The returned materialized config reflects the just-persisted prefs.
+    expect(out.config.tool).toBe("full");
+    expect(out.config.thinking).toBe("hidden");
+    expect(out.config.retryCount).toBe(2);
+    expect(out.config.activeChatId).toBe(7);
+  });
+
+  it("preserves in-memory activeChatId / lastUpdateId / prefs for an unbound project (P1-2)", async () => {
+    const bot = makeBot({ token: "def-tok" });
+    await addBot(bot); // default bot, no project binding
+    const resolved = await resolveTelegramConfig(projectDir); // unbound
+    expect(resolved.hasProjectBinding).toBe(false);
+
+    const out = await persistProjectRuntimeState(
+      resolved,
+      {
+        botToken: bot.token,
+        telegramEnabled: true,
+        activeChatId: 555,
+        lastUpdateId: 30,
+        tool: "full",
+        thinking: "brief",
+        retryCount: 6,
+      },
+      projectDir,
+    );
+    // Nothing was written to disk (no .pi/telegram.json).
+    expect(await readProjectBinding(projectDir)).toBeUndefined();
+    // But in-memory runtime/pref state is preserved on the returned config.
+    expect(out.config.activeChatId).toBe(555);
+    expect(out.config.lastUpdateId).toBe(30);
+    expect(out.config.tool).toBe("full");
+    expect(out.config.thinking).toBe("brief");
+    expect(out.config.retryCount).toBe(6);
+    expect(out.config.botToken).toBe(bot.token);
+  });
+
+  it("does not persist to the registry (registry immutability)", async () => {
+    const bot = makeBot({ token: "prs-tok" });
+    await addBot(bot);
+    await writeProjectBinding(projectDir, { botId: bot.id, enabled: true });
+    const resolved = await resolveTelegramConfig(projectDir);
+
+    await persistProjectRuntimeState(resolved, {
+      botToken: bot.token,
+      telegramEnabled: true,
+      tool: "full",
+      retryCount: 9,
+      lastUpdateId: 100,
+      activeChatId: 200,
+    });
+
+    const registry = await readBotRegistry();
+    expect((registry.bots[0] as Record<string, unknown>).retryCount).toBeUndefined();
+    // Bot record untouched except via CRUD.
+    expect(registry.bots[0].token).toBe("prs-tok");
+  });
+});
+
+// ── preserveInMemoryRuntimeState (unit) ───────────────────────────────────
+describe("preserveInMemoryRuntimeState", () => {
+  it("fills gaps in persisted from memory", () => {
+    const persisted: TelegramConfig = { botToken: "t", telegramEnabled: true };
+    const memory: TelegramConfig = {
+      botToken: "t",
+      telegramEnabled: true,
+      activeChatId: 5,
+      lastUpdateId: 9,
+      tool: "full",
+      thinking: "brief",
+      retryCount: 2,
+    };
+    const out = preserveInMemoryRuntimeState(persisted, memory);
+    expect(out).toEqual({ botToken: "t", telegramEnabled: true, activeChatId: 5, lastUpdateId: 9, tool: "full", thinking: "brief", retryCount: 2 });
+  });
+
+  it("persisted values win over memory", () => {
+    const persisted: TelegramConfig = { botToken: "t", telegramEnabled: true, tool: "brief", lastUpdateId: 50 };
+    const memory: TelegramConfig = { botToken: "t", telegramEnabled: true, tool: "full", lastUpdateId: 10 };
+    const out = preserveInMemoryRuntimeState(persisted, memory);
+    expect(out.tool).toBe("brief"); // persisted wins
+    expect(out.lastUpdateId).toBe(50); // persisted wins
   });
 });

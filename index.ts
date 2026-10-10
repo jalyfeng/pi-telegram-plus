@@ -122,7 +122,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
 
   const persistCurrentConfig = async (nextConfig = config): Promise<void> => {
     if (!resolvedConfig) resolvedConfig = await readResolvedTelegramConfig(currentSessionCwd());
-    resolvedConfig = await persistProjectRuntimeState(resolvedConfig, nextConfig);
+    resolvedConfig = await persistProjectRuntimeState(resolvedConfig, nextConfig, currentSessionCwd());
     config = resolvedConfig.config;
   };
 

@@ -27,8 +27,6 @@ export type BotRecord = {
   pairingCode?: string;
   /** Override the Telegram Bot API base URL (e.g. a self-hosted local Bot API server or a test mock). */
   apiBase?: string;
-  /** Number of retries for failed Telegram API calls (0 = no retry, default 3). */
-  retryCount?: number;
 };
 
 /**
@@ -42,6 +40,8 @@ export type ProjectTelegramBinding = {
   enabled?: boolean;
   tool?: TelegramRenderLevel;
   thinking?: TelegramRenderLevel;
+  /** Per-project runtime pref: retries for failed Telegram API calls (0 = no retry, default 3). Edited via /tg-config, never written to the registry. */
+  retryCount?: number;
   /** Runtime state (per-project) — cold-start seed / best-effort backup. */
   lastUpdateId?: number;
   /** Runtime state (per-project). */

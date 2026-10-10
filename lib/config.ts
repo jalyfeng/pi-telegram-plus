@@ -168,8 +168,18 @@ export async function resolveTelegramConfig(cwd: string): Promise<ResolvedTelegr
   const registry = await readBotRegistry();
   const project = await readProjectBinding(cwd);
 
-  const botId = project?.binding.botId ?? registry.defaultBotId;
-  const bot = botId ? findBotById(registry, botId) : undefined;
+  const projectBotId = project?.binding.botId;
+  let bot: BotRecord | undefined;
+  if (projectBotId) {
+    bot = findBotById(registry, projectBotId);
+    // Dangling ref (bot removed): fall back to defaultBotId so the project
+    // stays connected instead of silently becoming unconfigured.
+    if (!bot && registry.defaultBotId) {
+      bot = findBotById(registry, registry.defaultBotId);
+    }
+  } else if (registry.defaultBotId) {
+    bot = findBotById(registry, registry.defaultBotId);
+  }
 
   const config = materializeTelegramConfig(bot, project?.binding);
 
@@ -202,7 +212,6 @@ export function materializeTelegramConfig(
     ...(bot.allowedUserId === undefined ? {} : { allowedUserId: bot.allowedUserId }),
     ...(bot.pairingCode === undefined ? {} : { pairingCode: bot.pairingCode }),
     ...(bot.apiBase === undefined ? {} : { apiBase: bot.apiBase }),
-    ...(bot.retryCount === undefined ? {} : { retryCount: bot.retryCount }),
   };
 
   // Project binding overrides prefs + runtime state.
@@ -214,6 +223,7 @@ export function materializeTelegramConfig(
     }
     if (binding.tool !== undefined) config.tool = binding.tool;
     if (binding.thinking !== undefined) config.thinking = binding.thinking;
+    if (binding.retryCount !== undefined) config.retryCount = binding.retryCount;
     if (binding.lastUpdateId !== undefined) config.lastUpdateId = binding.lastUpdateId;
     if (binding.activeChatId !== undefined) config.activeChatId = binding.activeChatId;
   } else {
@@ -233,26 +243,41 @@ export async function readResolvedTelegramConfig(cwd: string): Promise<ResolvedT
 }
 
 /**
- * Persist runtime state (lastUpdateId, activeChatId) back to the project binding file.
- * Only writes to project `.pi/telegram.json` — never writes to the registry.
- * If no project binding exists, runtime state is not persisted (acceptable:
- * coordinator cursor is authoritative for polling; activeChatId will be re-learned).
+ * Persist per-project runtime state + prefs to the project binding file, and
+ * return a ResolvedTelegramConfig reflecting the post-write state.
+ *
+ * - Bound project: writes lastUpdateId (monotonic max), activeChatId, tool,
+ *   thinking, retryCount to `<project>/.pi/telegram.json`; preserves botId.
+ *   Never writes the registry.
+ * - Unbound project: writes nothing (no .pi to write to). Re-resolves with
+ *   `cwd` to pick up default-bot changes, then preserves in-memory runtime/
+ *   pref state so the caller's `config = resolvedConfig.config` does not drop
+ *   state that has no durable home. The coordinator cursor stays authoritative
+ *   for polling; activeChatId is re-learned on restart.
+ *
+ * `cwd` is the resolution directory (defaults to the resolved project path or
+ * process.cwd()) and is used only on the unbound path to re-resolve correctly.
  */
 export async function persistProjectRuntimeState(
   resolved: ResolvedTelegramConfig,
   config: TelegramConfig,
+  cwd?: string,
 ): Promise<ResolvedTelegramConfig> {
   if (!resolved.hasProjectBinding || !resolved.projectPath) {
-    // No project binding — nothing to persist. Return re-resolved config.
-    return resolveTelegramConfig(resolved.projectPath ?? process.cwd());
+    const resolveCwd = cwd ?? resolved.projectPath ?? process.cwd();
+    const fresh = await resolveTelegramConfig(resolveCwd);
+    return { ...fresh, config: preserveInMemoryRuntimeState(fresh.config, config) };
   }
 
   const projectDir = resolved.projectPath;
+  // Read the registry once outside the config lock to avoid re-entrant lock
+  // acquisition (resolveTelegramConfig would otherwise re-read it inside).
+  const registry = await readBotRegistry();
   return await withTelegramConfigLock(async () => {
     const existing = await readProjectBinding(projectDir);
     const binding: ProjectTelegramBinding = existing?.binding ?? {};
 
-    // Only update runtime state fields; preserve prefs + botId.
+    // Persist runtime state + per-project prefs. Preserve botId.
     if (typeof config.lastUpdateId === "number") {
       binding.lastUpdateId = Math.max(
         binding.lastUpdateId ?? -1,
@@ -262,10 +287,56 @@ export async function persistProjectRuntimeState(
     if (typeof config.activeChatId === "number") {
       binding.activeChatId = config.activeChatId;
     }
+    if (config.tool !== undefined) binding.tool = config.tool;
+    if (config.thinking !== undefined) binding.thinking = config.thinking;
+    if (config.retryCount !== undefined) binding.retryCount = config.retryCount;
 
     await writeProjectBinding(projectDir, binding);
-    return resolveTelegramConfig(projectDir);
+
+    // Materialize from the snapshot registry + just-written binding (no
+    // re-entrant registry read inside the lock).
+    const botId = binding.botId ?? registry.defaultBotId;
+    let bot: BotRecord | undefined;
+    if (botId) {
+      bot = findBotById(registry, botId);
+      if (!bot && binding.botId && registry.defaultBotId) {
+        bot = findBotById(registry, registry.defaultBotId);
+      }
+    }
+    return {
+      registry,
+      bot,
+      hasProjectBinding: true,
+      projectPath: projectDir,
+      config: materializeTelegramConfig(bot, binding),
+    };
   });
+}
+
+/**
+ * Fill in-memory runtime/pref fields that `persisted` lacks from `memory`, so
+ * an unbound project (no .pi/telegram.json) does not lose activeChatId /
+ * lastUpdateId / tool / thinking / retryCount across a persist cycle. Values
+ * already present in `persisted` (restored from disk for bound projects) win.
+ */
+export function preserveInMemoryRuntimeState(
+  persisted: TelegramConfig,
+  memory: TelegramConfig,
+): TelegramConfig {
+  return {
+    ...persisted,
+    ...(persisted.lastUpdateId === undefined && typeof memory.lastUpdateId === "number"
+      ? { lastUpdateId: memory.lastUpdateId }
+      : {}),
+    ...(persisted.activeChatId === undefined && typeof memory.activeChatId === "number"
+      ? { activeChatId: memory.activeChatId }
+      : {}),
+    ...(persisted.tool === undefined && memory.tool !== undefined ? { tool: memory.tool } : {}),
+    ...(persisted.thinking === undefined && memory.thinking !== undefined ? { thinking: memory.thinking } : {}),
+    ...(persisted.retryCount === undefined && memory.retryCount !== undefined
+      ? { retryCount: memory.retryCount }
+      : {}),
+  };
 }
 
 /**
@@ -376,6 +447,7 @@ async function migrateToV3(value: unknown): Promise<BotRegistry> {
           enabled: workspace.config.telegramEnabled !== false,
           ...(workspace.config.tool === undefined ? {} : { tool: workspace.config.tool }),
           ...(workspace.config.thinking === undefined ? {} : { thinking: workspace.config.thinking }),
+          ...(workspace.config.retryCount === undefined ? {} : { retryCount: workspace.config.retryCount }),
           ...(workspace.config.lastUpdateId === undefined ? {} : { lastUpdateId: workspace.config.lastUpdateId }),
           ...(workspace.config.activeChatId === undefined ? {} : { activeChatId: workspace.config.activeChatId }),
         };
@@ -404,7 +476,6 @@ function createBotRecordFromConfig(config: TelegramConfig, name: string): BotRec
     ...(config.allowedUserId === undefined ? {} : { allowedUserId: config.allowedUserId }),
     ...(config.pairingCode === undefined ? {} : { pairingCode: config.pairingCode }),
     ...(config.apiBase === undefined ? {} : { apiBase: config.apiBase }),
-    ...(config.retryCount === undefined ? {} : { retryCount: config.retryCount }),
   };
 }
 
