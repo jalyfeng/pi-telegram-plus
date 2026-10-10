@@ -9,6 +9,7 @@ const menuLog = log.child("menu-commands");
 // as pi slash commands (TUI) and as Telegram-dispatch handlers; only the bot
 // my-commands list excludes them.
 const BOT_MENU_EXCLUDED = new Set([
+  // Bot CRUD + bind/unbind are local-cwd management commands.
   "tg-bot-add",
   "tg-bot-update",
   "tg-bot-remove",
@@ -17,6 +18,13 @@ const BOT_MENU_EXCLUDED = new Set([
   "tg-unbind-cwd",
   "tg-cwd-connect",
   "tg-cwd-disconnect",
+  // Flat tg-* commands are consolidated into the /tg menu. They stay
+  // registered as dispatchable slash commands but are excluded from the
+  // bot menu so only /tg appears as the single management entry point.
+  "tg-config",
+  "tg-switch",
+  "tg-list",
+  "tg-bot-list",
 ]);
 
 const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = [
@@ -50,13 +58,8 @@ const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = 
   { command: "stop", description: "Stop the current agent turn" },
   { command: "debug", description: "Show debug information" },
   { command: "status", description: "Show runtime snapshot (workspace, model, context, messages)" },
-  // tg-* commands visible in the Telegram bot menu.
-  // Bot CRUD + bind/unbind are local-cwd management commands that do not
-  // belong in the Telegram bot command list.
-  { command: "tg_config", description: "Configure Telegram message rendering" },
-  { command: "tg_switch", description: "Switch the active local pi instance" },
-  { command: "tg_list", description: "Show current project binding and default bot" },
-  { command: "tg_bot_list", description: "List registered Telegram bots" },
+  // Consolidated Telegram management menu — replaces all flat /tg-* commands.
+  { command: "tg", description: "Open the Telegram management menu" },
 ];
 
 const toTelegramCommandName = (name: string): string | undefined => {

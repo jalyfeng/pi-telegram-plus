@@ -126,9 +126,9 @@ are bridged to Telegram inline buttons so remote turns can interact with them:
 ### Command naming
 
 - Commands that mirror pi's native slash commands keep the same names (`/model`, `/session`, `/status`, `/stop`, `/tg-thinking`, etc.) so Telegram behaves like a remote pi control surface instead of a separate bot-specific CLI.
-- Commands that configure or manage the Telegram bridge itself use the `/tg-*` prefix (`/tg-bot-add`, `/tg-bind-cwd`, `/tg-config`, `/tg-list`, `/tg-switch`, etc.).
+- Commands that configure or manage the Telegram bridge itself use the `/tg-*` prefix (`/tg-bot-add`, `/tg-bind-cwd`, `/tg-config`, `/tg-list`, `/tg-switch`, etc.). The `/tg` command opens a multi-level inline-keyboard menu that consolidates all of these into one entry point; the flat commands remain available for direct use.
 - `/pair <code>` is a Telegram-only bootstrap authorization message handled before normal command dispatch. It is intentionally short and not `/tg-pair` because the setup prompt is copied into Telegram during first-time pairing, before any user is authorized.
-- Telegram Bot API command menus do not allow hyphens, so the bot menu may show underscore aliases such as `/tg_config`, `/tg_switch`, or `/tg_bot_list`; the controller accepts both underscore and hyphen forms.
+- Telegram Bot API command menus do not allow hyphens. The bot menu shows `/tg` (the consolidated management menu) plus pi built-in commands; flat `/tg-*` commands are excluded from the bot menu but remain dispatchable when typed. The controller accepts both underscore and hyphen forms.
 
 ### Multi-instance Coordination
 
@@ -195,40 +195,60 @@ Quoted attachments are represented as metadata (`[telegram quoted attachment]`, 
 
 ### Telegram Connection Commands
 
+The primary way to manage the Telegram integration is the **`/tg` menu** — a multi-level inline-keyboard menu that consolidates all bot registry, project binding, config, and instance-switching actions into one entry point. The flat `/tg-*` commands remain available as direct slash commands for power users.
+
+#### `/tg` — Telegram management menu
+
+Opens an inline-keyboard menu with four submenus (each with a **⬅️ Back** option to return to the parent level):
+
+| Menu | Actions |
+|------|--------|
+| **🤖 Bots** | **List bots** — show all registered bots (name, @username, default marker, pairing status) · **➕ Add bot** — prompt for name + token, create pairing code · **Set default** — select a bot as the default · **Update bot** — select a bot, then update token / name / allowedUserId / apiBase · **Remove bot** — select a bot, confirm, remove (warns if default) |
+| **📁 Project** | **Show binding** — current project binding + default bot (same as `/tg-list`) · **Bind to bot** — select a bot to bind this project to (writes `.pi/telegram.json`) · **Enable** — enable the bot for this project (creates minimal binding with default bot if none) · **Disable** — disable the bot for this project · **Unbind** — confirm, remove the project binding (falls back to default bot) |
+| **⚙️ Config** | **Tool: <current>** — select hidden / brief / full · **Thinking: <current>** — select hidden / brief / full · **Retry: <current>** — input a number 0–10 |
+| **🔄 Switch instance** | List live pi instances sharing this bot token; select one to switch (same logic as `/tg-switch`). Must be run on the currently active instance. |
+| **❌ Close** | Exit the menu. |
+
+The menu uses `ctx.ui.select` / `input` / `inputSecret` / `confirm` — the same UI abstraction that renders Telegram inline keyboards. Each leaf action shows a result notification, then returns to its submenu.
+
+#### Flat `/tg-*` commands (still available)
+
+All flat commands remain registered and dispatchable (TUI + typing them in Telegram). They share the same underlying logic as the `/tg` menu actions. They are excluded from the Telegram bot menu (only `/tg` appears there), but work identically when typed directly.
+
 **Bot registry** (user-wide bot identity stored in `~/.pi/agent/tg.json`):
 
 | Command | Description |
 |---------|-------------|
 | `/tg-bot-add` | Add a Telegram bot to the registry (prompts for name + token); first bot becomes the default |
 | `/tg-bot-list` | List all registered bots (id, name, @username, default marker, pairing status) |
-| `/tg-bot-update <id\|name>` | Update a bot's token, name, allowedUserId, apiBase, or retryCount |
-| `/tg-bot-remove <id\|name>` | Remove a bot from the registry; warns if it was the default or referenced by project bindings |
-| `/tg-bot-default <id\|name>` | Set the default bot (used when a project has no explicit binding) |
+| `/tg-bot-update <id|name>` | Update a bot's token, name, allowedUserId, apiBase |
+| `/tg-bot-remove <id|name>` | Remove a bot from the registry; warns if it was the default or referenced by project bindings |
+| `/tg-bot-default <id|name>` | Set the default bot (used when a project has no explicit binding) |
 
 **Project binding** (per-project `.pi/telegram.json` references a registered bot by id — no token re-paste):
 
 | Command | Description |
 |---------|-------------|
-| `/tg-bind-cwd [bot id\|name]` | Bind current project to a registered bot (interactive selection if no arg); writes `<project>/.pi/telegram.json` |
+| `/tg-bind-cwd [bot id|name]` | Bind current project to a registered bot (interactive selection if no arg); writes `<project>/.pi/telegram.json` |
 | `/tg-cwd-connect` | Enable the bot for the current project (creates a minimal binding with default bot if none) |
 | `/tg-cwd-disconnect` | Disable the bot for the current project |
 | `/tg-unbind-cwd` | Remove the project binding; falls back to the default bot |
 | `/tg-list` | Show the current project binding (which bot, enabled, prefs) and the default bot |
 
-**How it works:** Bots are registered once with `/tg-bot-add` (token, username, pairing, etc. stored centrally). Projects reference a bot by id via `/tg-bind-cwd` — no token re-paste or re-pairing needed. Unbound projects fall back to the **default bot** (`/tg-bot-default`), which is the equivalent of the former "global" bot.
+**Config & instance switching:**
 
-**Pairing / authorization:**
+| Command | Description |
+|---------|-------------|
+| `/tg-config [key] [value]` | Configure tool and thinking rendering levels and retry count. Direct-set: `/tg-config tool full`, `/tg-config retry 5`. No args opens an interactive selector. |
+| `/tg-switch [instance-id|current]` | Switch the active local pi instance that owns this bot token. No args opens an inline selector; an id/prefix targets one live instance; `current` re-replays the active owner. Must be run on the currently active instance. See **Multi-instance Coordination**. |
+
+**How it works:** Bots are registered once with `/tg-bot-add` or `/tg → Bots → Add bot` (token, username, pairing, etc. stored centrally). Projects reference a bot by id via `/tg-bind-cwd` or `/tg → Project → Bind to bot` — no token re-paste or re-pairing needed. Unbound projects fall back to the **default bot** (`/tg-bot-default` or `/tg → Bots → Set default`), which is the equivalent of the former "global" bot.
+
+#### Pairing / authorization
 
 | Command | Description |
 |---------|-------------|
 | `/pair <code>` | Pair the sending Telegram user with this pi instance. The one-time code is shown locally after setup and is consumed on success. `/pair@BotUsername <code>` is also accepted in groups. |
-
-**Shared:**
-
-| Command | Description |
-|---------|-------------|
-| `/tg-config` | Configure tool and thinking rendering levels |
-| `/tg-switch [instance-id\|current]` | Switch the active local pi instance that owns this bot token (bot menu: `/tg_switch`). No args opens an inline selector; an id/prefix targets one live instance; `current` re-replays the active owner. Must be run on the currently active instance. See **Multi-instance Coordination**. |
 
 ### Utility Commands
 

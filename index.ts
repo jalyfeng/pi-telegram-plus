@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { basename, extname, join, resolve } from "node:path";
+import { extname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createActiveTelegramTransport } from "./lib/active-transport.ts";
 import { registerTelegramAttachmentTool } from "./lib/attachments.ts";
@@ -23,6 +23,8 @@ import { getCurrentTelegramTurn } from "./lib/turn-context.ts";
 
 import { registerAllCommands } from "./lib/commands/register.ts";
 import { registerTelegramCommands } from "./lib/commands/telegram-commands.ts";
+import { registerTgMenuCommand } from "./lib/commands/tg-menu.ts";
+import { formatInstanceChoice } from "./lib/commands/tg-menu.ts";
 import { syncTelegramCommands } from "./lib/menu-commands.ts";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramTurn } from "./lib/types.ts";
 
@@ -206,6 +208,9 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     "tg-bot-add", "tg-bot-list", "tg-bot-update", "tg-bot-remove", "tg-bot-default",
     "tg-config",
     "tg-bind-cwd", "tg-unbind-cwd", "tg-cwd-connect", "tg-cwd-disconnect", "tg-list",
+    "tg-switch",
+    // /tg multi-level menu
+    "tg",
     // other pi-telegram-plus custom commands (TUI-only command list excludes /import, which is now
     // a built-in pi command; keep Telegram handler registration only.
     "cwd", "cd", "status", "thinking", "stop", "debug",
@@ -244,6 +249,40 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     syncTelegramCommands: () => syncTelegramCommands(config.botToken, pi),
     startStatusHeartbeat: () => heartbeat.startStatusHeartbeat(refreshStatus),
     clearStatusError: () => { lastStatusError = undefined; },
+  });
+
+  // /tg multi-level menu — consolidates the flat /tg-* commands into one
+  // inline-keyboard menu (Bots / Project / Config / Switch instance).
+  registerTgMenuCommand({
+    registerCommand: (name: string, options: { description?: string; handler: TelegramCommandHandler }) => {
+      telegramCommands.set(name, options.handler);
+      if (TUI_VISIBLE_COMMANDS.has(name) && options.description) {
+        pi.registerCommand(name, { description: options.description, handler: options.handler });
+      }
+    },
+  }, {
+    getConfig: () => config,
+    setConfig,
+    persistConfig: persistCurrentConfig,
+    getResolvedConfig: () => resolvedConfig,
+    switchResolvedConfig,
+    isTelegramEnabled,
+    transport,
+    getPolling: () => polling,
+    refreshStatus,
+    syncTelegramCommands: () => syncTelegramCommands(config.botToken, pi),
+    startStatusHeartbeat: () => heartbeat.startStatusHeartbeat(refreshStatus),
+    clearStatusError: () => { lastStatusError = undefined; },
+  }, tgConfigDeps, {
+    getCoordinator: () => coordinator,
+    getCurrentChatId: () => config.activeChatId,
+    stopPolling: () => polling.stop(),
+    startPolling: () => polling.start(),
+    requestReconcile: requestCoordinatorReconcile,
+    getCurrentTurn: () => {
+      const turn = getCurrentTelegramTurn();
+      return turn ? { chatId: turn.chatId, messageThreadId: turn.messageThreadId, sourceMessageId: turn.sourceMessageId } : undefined;
+    },
   });
 
   registerTelegramAttachmentTool(pi, {
@@ -598,14 +637,6 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
   };
 
   coordinatorTimer = setInterval(requestCoordinatorReconcile, 2_000);
-
-  const formatInstanceChoice = (instance: TelegramInstanceMetadata, activeId: string): string => {
-    const marker = instance.id === activeId ? "✓" : " ";
-    const project = (basename(instance.cwd) || instance.cwd).slice(0, 28);
-    const session = (instance.sessionName || instance.sessionId?.slice(0, 8) || "session").slice(0, 24);
-    const model = (instance.model || "no-model").slice(0, 36);
-    return `${marker} ${project} · ${session} · ${model} · ${instance.id.slice(0, 8)}`;
-  };
 
   telegramCommands.set("tg-switch", async (args, ctx) => {
     const currentCoordinator = coordinator;
