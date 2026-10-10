@@ -9,7 +9,7 @@ import { createTelegramController, type TelegramCommandHandler } from "./lib/con
 import { escapeHtml } from "./lib/html.ts";
 import { createHeartbeat } from "./lib/heartbeat.ts";
 import { replayTelegramHistory, type TelegramHistoryEntry } from "./lib/history-replay.ts";
-import { TelegramInstanceCoordinator, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
+import { TelegramInstanceCoordinator, failoverHasOtherLiveInstances, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
 import { registerTelegramRenderer } from "./lib/renderer.ts";
 import { getActiveSession, installAgentSessionCapture } from "./lib/session-capture.ts";
 import { createTelegramTransport, downloadTelegramFile, getTelegramBotUsername, getTelegramFile } from "./lib/telegram-api.ts";
@@ -536,7 +536,12 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
 
     if (snapshot.active.reason === "failover") {
       const notifiedByToken = runtimeState.notifiedFailoverByToken!;
-      if ((notifiedByToken[tokenHash] ?? 0) < snapshot.active.generation && config.activeChatId !== undefined) {
+      // Only announce a failover when another live instance is registered besides
+      // self — a genuine multi-instance handoff. A single-instance restart (self
+      // alone) must not spam a "failover" notice on every pi start.
+      if (failoverHasOtherLiveInstances(snapshot, currentCoordinator.instanceId)
+        && (notifiedByToken[tokenHash] ?? 0) < snapshot.active.generation
+        && config.activeChatId !== undefined) {
         const chatId = config.activeChatId;
         const previousGeneration = notifiedByToken[tokenHash] ?? 0;
         notifiedByToken[tokenHash] = snapshot.active.generation;
@@ -697,10 +702,16 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
   function disposeRuntime(): void {
     if (disposed) return;
     disposed = true;
+    const currentCoordinator = coordinator;
     if (coordinatorTimer) clearInterval(coordinatorTimer);
     coordinatorTimer = undefined;
     requestCoordinatorReconcile = () => undefined;
     pendingHandoffs.clear();
+    // If we are the active instance and no other live instance remains, clear the
+    // active record so the next start is "initial" instead of a spurious
+    // "failover" notice. Synchronous and best-effort: session_shutdown may be
+    // followed immediately by process exit, so async cleanup is not reliable.
+    currentCoordinator?.clearActiveIfAloneSync();
     coordinator = undefined;
     replayAbortController?.abort();
     replayAbortController = undefined;

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "./config.ts";
@@ -159,6 +160,25 @@ function parseTimestamp(value: string): number {
     return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
+/** Sync JSON read for shutdown paths where async work may not flush before exit. */
+function readJsonSync<T>(path: string): T | undefined {
+    try {
+        return JSON.parse(readFileSync(path, "utf8")) as T;
+    } catch (error) {
+        if (!isErrno(error, "ENOENT")) coordinatorLog.debug("read coordinator json (sync) failed", { path, error });
+        return undefined;
+    }
+}
+
+function readdirSafeSync(path: string): string[] {
+    try {
+        return readdirSync(path);
+    } catch (error) {
+        if (isErrno(error, "ENOENT")) return [];
+        throw error;
+    }
+}
+
 export class TelegramInstanceCoordinator {
     readonly instanceId: string;
     readonly tokenHash: string;
@@ -295,6 +315,47 @@ export class TelegramInstanceCoordinator {
     async persistCursor(updateId: number): Promise<number> {
         const result = await this.syncCursor(updateId);
         return result ?? updateId;
+    }
+
+    /**
+     * Best-effort, synchronous shutdown cleanup for the session_shutdown path.
+     *
+     * If this instance is the recorded active AND no other live instance remains,
+     * remove active.json (and our own heartbeat) so the next start resolves to
+     * "initial" instead of a spurious "failover". When other live instances exist,
+     * active.json is left in place so a genuine failover can still be announced.
+     *
+     * Safe to run without the state lock: deletion only happens in the
+     * sole-instance case, where no concurrent coordinator can be active.
+     */
+    clearActiveIfAloneSync(): void {
+        try {
+            const active = readJsonSync<TelegramActiveInstance>(this.activePath);
+            if (!active || active.instanceId !== this.instanceId) return;
+            const others = this.listAliveInstancesSync().filter((instance) => instance.id !== this.instanceId);
+            if (others.length > 0) return;
+            rmSync(this.activePath, { force: true });
+            rmSync(join(this.instancesDir, `${this.instanceId}.json`), { force: true });
+            this.cachedActive = undefined;
+        } catch (error) {
+            coordinatorLog.warn("clear active instance on shutdown failed", { error });
+        }
+    }
+
+    private listAliveInstancesSync(): TelegramInstanceMetadata[] {
+        const names = readdirSafeSync(this.instancesDir);
+        const instances: TelegramInstanceMetadata[] = [];
+        for (const name of names) {
+            if (!name.endsWith(".json")) continue;
+            const record = readJsonSync<TelegramInstanceMetadata>(join(this.instancesDir, name));
+            if (!record) continue;
+            const fresh = typeof record.id === "string"
+                && typeof record.pid === "number"
+                && this.now() - parseTimestamp(record.heartbeatAt) <= this.heartbeatStaleMs
+                && this.isPidAlive(record.pid);
+            if (fresh) instances.push(record);
+        }
+        return instances;
     }
 
     private async ensureDirectories(): Promise<void> {
@@ -472,4 +533,18 @@ export class TelegramInstanceCoordinator {
             await rm(temporaryPath, { force: true }).catch(coordinatorLog.swallow("debug", "remove coordinator temp file failed", { temporaryPath }));
         }
     }
+}
+
+/**
+ * Whether a failover snapshot represents a genuine multi-instance handoff that
+ * deserves a user-facing notice. Returns true only when at least one OTHER live
+ * instance is registered besides the newly-active self. A single-instance
+ * restart (self alone) returns false, so no spurious "failover" notice is sent
+ * every time pi is restarted.
+ */
+export function failoverHasOtherLiveInstances(
+    snapshot: TelegramInstanceSnapshot,
+    selfInstanceId: string,
+): boolean {
+    return snapshot.instances.some((instance) => instance.id !== selfInstanceId);
 }

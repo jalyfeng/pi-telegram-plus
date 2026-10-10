@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TelegramInstanceCoordinator, isLockContentionError, telegramTokenHash } from "../instance-coordinator.ts";
+import { TelegramInstanceCoordinator, failoverHasOtherLiveInstances, isLockContentionError, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata, type TelegramInstanceSnapshot } from "../instance-coordinator.ts";
 
 const TOKEN = "123456:very-secret-token";
 const STARTED_AT = "2026-01-01T00:00:00.000Z";
@@ -199,6 +199,83 @@ describe("TelegramInstanceCoordinator", () => {
         expect(names).not.toContain(basename(oldCandidate));
 
         await rm(freshCandidate, { recursive: true, force: true });
+    });
+
+    describe("clearActiveIfAloneSync (shutdown cleanup)", () => {
+        const activePath = () => join(rootDir, "tg-runtime", telegramTokenHash(TOKEN), "active.json");
+        const instancePath = (id: string) => join(rootDir, "tg-runtime", telegramTokenHash(TOKEN), "instances", `${id}.json`);
+
+        it("clears active.json and its own heartbeat when the active instance is alone", async () => {
+            const coordinator = create("instance-a");
+            await coordinator.reconcile(heartbeat("/workspace/a"));
+            expect(coordinator.isActive()).toBe(true);
+            expect(await readFile(activePath(), "utf8")).toContain("instance-a");
+
+            coordinator.clearActiveIfAloneSync();
+
+            await expect(readFile(activePath(), "utf8")).rejects.toThrow(/ENOENT/);
+            await expect(readFile(instancePath("instance-a"), "utf8")).rejects.toThrow(/ENOENT/);
+            expect(coordinator.isActive()).toBe(false);
+        });
+
+        it("keeps active.json when another live instance is registered", async () => {
+            const first = create("instance-a");
+            const second = create("instance-b");
+            await first.reconcile(heartbeat("/workspace/a"));
+            await second.reconcile(heartbeat("/workspace/b"));
+            expect(first.isActive()).toBe(true);
+
+            first.clearActiveIfAloneSync();
+
+            const active = JSON.parse(await readFile(activePath(), "utf8"));
+            expect(active.instanceId).toBe("instance-a");
+            expect(await readFile(instancePath("instance-a"), "utf8")).toContain("instance-a");
+        });
+
+        it("does not touch active.json when the shutting-down instance is not active", async () => {
+            const first = create("instance-a");
+            const second = create("instance-b");
+            await first.reconcile(heartbeat("/workspace/a"));
+            await second.reconcile(heartbeat("/workspace/b"));
+
+            second.clearActiveIfAloneSync();
+
+            const active = JSON.parse(await readFile(activePath(), "utf8"));
+            expect(active.instanceId).toBe("instance-a");
+        });
+
+        it("is a no-op when no active record exists", async () => {
+            const coordinator = create("instance-a");
+            expect(() => coordinator.clearActiveIfAloneSync()).not.toThrow();
+            await expect(readFile(activePath(), "utf8")).rejects.toThrow(/ENOENT/);
+        });
+    });
+
+    describe("failoverHasOtherLiveInstances", () => {
+        const activeOf = (instanceId: string, generation: number): TelegramActiveInstance => ({
+            instanceId, generation, updatedAt: STARTED_AT, reason: "failover",
+        });
+        const inst = (id: string): TelegramInstanceMetadata => ({
+            id, pid: 1, startedAt: STARTED_AT, heartbeatAt: STARTED_AT, cwd: `/w/${id}`,
+        });
+
+        it("returns false when only the active self is live (single-instance restart)", () => {
+            const snapshot: TelegramInstanceSnapshot = {
+                active: activeOf("instance-b", 2),
+                instances: [inst("instance-b")],
+                changed: true,
+            };
+            expect(failoverHasOtherLiveInstances(snapshot, "instance-b")).toBe(false);
+        });
+
+        it("returns true when another live instance is registered (genuine handoff)", () => {
+            const snapshot: TelegramInstanceSnapshot = {
+                active: activeOf("instance-b", 2),
+                instances: [inst("instance-b"), inst("instance-c")],
+                changed: true,
+            };
+            expect(failoverHasOtherLiveInstances(snapshot, "instance-b")).toBe(true);
+        });
     });
 
     describe("isLockContentionError", () => {
