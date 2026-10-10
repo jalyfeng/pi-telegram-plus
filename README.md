@@ -126,13 +126,13 @@ are bridged to Telegram inline buttons so remote turns can interact with them:
 ### Command naming
 
 - Commands that mirror pi's native slash commands keep the same names (`/model`, `/session`, `/status`, `/stop`, `/tg-thinking`, etc.) so Telegram behaves like a remote pi control surface instead of a separate bot-specific CLI.
-- Commands that configure or manage the Telegram bridge itself use the `/tg-*` prefix (`/tg-global-setup`, `/tg-config`, `/tg-list`, `/tg-switch`, etc.).
+- Commands that configure or manage the Telegram bridge itself use the `/tg-*` prefix (`/tg-bot-add`, `/tg-bind-cwd`, `/tg-config`, `/tg-list`, `/tg-switch`, etc.).
 - `/pair <code>` is a Telegram-only bootstrap authorization message handled before normal command dispatch. It is intentionally short and not `/tg-pair` because the setup prompt is copied into Telegram during first-time pairing, before any user is authorized.
-- Telegram Bot API command menus do not allow hyphens, so the bot menu may show underscore aliases such as `/tg_config`, `/tg_switch`, or `/tg_global_setup`; the controller accepts both underscore and hyphen forms.
+- Telegram Bot API command menus do not allow hyphens, so the bot menu may show underscore aliases such as `/tg_config`, `/tg_switch`, or `/tg_bot_list`; the controller accepts both underscore and hyphen forms.
 
 ### Multi-instance Coordination
 
-Several local pi processes can share one bot token (for example different workspaces or sessions). Coordination keeps Telegram traffic attached to exactly one owner at a time:
+Several local pi processes can share one bot (the **default bot** or a bot bound to a shared project). Coordination keeps Telegram traffic attached to exactly one owner at a time. The **default bot** (`/tg-bot-default`) is the equivalent of the former "global" bot — projects without an explicit binding fall back to it.
 
 1. **Registration** — each enabled process advertises itself under `~/.pi/agent/` with cwd, session, model, busy state, and a heartbeat.
 2. **Single active owner** — only the active instance polls Telegram and is allowed to send outbound messages. Standby instances stay quiet even if their local agent is streaming.
@@ -195,23 +195,27 @@ Quoted attachments are represented as metadata (`[telegram quoted attachment]`, 
 
 ### Telegram Connection Commands
 
-**Global scope** (a single bot token shared across all workspaces):
+**Bot registry** (user-wide bot identity stored in `~/.pi/agent/tg.json`):
 
 | Command | Description |
 |---------|-------------|
-| `/tg-global-setup` | Configure the global bot token and connect (first-time setup) |
-| `/tg-global-connect` | Enable / start the global bot connection |
-| `/tg-global-disconnect` | Disable / stop the global bot (keeps the token) |
+| `/tg-bot-add` | Add a Telegram bot to the registry (prompts for name + token); first bot becomes the default |
+| `/tg-bot-list` | List all registered bots (id, name, @username, default marker, pairing status) |
+| `/tg-bot-update <id\|name>` | Update a bot's token, name, allowedUserId, apiBase, or retryCount |
+| `/tg-bot-remove <id\|name>` | Remove a bot from the registry; warns if it was the default or referenced by project bindings |
+| `/tg-bot-default <id\|name>` | Set the default bot (used when a project has no explicit binding) |
 
-**Workspace scope** (per-directory bot token; overrides global when bound):
+**Project binding** (per-project `.pi/telegram.json` references a registered bot by id — no token re-paste):
 
 | Command | Description |
 |---------|-------------|
-| `/tg-bind-cwd` | Bind the current directory to its own bot token |
-| `/tg-cwd-connect` | Enable the bot for the current directory |
-| `/tg-cwd-disconnect` | Disable the bot for the current directory |
-| `/tg-unbind-cwd` | Remove the current directory's bot binding |
-| `/tg-list` | List all bot bindings (global + workspace) |
+| `/tg-bind-cwd [bot id\|name]` | Bind current project to a registered bot (interactive selection if no arg); writes `<project>/.pi/telegram.json` |
+| `/tg-cwd-connect` | Enable the bot for the current project (creates a minimal binding with default bot if none) |
+| `/tg-cwd-disconnect` | Disable the bot for the current project |
+| `/tg-unbind-cwd` | Remove the project binding; falls back to the default bot |
+| `/tg-list` | Show the current project binding (which bot, enabled, prefs) and the default bot |
+
+**How it works:** Bots are registered once with `/tg-bot-add` (token, username, pairing, etc. stored centrally). Projects reference a bot by id via `/tg-bind-cwd` — no token re-paste or re-pairing needed. Unbound projects fall back to the **default bot** (`/tg-bot-default`), which is the equivalent of the former "global" bot.
 
 **Pairing / authorization:**
 
@@ -252,9 +256,9 @@ Quoted attachments are represented as metadata (`[telegram quoted attachment]`, 
 Common issues and diagnostic steps. The extension writes a structured JSON Lines log to `<agent dir>/logs/pi-telegram-plus-YYYY-MM-DD.log` (default `~/.pi/agent/logs/`). Set `PI_TELEGRAM_PLUS_LOG_LEVEL=debug|info|warn|error` to control verbosity. See [docs/logging.md](docs/logging.md) for the full logging design.
 
 ### The bot does not respond to my messages
-- Verify the bot token is correct: run `/tg-global-setup` (global) or `/tg-bind-cwd` (workspace) and re-paste the token from [@BotFather](https://t.me/BotFather).
-- Confirm the bot is connected: `/tg-list` should show the binding as enabled. If not, run `/tg-global-connect` or `/tg-cwd-connect`. A configured token is auto-enabled again on the next pi start.
-- Make sure you are the authorized user. After setup, pi prints a one-time pairing code locally; send `/pair <code>` to the bot from your Telegram account. To reset authorization, remove the binding and re-setup.
+- Verify the bot token is correct: run `/tg-bot-add` to register a bot with the correct token from [@BotFather](https://t.me/BotFather). Use `/tg-bot-update <name>` to fix an existing bot's token.
+- Confirm the bot is connected: `/tg-list` should show the project binding as enabled. If not, run `/tg-cwd-connect`. A configured token is auto-enabled again on the next pi start.
+- Make sure you are the authorized user. After setup, pi prints a one-time pairing code locally; send `/pair <code>` to the bot from your Telegram account. To reset authorization, remove the bot with `/tg-bot-remove` and re-add it.
 - When several local pi processes share the token, check the local TUI footer: only `connected(current)` / `active(current)` owns polling and outbound traffic. From that owner, send `/tg-switch` (bot menu: `/tg_switch`) to inspect and select another live instance. Dead owners fail over automatically after their heartbeat expires.
 - The file-based polling lock remains a final safety guard. If the expected instance is already active but polling still reports a lock conflict, restart the conflicting older process or remove only the confirmed stale `tg-poll-*.lock` directory under `~/.pi/agent/`. Retired/candidate lock leftovers are cleaned automatically and should not need manual deletion.
 
@@ -276,7 +280,7 @@ Common issues and diagnostic steps. The extension writes a structured JSON Lines
 - Inline keyboards are removed once the pending dialog resolves or is cancelled (e.g. via `/stop` or timeout). Re-trigger the action to get a fresh keyboard.
 - For third-party `custom()` dialogs (pi-goal), ensure the producing extension is loaded (`/reload`) and that the component exposes the expected `handleInput`/`render` API. Unknown shapes are auto-dismissed as `cancelled`.
 
-### `/tg-global-*` or `/tg-bind-cwd` commands are missing
+### `/tg-bot-*` or `/tg-bind-cwd` commands are missing
 - The extension must be registered as a pi package. Re-run `pi install npm:pi-telegram-plus` (or `pi packages add .` from source) and restart pi.
 - Run `/reload` to refresh command registration without a full restart.
 
@@ -287,8 +291,9 @@ Common issues and diagnostic steps. The extension writes a structured JSON Lines
 
 ### Polling reconnects repeatedly or reports transient failures
 - The extension uses exponential backoff on transient errors. If failures persist, verify network reachability to `api.telegram.org` and that the bot token has not been revoked in BotFather.
-- A revoked/regenerated token will keep failing until you re-run `/tg-global-setup` with the new token.
+- A revoked/regenerated token will keep failing until you run `/tg-bot-update <name>` with the new token.
 
 ### Configuration changes are not picked up
-- Per-workspace bindings live in `~/.pi/agent/tg.json`. After editing by hand, run `/reload` (or restart pi) so the extension re-reads config.
-- Workspace bindings override the global token. If the wrong bot responds, run `/tg-list` and `/tg-unbind-cwd` to clear the unintended override.
+- The bot registry lives in `~/.pi/agent/tg.json` (version 3). Project bindings live in `<project>/.pi/telegram.json`. After editing by hand, run `/reload` (or restart pi) so the extension re-reads config.
+- If the wrong bot responds, run `/tg-list` to check the current project binding, and `/tg-unbind-cwd` to fall back to the default bot.
+- The v2 → v3 migration runs automatically on first read: global config becomes the default bot, workspaces become per-project `.pi/telegram.json` files with token dedup.

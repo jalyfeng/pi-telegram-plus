@@ -4,24 +4,67 @@ export type TelegramRenderLevel = "hidden" | "brief" | "full";
 
 export const RENDER_LEVELS: readonly TelegramRenderLevel[] = ["hidden", "brief", "full"] as const;
 
-export type TelegramConfigStore = {
-  version: 2;
-  global?: TelegramConfig;
-  workspaces?: TelegramWorkspaceConfig[];
+/**
+ * User-wide bot registry stored at `<agent dir>/tg.json` (version 3).
+ * Holds ONLY bot identity + a defaultBotId. Runtime (polling/chat state)
+ * MUST NEVER write this file — only bot CRUD commands do.
+ */
+export type BotRegistry = {
+  version: 3;
+  bots: BotRecord[];
+  defaultBotId?: string;
 };
 
-export type TelegramWorkspaceConfig = {
-  path: string;
-  config: TelegramConfig;
+/** A registered bot's identity. Stored in the central registry, not per-project. */
+export type BotRecord = {
+  id: string;
+  /** Unique human-friendly name for display and `/tg-bot-*` commands. */
+  name: string;
+  token: string;
+  botUsername?: string;
+  allowedUserId?: number;
+  /** One-time local pairing code required before allowedUserId is set. */
+  pairingCode?: string;
+  /** Override the Telegram Bot API base URL (e.g. a self-hosted local Bot API server or a test mock). */
+  apiBase?: string;
+  /** Number of retries for failed Telegram API calls (0 = no retry, default 3). */
+  retryCount?: number;
+};
+
+/**
+ * Project-level binding stored at `<project>/.pi/telegram.json`.
+ * References a registered bot by id and holds per-project prefs + runtime state.
+ */
+export type ProjectTelegramBinding = {
+  /** Reference into registry bots[].id; absent → use defaultBotId. */
+  botId?: string;
+  /** Whether the bot is enabled for this project. Default true if file exists. */
+  enabled?: boolean;
+  tool?: TelegramRenderLevel;
+  thinking?: TelegramRenderLevel;
+  /** Runtime state (per-project) — cold-start seed / best-effort backup. */
+  lastUpdateId?: number;
+  /** Runtime state (per-project). */
+  activeChatId?: number;
 };
 
 export type ResolvedTelegramConfig = {
-  store: TelegramConfigStore;
-  scope: "global" | "workspace";
-  workspacePath?: string;
+  registry: BotRegistry;
+  /** The resolved bot record (or undefined if no bot resolves). */
+  bot?: BotRecord;
+  /** True when a project `.pi/telegram.json` was found. */
+  hasProjectBinding: boolean;
+  /** Path of the resolved project binding, if any. */
+  projectPath?: string;
+  /** The materialized config combining bot identity + project prefs + runtime state. */
   config: TelegramConfig;
 };
 
+/**
+ * Materialized runtime config: bot identity (from a BotRecord) merged with
+ * per-project prefs + runtime state (from a ProjectTelegramBinding or defaults).
+ * Kept compatible with existing consumers (controller/polling/renderer).
+ */
 export type TelegramConfig = {
   botToken?: string;
   botUsername?: string;
