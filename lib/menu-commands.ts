@@ -4,6 +4,29 @@ import { log } from "./logger.ts";
 
 const menuLog = log.child("menu-commands");
 
+// Local-cwd management commands that must NOT appear in the Telegram bot menu
+// (they require interactive prompts / local cwd context). They stay registered
+// as pi slash commands (TUI) and as Telegram-dispatch handlers; only the bot
+// my-commands list excludes them.
+const BOT_MENU_EXCLUDED = new Set([
+  // Bot CRUD + bind/unbind are local-cwd management commands.
+  "tg-bot-add",
+  "tg-bot-update",
+  "tg-bot-remove",
+  "tg-bot-default",
+  "tg-bind-cwd",
+  "tg-unbind-cwd",
+  "tg-cwd-connect",
+  "tg-cwd-disconnect",
+  // Flat tg-* commands are consolidated into the /tg menu. They stay
+  // registered as dispatchable slash commands but are excluded from the
+  // bot menu so only /tg appears as the single management entry point.
+  "tg-config",
+  "tg-switch",
+  "tg-list",
+  "tg-bot-list",
+]);
+
 const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = [
   // Keep the built-in pi commands in the same order as the TUI slash menu.
   { command: "login", description: "Configure provider authentication" },
@@ -35,15 +58,8 @@ const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = 
   { command: "stop", description: "Stop the current agent turn" },
   { command: "debug", description: "Show debug information" },
   { command: "status", description: "Show runtime snapshot (workspace, model, context, messages)" },
-  // tg-* commands visible in the Telegram bot menu.
-  // tg-bind-cwd / tg-unbind-cwd are workspace-management commands that
-  // require local cwd context and do not belong in the bot command list.
-  { command: "tg_global_setup", description: "Configure global Telegram bot token" },
-  { command: "tg_global_connect", description: "Enable/start global Telegram bot" },
-  { command: "tg_global_disconnect", description: "Disable/stop global Telegram bot" },
-  { command: "tg_config", description: "Configure Telegram message rendering" },
-  { command: "tg_switch", description: "Switch the active local pi instance" },
-  { command: "tg_list", description: "List Telegram bot bindings" },
+  // Consolidated Telegram management menu — replaces all flat /tg-* commands.
+  { command: "tg", description: "Open the Telegram management menu" },
 ];
 
 const toTelegramCommandName = (name: string): string | undefined => {
@@ -62,7 +78,10 @@ export function buildTelegramMenuCommands(pi: ExtensionAPI): Array<{ command: st
   };
 
   for (const command of TELEGRAM_MENU_COMMANDS) addCommand(command.command, command.description);
-  for (const command of pi.getCommands()) addCommand(command.name, command.description);
+  for (const command of pi.getCommands()) {
+    if (BOT_MENU_EXCLUDED.has(command.name)) continue;
+    addCommand(command.name, command.description);
+  }
 
   // Telegram accepts at most 100 bot commands. Keep the curated built-in-style
   // commands first, then fill the rest with extension/prompt/skill commands.

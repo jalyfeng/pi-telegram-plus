@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, relative, resolve } from "node:path";
-import type { ResolvedTelegramConfig, TelegramConfig, TelegramConfigStore, TelegramWorkspaceConfig } from "./types.ts";
+import { basename, dirname, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import type { BotRecord, BotRegistry, ProjectTelegramBinding, ResolvedTelegramConfig, TelegramConfig, TelegramRenderLevel } from "./types.ts";
 import { log } from "./logger.ts";
 
 const configLog = log.child("config");
@@ -17,8 +18,8 @@ export function getTelegramConfigPath(): string {
   return join(getAgentDir(), "tg.json");
 }
 
-function emptyStore(): TelegramConfigStore {
-  return { version: 2, global: {}, workspaces: [] };
+function emptyRegistry(): BotRegistry {
+  return { version: 3, bots: [] };
 }
 
 export function enableConfiguredTelegramOnStartup(config: TelegramConfig): TelegramConfig {
@@ -26,9 +27,9 @@ export function enableConfiguredTelegramOnStartup(config: TelegramConfig): Teleg
   return { ...config, telegramEnabled: true };
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise<void>((resolveP) => setTimeout(resolveP, ms));
 
-async function withTelegramConfigLock<T>(run: () => Promise<T>): Promise<T> {
+export async function withTelegramConfigLock<T>(run: () => Promise<T>): Promise<T> {
   await mkdir(getAgentDir(), { recursive: true });
   const lockPath = join(getAgentDir(), "tg.json.lock");
   const started = Date.now();
@@ -54,185 +55,531 @@ async function withTelegramConfigLock<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-function assertV2Store(value: unknown): TelegramConfigStore {
-  if (!value || typeof value !== "object" || (value as { version?: unknown }).version !== 2) {
-    throw new Error("Unsupported Telegram config format. Please recreate ~/.pi/agent/tg.json as version 2 or run /tg-global-setup.");
+// ── Registry (v3) read / write ────────────────────────────────────────────
+
+export async function readBotRegistry(): Promise<BotRegistry> {
+  const path = getTelegramConfigPath();
+  if (!existsSync(path)) return emptyRegistry();
+  const raw = await readFile(path, "utf8");
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    await sleep(25);
+    value = JSON.parse(await readFile(path, "utf8"));
   }
-  const store = value as TelegramConfigStore;
+  const migrated = await migrateToV3(value);
+  // If migration occurred, persist the v3 registry on disk.
+  const isMigration = !value || typeof value !== "object" || (value as { version?: unknown }).version !== 3;
+  if (isMigration) {
+    await withTelegramConfigLock(async () => {
+      await writeBotRegistry(migrated);
+    }).catch(configLog.swallow("warn", "persist migrated Telegram registry failed", { path }));
+  }
+  return migrated;
+}
+
+export async function writeBotRegistry(registry: BotRegistry): Promise<void> {
+  await mkdir(getAgentDir(), { recursive: true });
+  const path = getTelegramConfigPath();
+  const normalized: BotRegistry = {
+    version: 3,
+    bots: registry.bots ?? [],
+    ...(registry.defaultBotId === undefined ? {} : { defaultBotId: registry.defaultBotId }),
+  };
+  const tmpPath = `${path}.tmp`;
+  await writeFile(tmpPath, JSON.stringify(normalized, null, 2) + "\n", { mode: 0o600 });
+  await rename(tmpPath, path);
+  await chmod(path, 0o600).catch(configLog.swallow("warn", "chmod registry file failed", { path }));
+}
+
+export function findBotById(registry: BotRegistry, id: string): BotRecord | undefined {
+  return registry.bots.find((bot) => bot.id === id);
+}
+
+export function findBotByName(registry: BotRegistry, name: string): BotRecord | undefined {
+  const lower = name.toLowerCase();
+  return registry.bots.find((bot) => bot.name.toLowerCase() === lower);
+}
+
+export function findBotByIdOrName(registry: BotRegistry, query: string): BotRecord | undefined {
+  return findBotById(registry, query) ?? findBotByName(registry, query);
+}
+
+// ── Project binding (.pi/telegram.json) read / write ──────────────────────
+
+/**
+ * Walk up from `cwd` to find the nearest `.pi/telegram.json` file.
+ * Returns the parsed binding and its directory, or undefined if not found.
+ */
+export async function readProjectBinding(cwd: string): Promise<{ path: string; binding: ProjectTelegramBinding } | undefined> {
+  let dir = resolve(cwd);
+  while (true) {
+    const bindingPath = join(dir, ".pi", "telegram.json");
+    if (existsSync(bindingPath)) {
+      try {
+        const raw = await readFile(bindingPath, "utf8");
+        const binding = JSON.parse(raw) as ProjectTelegramBinding;
+        return { path: dir, binding };
+      } catch {
+        // Corrupt binding file — treat as not found so caller falls back to default.
+        return undefined;
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
+}
+
+function getProjectBindingPath(projectDir: string): string {
+  return join(resolve(projectDir), ".pi", "telegram.json");
+}
+
+export async function writeProjectBinding(projectDir: string, binding: ProjectTelegramBinding): Promise<void> {
+  const dir = resolve(projectDir);
+  const piDir = join(dir, ".pi");
+  await mkdir(piDir, { recursive: true });
+  const path = getProjectBindingPath(dir);
+  const tmpPath = `${path}.tmp`;
+  await writeFile(tmpPath, JSON.stringify(binding, null, 2) + "\n", { mode: 0o600 });
+  await rename(tmpPath, path);
+  await chmod(path, 0o600).catch(configLog.swallow("warn", "chmod project binding failed", { path }));
+}
+
+export async function removeProjectBinding(projectDir: string): Promise<void> {
+  const path = getProjectBindingPath(projectDir);
+  await rm(path, { force: true }).catch(configLog.swallow("warn", "remove project binding failed", { path }));
+}
+
+/**
+ * Read-modify-write a project binding UNDER the config lock, so it serializes
+ * with persistProjectRuntimeState (which also writes the binding under the
+ * lock). Without this, an unguarded writeProjectBinding races with a concurrent
+ * persist that read the old binding, and the persist's late write reverts the
+ * change (e.g. toggling enabled=false got reverted to true).
+ */
+export async function updateProjectBindingLocked(
+  projectDir: string,
+  mutate: (existing: ProjectTelegramBinding) => ProjectTelegramBinding,
+): Promise<void> {
+  await withTelegramConfigLock(async () => {
+    const current = await readProjectBinding(projectDir);
+    const next = mutate(current?.binding ?? {});
+    await writeProjectBinding(projectDir, next);
+  });
+}
+
+// ── Resolution ────────────────────────────────────────────────────────────
+
+/**
+ * Resolve the Telegram configuration for a given working directory.
+ *
+ * 1. Walk up from `cwd` to find `<project>/.pi/telegram.json`.
+ *    - Found: botId = binding.botId ?? registry.defaultBotId; prefs from binding; runtime state from binding.
+ *    - Not found: use registry.defaultBotId; prefs = defaults; no persisted runtime state.
+ * 2. No bot resolves (no botId and no defaultBotId) → telegram not configured.
+ * 3. Materialize ResolvedTelegramConfig from BotRecord + project prefs + runtime state.
+ */
+export async function resolveTelegramConfig(cwd: string): Promise<ResolvedTelegramConfig> {
+  const registry = await readBotRegistry();
+  const project = await readProjectBinding(cwd);
+
+  const projectBotId = project?.binding.botId;
+  let bot: BotRecord | undefined;
+  if (projectBotId) {
+    bot = findBotById(registry, projectBotId);
+    // Dangling ref (bot removed): fall back to defaultBotId so the project
+    // stays connected instead of silently becoming unconfigured.
+    if (!bot && registry.defaultBotId) {
+      bot = findBotById(registry, registry.defaultBotId);
+    }
+  } else if (registry.defaultBotId) {
+    bot = findBotById(registry, registry.defaultBotId);
+  }
+
+  const config = materializeTelegramConfig(bot, project?.binding);
+
   return {
-    version: 2,
-    global: store.global ?? {},
-    workspaces: Array.isArray(store.workspaces) ? store.workspaces : [],
+    registry,
+    bot,
+    hasProjectBinding: !!project,
+    ...(project === undefined ? {} : { projectPath: project.path }),
+    config,
+  };
+}
+
+/**
+ * Combine a BotRecord (identity) with a project binding (prefs + runtime state)
+ * into a single TelegramConfig. Pure function for testability.
+ */
+export function materializeTelegramConfig(
+  bot: BotRecord | undefined,
+  binding: ProjectTelegramBinding | undefined,
+): TelegramConfig {
+  if (!bot) {
+    // No bot resolves — check if binding says enabled (for status display).
+    if (binding?.enabled === false) return { telegramEnabled: false };
+    return {};
+  }
+
+  const config: TelegramConfig = {
+    botToken: bot.token,
+    ...(bot.botUsername === undefined ? {} : { botUsername: bot.botUsername }),
+    ...(bot.allowedUserId === undefined ? {} : { allowedUserId: bot.allowedUserId }),
+    ...(bot.pairingCode === undefined ? {} : { pairingCode: bot.pairingCode }),
+    ...(bot.apiBase === undefined ? {} : { apiBase: bot.apiBase }),
+  };
+
+  // Project binding overrides prefs + runtime state.
+  if (binding) {
+    if (binding.enabled === undefined) {
+      config.telegramEnabled = true; // file exists → default enabled
+    } else {
+      config.telegramEnabled = binding.enabled;
+    }
+    if (binding.tool !== undefined) config.tool = binding.tool;
+    if (binding.thinking !== undefined) config.thinking = binding.thinking;
+    if (binding.retryCount !== undefined) config.retryCount = binding.retryCount;
+    if (binding.lastUpdateId !== undefined) config.lastUpdateId = binding.lastUpdateId;
+    if (binding.activeChatId !== undefined) config.activeChatId = binding.activeChatId;
+  } else {
+    // No project binding → enabled by default if a bot resolves.
+    config.telegramEnabled = true;
+  }
+
+  return config;
+}
+
+/**
+ * Read resolved config from registry + project binding. Used as a replacement
+ * for the old readResolvedTelegramConfig.
+ */
+export async function readResolvedTelegramConfig(cwd: string): Promise<ResolvedTelegramConfig> {
+  return resolveTelegramConfig(cwd);
+}
+
+/**
+ * Persist per-project runtime state + prefs to the project binding file, and
+ * return a ResolvedTelegramConfig reflecting the post-write state.
+ *
+ * - Bound project: writes lastUpdateId (monotonic max), activeChatId, tool,
+ *   thinking, retryCount to `<project>/.pi/telegram.json`; preserves botId.
+ *   Never writes the registry.
+ * - Unbound project: writes nothing (no .pi to write to). Re-resolves with
+ *   `cwd` to pick up default-bot changes, then preserves in-memory runtime/
+ *   pref state so the caller's `config = resolvedConfig.config` does not drop
+ *   state that has no durable home. The coordinator cursor stays authoritative
+ *   for polling; activeChatId is re-learned on restart.
+ *
+ * `cwd` is the resolution directory (defaults to the resolved project path or
+ * process.cwd()) and is used only on the unbound path to re-resolve correctly.
+ */
+export async function persistProjectRuntimeState(
+  resolved: ResolvedTelegramConfig,
+  config: TelegramConfig,
+  cwd?: string,
+): Promise<ResolvedTelegramConfig> {
+  if (!resolved.hasProjectBinding || !resolved.projectPath) {
+    const resolveCwd = cwd ?? resolved.projectPath ?? process.cwd();
+    const fresh = await resolveTelegramConfig(resolveCwd);
+    return { ...fresh, config: preserveInMemoryRuntimeState(fresh.config, config) };
+  }
+
+  const projectDir = resolved.projectPath;
+  // Read the registry once outside the config lock to avoid re-entrant lock
+  // acquisition (resolveTelegramConfig would otherwise re-read it inside).
+  const registry = await readBotRegistry();
+  return await withTelegramConfigLock(async () => {
+    const existing = await readProjectBinding(projectDir);
+    const binding: ProjectTelegramBinding = existing?.binding ?? {};
+
+    // Persist runtime state + per-project prefs. Preserve botId.
+    if (typeof config.lastUpdateId === "number") {
+      binding.lastUpdateId = Math.max(
+        binding.lastUpdateId ?? -1,
+        config.lastUpdateId,
+      );
+    }
+    if (typeof config.activeChatId === "number") {
+      binding.activeChatId = config.activeChatId;
+    }
+    if (config.tool !== undefined) binding.tool = config.tool;
+    if (config.thinking !== undefined) binding.thinking = config.thinking;
+    if (config.retryCount !== undefined) binding.retryCount = config.retryCount;
+
+    await writeProjectBinding(projectDir, binding);
+
+    // Materialize from the snapshot registry + just-written binding (no
+    // re-entrant registry read inside the lock).
+    const botId = binding.botId ?? registry.defaultBotId;
+    let bot: BotRecord | undefined;
+    if (botId) {
+      bot = findBotById(registry, botId);
+      if (!bot && binding.botId && registry.defaultBotId) {
+        bot = findBotById(registry, registry.defaultBotId);
+      }
+    }
+    return {
+      registry,
+      bot,
+      hasProjectBinding: true,
+      projectPath: projectDir,
+      config: materializeTelegramConfig(bot, binding),
+    };
+  });
+}
+
+/**
+ * Fill in-memory runtime/pref fields that `persisted` lacks from `memory`, so
+ * an unbound project (no .pi/telegram.json) does not lose activeChatId /
+ * lastUpdateId / tool / thinking / retryCount across a persist cycle. Values
+ * already present in `persisted` (restored from disk for bound projects) win.
+ */
+export function preserveInMemoryRuntimeState(
+  persisted: TelegramConfig,
+  memory: TelegramConfig,
+): TelegramConfig {
+  return {
+    ...persisted,
+    ...(persisted.lastUpdateId === undefined && typeof memory.lastUpdateId === "number"
+      ? { lastUpdateId: memory.lastUpdateId }
+      : {}),
+    ...(persisted.activeChatId === undefined && typeof memory.activeChatId === "number"
+      ? { activeChatId: memory.activeChatId }
+      : {}),
+    ...(persisted.tool === undefined && memory.tool !== undefined ? { tool: memory.tool } : {}),
+    ...(persisted.thinking === undefined && memory.thinking !== undefined ? { thinking: memory.thinking } : {}),
+    ...(persisted.retryCount === undefined && memory.retryCount !== undefined
+      ? { retryCount: memory.retryCount }
+      : {}),
+  };
+}
+
+/**
+ * Bind a project to a registered bot. Writes `<project>/.pi/telegram.json`.
+ * Does NOT re-paste the token — references the bot by id.
+ */
+export async function bindProjectTelegram(
+  cwd: string,
+  botId: string,
+  options?: { enabled?: boolean; tool?: TelegramRenderLevel; thinking?: TelegramRenderLevel },
+): Promise<ResolvedTelegramConfig> {
+  const projectDir = resolve(cwd);
+  const binding: ProjectTelegramBinding = {
+    botId,
+    enabled: options?.enabled ?? true,
+    ...(options?.tool === undefined ? {} : { tool: options.tool }),
+    ...(options?.thinking === undefined ? {} : { thinking: options.thinking }),
+  };
+  await updateProjectBindingLocked(projectDir, () => binding);
+  return resolveTelegramConfig(projectDir);
+}
+
+/**
+ * Remove a project's Telegram binding. The project falls back to defaultBotId.
+ */
+export async function unbindProjectTelegram(cwd: string): Promise<ResolvedTelegramConfig> {
+  const projectDir = resolve(cwd);
+  await removeProjectBinding(projectDir);
+  return resolveTelegramConfig(projectDir);
+}
+
+// ── Migration (v2 → v3) ───────────────────────────────────────────────────
+
+/** Paths that could not be written during migration (non-fatal warnings). */
+export type MigrationWarnings = { skippedPaths: string[] };
+
+/**
+ * Migrate a v2 store (or legacy flat config) to a v3 registry.
+ * For workspaces, writes per-project `.pi/telegram.json` files.
+ * Returns the v3 registry. Non-throwing for unwritable workspace paths.
+ */
+async function migrateToV3(value: unknown): Promise<BotRegistry> {
+  if (value && typeof value === "object" && (value as { version?: unknown }).version === 3) {
+    const raw = value as BotRegistry;
+    return {
+      version: 3,
+      bots: Array.isArray(raw.bots) ? raw.bots : [],
+      ...(raw.defaultBotId === undefined ? {} : { defaultBotId: raw.defaultBotId }),
+    };
+  }
+
+  const warnings: MigrationWarnings = { skippedPaths: [] };
+  const bots: BotRecord[] = [];
+  let defaultBotId: string | undefined;
+
+  // Handle legacy flat config (no version field) → treat as global.
+  if (isLegacyFlatConfig(value)) {
+    const flatConfig = value as TelegramConfig;
+    if (flatConfig.botToken) {
+      const bot = createBotRecordFromConfig(flatConfig, flatConfig.botUsername ?? "default");
+      bots.push(bot);
+      defaultBotId = bot.id;
+    }
+    return { version: 3, bots, ...(defaultBotId === undefined ? {} : { defaultBotId }) };
+  }
+
+  // Handle v2 store.
+  if (value && typeof value === "object" && (value as { version?: unknown }).version === 2) {
+    const store = value as {
+      version: 2;
+      global?: TelegramConfig;
+      workspaces?: Array<{ path: string; config: TelegramConfig }>;
+    };
+
+    // Migrate global → default bot.
+    if (store.global?.botToken) {
+      const existingBot = bots.find((b) => b.token === store.global!.botToken);
+      if (existingBot) {
+        defaultBotId = existingBot.id;
+      } else {
+        const bot = createBotRecordFromConfig(store.global, store.global.botUsername ?? "default");
+        bots.push(bot);
+        defaultBotId = bot.id;
+      }
+    }
+
+    // Migrate workspaces → project .pi/telegram.json files.
+    for (const workspace of store.workspaces ?? []) {
+      if (!workspace.config?.botToken) continue;
+      const wsPath = resolve(workspace.path);
+
+      // Dedup by token: if a bot with the same token already exists, reuse its id.
+      let bot = bots.find((b) => b.token === workspace.config!.botToken);
+      if (!bot) {
+        const name = workspace.config.botUsername ?? basename(wsPath);
+        bot = createBotRecordFromConfig(workspace.config, name);
+        bots.push(bot);
+      }
+
+      // Write project .pi/telegram.json — skip if path doesn't exist or isn't writable.
+      try {
+        if (!existsSync(wsPath)) {
+          warnings.skippedPaths.push(wsPath);
+          continue;
+        }
+        const binding: ProjectTelegramBinding = {
+          botId: bot.id,
+          enabled: workspace.config.telegramEnabled !== false,
+          ...(workspace.config.tool === undefined ? {} : { tool: workspace.config.tool }),
+          ...(workspace.config.thinking === undefined ? {} : { thinking: workspace.config.thinking }),
+          ...(workspace.config.retryCount === undefined ? {} : { retryCount: workspace.config.retryCount }),
+          ...(workspace.config.lastUpdateId === undefined ? {} : { lastUpdateId: workspace.config.lastUpdateId }),
+          ...(workspace.config.activeChatId === undefined ? {} : { activeChatId: workspace.config.activeChatId }),
+        };
+        await writeProjectBinding(wsPath, binding);
+      } catch {
+        warnings.skippedPaths.push(wsPath);
+      }
+    }
+
+    if (warnings.skippedPaths.length > 0) {
+      configLog.warn("migration skipped unwritable workspace paths", { skippedPaths: warnings.skippedPaths });
+    }
+
+    return { version: 3, bots, ...(defaultBotId === undefined ? {} : { defaultBotId }) };
+  }
+
+  throw new Error("Unsupported Telegram config format. Please recreate ~/.pi/agent/tg.json as version 3 or run /tg-bot-add.");
+}
+
+function createBotRecordFromConfig(config: TelegramConfig, name: string): BotRecord {
+  return {
+    id: randomUUID(),
+    name,
+    token: config.botToken!,
+    ...(config.botUsername === undefined ? {} : { botUsername: config.botUsername }),
+    ...(config.allowedUserId === undefined ? {} : { allowedUserId: config.allowedUserId }),
+    ...(config.pairingCode === undefined ? {} : { pairingCode: config.pairingCode }),
+    ...(config.apiBase === undefined ? {} : { apiBase: config.apiBase }),
   };
 }
 
 function isLegacyFlatConfig(value: unknown): value is TelegramConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return !("version" in record) && !("global" in record) && !("workspaces" in record);
+  return !("version" in record) && !("global" in record) && !("workspaces" in record) && !("bots" in record);
+}
+
+// ── Bot registry CRUD helpers ─────────────────────────────────────────────
+
+export async function addBot(bot: BotRecord): Promise<BotRegistry> {
+  return await withTelegramConfigLock(async () => {
+    const registry = await readBotRegistryUnsafe();
+    registry.bots.push(bot);
+    // First bot becomes default automatically.
+    if (registry.bots.length === 1 && !registry.defaultBotId) {
+      registry.defaultBotId = bot.id;
+    }
+    await writeBotRegistry(registry);
+    return registry;
+  });
+}
+
+export async function updateBot(id: string, updates: Partial<Omit<BotRecord, "id">>): Promise<BotRegistry> {
+  return await withTelegramConfigLock(async () => {
+    const registry = await readBotRegistryUnsafe();
+    const index = registry.bots.findIndex((b) => b.id === id);
+    if (index < 0) throw new Error(`Bot not found: ${id}`);
+    registry.bots[index] = { ...registry.bots[index], ...updates };
+    await writeBotRegistry(registry);
+    return registry;
+  });
+}
+
+export async function removeBot(id: string): Promise<BotRegistry> {
+  return await withTelegramConfigLock(async () => {
+    const registry = await readBotRegistryUnsafe();
+    registry.bots = registry.bots.filter((b) => b.id !== id);
+    if (registry.defaultBotId === id) {
+      delete registry.defaultBotId;
+      // If there's exactly one remaining bot, promote it to default.
+      if (registry.bots.length === 1) {
+        registry.defaultBotId = registry.bots[0].id;
+      }
+    }
+    await writeBotRegistry(registry);
+    return registry;
+  });
+}
+
+export async function setDefaultBot(id: string): Promise<BotRegistry> {
+  return await withTelegramConfigLock(async () => {
+    const registry = await readBotRegistryUnsafe();
+    if (!registry.bots.some((b) => b.id === id)) {
+      throw new Error(`Bot not found: ${id}`);
+    }
+    registry.defaultBotId = id;
+    await writeBotRegistry(registry);
+    return registry;
+  });
 }
 
 /**
- * Best-effort migration of pre-v2 store files (a flat TelegramConfig object
- * without the version/global/workspaces wrapper, as written by early plugin
- * versions) into the current v2 shape.
+ * Read registry without migration-on-read side effects (for use inside the
+ * config lock to avoid recursive lock acquisition).
  */
-function migrateToV2(value: unknown): TelegramConfigStore {
-  if (value && typeof value === "object" && (value as { version?: unknown }).version === 2) {
-    return assertV2Store(value);
-  }
-  if (isLegacyFlatConfig(value)) {
-    return { version: 2, global: value, workspaces: [] };
-  }
-  throw new Error("Unsupported Telegram config format. Please recreate ~/.pi/agent/tg.json as version 2 or run /tg-global-setup.");
-}
-
-export async function readTelegramConfigStore(): Promise<TelegramConfigStore> {
+async function readBotRegistryUnsafe(): Promise<BotRegistry> {
   const path = getTelegramConfigPath();
-  if (!existsSync(path)) return emptyStore();
+  if (!existsSync(path)) return emptyRegistry();
   const raw = await readFile(path, "utf8");
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
-    // A concurrent writer using a non-atomic (truncate+write) strategy can
-    // expose an empty or partial file for a moment. Retry once after a tick;
-    // the writer either finished or left the previous complete content.
     await sleep(25);
     value = JSON.parse(await readFile(path, "utf8"));
   }
-  const migrated = migrateToV2(value);
-  // Upgrade legacy files on disk so the next read hits the v2 fast path.
-  const isMigration = !value || typeof value !== "object" || (value as { version?: unknown }).version !== 2;
-  if (isMigration) {
-    await withTelegramConfigLock(async () => {
-      await writeTelegramConfigStore(migrated);
-    }).catch(configLog.swallow("warn", "persist migrated Telegram config failed", { path }));
+  if (value && typeof value === "object" && (value as { version?: unknown }).version === 3) {
+    const rawRegistry = value as BotRegistry;
+    return {
+      version: 3,
+      bots: Array.isArray(rawRegistry.bots) ? rawRegistry.bots : [],
+      ...(rawRegistry.defaultBotId === undefined ? {} : { defaultBotId: rawRegistry.defaultBotId }),
+    };
   }
-  return migrated;
-}
-
-export async function writeTelegramConfigStore(store: TelegramConfigStore): Promise<void> {
-  await mkdir(getAgentDir(), { recursive: true });
-  const path = getTelegramConfigPath();
-  const normalized: TelegramConfigStore = {
-    version: 2,
-    global: store.global ?? {},
-    workspaces: store.workspaces ?? [],
-  };
-  // Atomic replace: write a temp file and rename it over the target. A plain
-  // truncate+write leaves a window where concurrent readers (e.g. another pi
-  // instance's session_start read) see an empty or partial file and fail to
-  // parse it. rename() is atomic on POSIX, so readers always observe either
-  // the previous or the next complete content.
-  const tmpPath = `${path}.tmp`;
-  await writeFile(tmpPath, JSON.stringify(normalized, null, 2) + "\n", { mode: 0o600 });
-  await rename(tmpPath, path);
-  await chmod(path, 0o600).catch(configLog.swallow("warn", "chmod config file failed", { path }));
-}
-
-function normalizePath(path: string): string {
-  return resolve(path);
-}
-
-function isPathInsideOrEqual(child: string, parent: string): boolean {
-  const rel = relative(parent, child);
-  return rel === "" || (!!rel && !rel.startsWith("..") && !rel.startsWith("/"));
-}
-
-export function resolveTelegramConfigStore(store: TelegramConfigStore, cwd: string): ResolvedTelegramConfig {
-  const normalizedCwd = normalizePath(cwd);
-  const workspaces = store.workspaces ?? [];
-  const match = workspaces
-    .map((workspace) => ({ ...workspace, path: normalizePath(workspace.path) }))
-    .filter((workspace) => isPathInsideOrEqual(normalizedCwd, workspace.path))
-    .sort((a, b) => b.path.length - a.path.length)[0];
-
-  if (match) {
-    return { store, scope: "workspace", workspacePath: match.path, config: match.config ?? {} };
-  }
-  return { store, scope: "global", config: store.global ?? {} };
-}
-
-export async function readResolvedTelegramConfig(cwd: string): Promise<ResolvedTelegramConfig> {
-  return resolveTelegramConfigStore(await readTelegramConfigStore(), cwd);
-}
-
-function mergeTelegramConfigForWrite(existing: TelegramConfig | undefined, incoming: TelegramConfig): TelegramConfig {
-  const next = { ...(incoming ?? {}) };
-  const existingOffset = existing?.lastUpdateId;
-  const incomingOffset = incoming.lastUpdateId;
-  if (typeof existingOffset === "number" || typeof incomingOffset === "number") {
-    next.lastUpdateId = Math.max(
-      typeof existingOffset === "number" ? existingOffset : -1,
-      typeof incomingOffset === "number" ? incomingOffset : -1,
-    );
-  }
-  return next;
-}
-
-export async function writeResolvedTelegramConfig(resolved: ResolvedTelegramConfig, config: TelegramConfig): Promise<ResolvedTelegramConfig> {
-  return await withTelegramConfigLock(async () => {
-    // Re-read the store while holding the lock. Multiple pi instances / workspace
-    // bots can persist polling offsets and active chats concurrently; writing the
-    // stale session_start snapshot would overwrite other bots' newer workspace config.
-    // Preserve lastUpdateId monotonically so stale async handlers cannot regress
-    // the durable Telegram offset after polling has advanced it.
-    const store = await readTelegramConfigStore();
-    if (resolved.scope === "workspace" && resolved.workspacePath) {
-      const workspacePath = normalizePath(resolved.workspacePath);
-      const workspaces = store.workspaces ?? [];
-      const index = workspaces.findIndex((workspace) => normalizePath(workspace.path) === workspacePath);
-      const existing = index >= 0 ? workspaces[index].config : undefined;
-      const nextConfig = mergeTelegramConfigForWrite(existing, config);
-      if (index >= 0) workspaces[index] = { path: workspacePath, config: nextConfig };
-      else workspaces.push({ path: workspacePath, config: nextConfig });
-      store.workspaces = workspaces;
-    } else {
-      store.global = mergeTelegramConfigForWrite(store.global, config);
-    }
-    await writeTelegramConfigStore(store);
-    return resolveTelegramConfigStore(store, resolved.workspacePath ?? process.cwd());
-  });
-}
-
-export async function bindWorkspaceTelegramConfig(cwd: string, config: TelegramConfig): Promise<ResolvedTelegramConfig> {
-  return await withTelegramConfigLock(async () => {
-    const store = await readTelegramConfigStore();
-    const workspacePath = normalizePath(cwd);
-    const workspaces = store.workspaces ?? [];
-    const index = workspaces.findIndex((workspace) => normalizePath(workspace.path) === workspacePath);
-    const entry: TelegramWorkspaceConfig = { path: workspacePath, config };
-    if (index >= 0) workspaces[index] = entry;
-    else workspaces.push(entry);
-    workspaces.sort((a, b) => normalizePath(a.path).localeCompare(normalizePath(b.path)));
-    store.workspaces = workspaces;
-    await writeTelegramConfigStore(store);
-    return resolveTelegramConfigStore(store, workspacePath);
-  });
-}
-
-export async function unbindWorkspaceTelegramConfig(cwd: string): Promise<ResolvedTelegramConfig> {
-  return await withTelegramConfigLock(async () => {
-    const store = await readTelegramConfigStore();
-    const current = resolveTelegramConfigStore(store, cwd);
-    if (current.scope === "workspace" && current.workspacePath) {
-      const workspacePath = normalizePath(current.workspacePath);
-      store.workspaces = (store.workspaces ?? []).filter((workspace) => normalizePath(workspace.path) !== workspacePath);
-      await writeTelegramConfigStore(store);
-    }
-    return resolveTelegramConfigStore(store, cwd);
-  });
-}
-
-/**
- * Update only the global section of the Telegram config store.
- * Merges with existing global config and preserves lastUpdateId monotonically.
- */
-export async function writeGlobalTelegramConfig(config: TelegramConfig): Promise<void> {
-  await withTelegramConfigLock(async () => {
-    const store = await readTelegramConfigStore();
-    store.global = mergeTelegramConfigForWrite(store.global, config);
-    await writeTelegramConfigStore(store);
-  });
+  // If still v2/legacy inside the lock, migrate in-place without writing back.
+  return migrateToV3(value);
 }

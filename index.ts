@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { basename, extname, join, resolve } from "node:path";
+import { extname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createActiveTelegramTransport } from "./lib/active-transport.ts";
 import { registerTelegramAttachmentTool } from "./lib/attachments.ts";
-import { enableConfiguredTelegramOnStartup, readResolvedTelegramConfig, writeResolvedTelegramConfig, getAgentDir } from "./lib/config.ts";
+import { enableConfiguredTelegramOnStartup, readResolvedTelegramConfig, persistProjectRuntimeState, updateBot, getAgentDir } from "./lib/config.ts";
 import { createTelegramController, type TelegramCommandHandler } from "./lib/controller.ts";
 import { escapeHtml } from "./lib/html.ts";
 import { createHeartbeat } from "./lib/heartbeat.ts";
@@ -23,6 +23,8 @@ import { getCurrentTelegramTurn } from "./lib/turn-context.ts";
 
 import { registerAllCommands } from "./lib/commands/register.ts";
 import { registerTelegramCommands } from "./lib/commands/telegram-commands.ts";
+import { registerTgMenuCommand } from "./lib/commands/tg-menu.ts";
+import { formatInstanceChoice } from "./lib/commands/tg-menu.ts";
 import { syncTelegramCommands } from "./lib/menu-commands.ts";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramTurn } from "./lib/types.ts";
 
@@ -122,7 +124,7 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
 
   const persistCurrentConfig = async (nextConfig = config): Promise<void> => {
     if (!resolvedConfig) resolvedConfig = await readResolvedTelegramConfig(currentSessionCwd());
-    resolvedConfig = await writeResolvedTelegramConfig(resolvedConfig, nextConfig);
+    resolvedConfig = await persistProjectRuntimeState(resolvedConfig, nextConfig, currentSessionCwd());
     config = resolvedConfig.config;
   };
 
@@ -140,8 +142,8 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
 
   const isTelegramEnabled = (): boolean => {
     if (config.telegramEnabled !== undefined) return config.telegramEnabled;
-    // Default: workspace binding implies intent to use; global requires explicit enable.
-    return resolvedConfig?.scope === "workspace";
+    // Default: if a bot resolves, telegram is enabled.
+    return !!config.botToken;
   };
 
   const rawTransport = createTelegramTransport(() => config);
@@ -203,8 +205,12 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
   // Pi built-in commands (model, session, new, etc.) are already registered by pi core.
   const TUI_VISIBLE_COMMANDS = new Set([
     // tg-* commands
-    "tg-global-setup", "tg-global-connect", "tg-global-disconnect", "tg-config",
+    "tg-bot-add", "tg-bot-list", "tg-bot-update", "tg-bot-remove", "tg-bot-default",
+    "tg-config",
     "tg-bind-cwd", "tg-unbind-cwd", "tg-cwd-connect", "tg-cwd-disconnect", "tg-list",
+    "tg-switch",
+    // /tg multi-level menu
+    "tg",
     // other pi-telegram-plus custom commands (TUI-only command list excludes /import, which is now
     // a built-in pi command; keep Telegram handler registration only.
     "cwd", "cd", "status", "thinking", "stop", "debug",
@@ -245,6 +251,41 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     clearStatusError: () => { lastStatusError = undefined; },
   });
 
+  // /tg multi-level menu — consolidates the flat /tg-* commands into one
+  // inline-keyboard menu (Bots / Project / Config / Switch instance).
+  registerTgMenuCommand({
+    registerCommand: (name: string, options: { description?: string; handler: TelegramCommandHandler }) => {
+      telegramCommands.set(name, options.handler);
+      if (TUI_VISIBLE_COMMANDS.has(name) && options.description) {
+        pi.registerCommand(name, { description: options.description, handler: options.handler });
+      }
+    },
+  }, {
+    getConfig: () => config,
+    setConfig,
+    persistConfig: persistCurrentConfig,
+    getResolvedConfig: () => resolvedConfig,
+    switchResolvedConfig,
+    isTelegramEnabled,
+    transport,
+    getPolling: () => polling,
+    refreshStatus,
+    syncTelegramCommands: () => syncTelegramCommands(config.botToken, pi),
+    startStatusHeartbeat: () => heartbeat.startStatusHeartbeat(refreshStatus),
+    clearStatusError: () => { lastStatusError = undefined; },
+  }, tgConfigDeps, {
+    getCoordinator: () => coordinator,
+    getCurrentChatId: () => config.activeChatId,
+    stopPolling: () => polling.stop(),
+    startPolling: () => polling.start(),
+    requestReconcile: requestCoordinatorReconcile,
+    pendingHandoffs,
+    getCurrentTurn: () => {
+      const turn = getCurrentTelegramTurn();
+      return turn ? { chatId: turn.chatId, messageThreadId: turn.messageThreadId, sourceMessageId: turn.sourceMessageId } : undefined;
+    },
+  });
+
   registerTelegramAttachmentTool(pi, {
     getActiveTurn: getCurrentActiveTurn,
     getDefaultChatId: () => activeTurns.size === 0 ? config.activeChatId : undefined,
@@ -273,6 +314,15 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
       if (decision.config !== config) {
         config = decision.config;
         await persistCurrentConfig(config);
+        // v3: allowedUserId is bot identity (registry), not a project-binding
+        // field. persistCurrentConfig writes only the project binding, so on a
+        // successful /pair we must also write allowedUserId to the bot record
+        // or the pairing is lost on restart.
+        if (decision.paired && resolvedConfig?.bot && decision.config.allowedUserId !== undefined) {
+          await updateBot(resolvedConfig.bot.id, { allowedUserId: decision.config.allowedUserId })
+            .catch(indexLog.swallow("warn", "persist paired allowedUserId to bot registry failed"));
+          switchResolvedConfig(await readResolvedTelegramConfig(currentSessionCwd()));
+        }
         refreshStatus();
       }
       return decision.paired ? "paired" : true;
@@ -315,15 +365,13 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
   });
 
   const maxConfiguredUpdateId = (token: string): number | undefined => {
-    if (!resolvedConfig) return config.botToken === token ? config.lastUpdateId : undefined;
-    const configs = [
-      resolvedConfig.store.global,
-      ...(resolvedConfig.store.workspaces ?? []).map((workspace) => workspace.config),
-    ];
-    const offsets = configs
-      .filter((candidate) => candidate?.botToken === token && typeof candidate.lastUpdateId === "number")
-      .map((candidate) => candidate!.lastUpdateId!);
-    return offsets.length > 0 ? Math.max(...offsets) : undefined;
+    // In v3, the coordinator cursor is authoritative. The project binding's
+    // lastUpdateId is only a cold-start seed. We return the current config's
+    // lastUpdateId (if the token matches) as the fallback for syncCursor.
+    if (config.botToken === token && typeof config.lastUpdateId === "number") {
+      return config.lastUpdateId;
+    }
+    return undefined;
   };
 
   const refreshSharedCursor = async (candidate = coordinator): Promise<void> => {
@@ -591,14 +639,6 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
 
   coordinatorTimer = setInterval(requestCoordinatorReconcile, 2_000);
 
-  const formatInstanceChoice = (instance: TelegramInstanceMetadata, activeId: string): string => {
-    const marker = instance.id === activeId ? "✓" : " ";
-    const project = (basename(instance.cwd) || instance.cwd).slice(0, 28);
-    const session = (instance.sessionName || instance.sessionId?.slice(0, 8) || "session").slice(0, 24);
-    const model = (instance.model || "no-model").slice(0, 36);
-    return `${marker} ${project} · ${session} · ${model} · ${instance.id.slice(0, 8)}`;
-  };
-
   telegramCommands.set("tg-switch", async (args, ctx) => {
     const currentCoordinator = coordinator;
     if (!currentCoordinator || !currentCoordinator.isActive()) {
@@ -733,11 +773,11 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
       // config write) must not nuke the runtime config: keep the previous
       // resolved config so the bot keeps polling, and surface the REAL
       // error instead of the misleading "not v2" wording.
-      indexLog.error("readTelegramConfigStore failed on session_start; keeping previous config", { err: error });
+      indexLog.error("readBotRegistry failed on session_start; keeping previous config", { err: error });
       if (!resolvedConfig) {
-        switchResolvedConfig({ store: { version: 2, global: {}, workspaces: [] }, scope: "global", config: {} });
+        switchResolvedConfig({ registry: { version: 3, bots: [] }, hasProjectBinding: false, config: {} });
         getActiveSession()?.extensionRunner.getUIContext().notify(
-          `Telegram config could not be loaded. Run /tg-global-setup to recreate it. ${error instanceof Error ? error.message : String(error)}`,
+          `Telegram config could not be loaded. Run /tg-bot-add to create a bot. ${error instanceof Error ? error.message : String(error)}`,
           "error",
         );
       } else {
