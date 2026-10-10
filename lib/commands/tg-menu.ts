@@ -69,6 +69,10 @@ export type SwitchInstanceDeps = {
   startPolling: () => void;
   requestReconcile: () => void;
   getCurrentTurn: () => { chatId: number; messageThreadId?: number; sourceMessageId?: number } | undefined;
+  /** Shared handoff gate (same Set used by the flat /tg-switch handler and
+   *  isActiveInstance) so a menu-triggered switch blocks outbound sends
+   *  during the handoff, just like the flat command. */
+  pendingHandoffs: Set<string>;
 };
 
 // ── Menu registration ──────────────────────────────────────────────────────
@@ -260,7 +264,7 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
   }
 
   const handoffId = randomUUID();
-  const pendingHandoffs = new Set<string>();
+  const pendingHandoffs = switchDeps.pendingHandoffs;
   pendingHandoffs.add(handoffId);
   try {
     await switchDeps.stopPolling();

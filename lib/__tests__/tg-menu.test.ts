@@ -135,6 +135,7 @@ describe("/tg multi-level menu", () => {
       startPolling: () => { pollingActive = true; },
       requestReconcile: () => undefined,
       getCurrentTurn: () => undefined,
+      pendingHandoffs: new Set<string>(),
     };
 
     registerTgMenuCommand(

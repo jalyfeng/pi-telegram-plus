@@ -40,7 +40,7 @@
 - **Automatic reconnection** — exponential backoff on transient polling failures; a file-based polling lock remains the final safety guard against dual pollers
 - **Shared update cursor** — instances sharing a token keep a coordinated `lastUpdateId`, so handoffs do not re-deliver or skip Telegram updates
 - **Startup auto-enable** — if a bot token is already configured, Telegram is enabled automatically when pi starts (no manual `/tg-*-connect` on every launch)
-- **Bot command menu sync** — automatically syncs available commands to Telegram's BotMenu (up to 100 commands), including `/tg_switch`
+- **Bot command menu sync** — automatically syncs available commands to Telegram's BotMenu (up to 100 commands), including `/tg`
 - **Authorized user** — setup generates a one-time local pairing code; the Telegram user must send `/pair <code>` before their user id is persisted; all other users are rejected
 - **TUI status line** — a right-aligned `telegram+` footer preserves connected / active / awaiting pairing / disconnected / not configured / error states; the owning instance shows `connected(current)` when idle or `active(current)` while processing, together with the bot username
 - **Typing indicator** — sends `typing` chat-action pulses while a turn is active so the Telegram chat shows the bot is working
@@ -136,7 +136,7 @@ Several local pi processes can share one bot (the **default bot** or a bot bound
 
 1. **Registration** — each enabled process advertises itself under `~/.pi/agent/` with cwd, session, model, busy state, and a heartbeat.
 2. **Single active owner** — only the active instance polls Telegram and is allowed to send outbound messages. Standby instances stay quiet even if their local agent is streaming.
-3. **Explicit switch** — from the currently active instance, run `/tg-switch` (bot menu: `/tg_switch`):
+3. **Explicit switch** — from the currently active instance, run `/tg-switch` (or `/tg` → 🔄 Switch instance):
    - no args → inline selector listing live instances (`project · session · model · id`)
    - `/tg-switch <instance-id-prefix>` → switch by id or unambiguous prefix
    - `/tg-switch current` → keep the current owner and re-run history replay
@@ -279,7 +279,7 @@ Common issues and diagnostic steps. The extension writes a structured JSON Lines
 - Verify the bot token is correct: run `/tg-bot-add` to register a bot with the correct token from [@BotFather](https://t.me/BotFather). Use `/tg-bot-update <name>` to fix an existing bot's token.
 - Confirm the bot is connected: `/tg-list` should show the project binding as enabled. If not, run `/tg-cwd-connect`. A configured token is auto-enabled again on the next pi start.
 - Make sure you are the authorized user. After setup, pi prints a one-time pairing code locally; send `/pair <code>` to the bot from your Telegram account. To reset authorization, remove the bot with `/tg-bot-remove` and re-add it.
-- When several local pi processes share the token, check the local TUI footer: only `connected(current)` / `active(current)` owns polling and outbound traffic. From that owner, send `/tg-switch` (bot menu: `/tg_switch`) to inspect and select another live instance. Dead owners fail over automatically after their heartbeat expires.
+- When several local pi processes share the token, check the local TUI footer: only `connected(current)` / `active(current)` owns polling and outbound traffic. From that owner, send `/tg-switch` (or `/tg` → 🔄 Switch instance) to inspect and select another live instance. Dead owners fail over automatically after their heartbeat expires.
 - The file-based polling lock remains a final safety guard. If the expected instance is already active but polling still reports a lock conflict, restart the conflicting older process or remove only the confirmed stale `tg-poll-*.lock` directory under `~/.pi/agent/`. Retired/candidate lock leftovers are cleaned automatically and should not need manual deletion.
 
 ### Messages arrive but the agent output is not streamed
