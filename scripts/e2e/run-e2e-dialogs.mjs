@@ -857,58 +857,95 @@ async function runHost(host, servers) {
   // ── login: OMP's /login dialog shows the sign-in link in Telegram (issue #14) ─
   // The dialog opens the URL through `open`; the stub on PATH only logs the call.
   if (host === "omp") {
-    try {
-      const plainText = (call) => [call.body?.text, call.body?.caption, call.body?.rich_message?.markdown]
-        .filter((part) => typeof part === "string").join("\n").replace(/<[^>]+>/g, "");
-      const outboundMethods = ["sendMessage", "editMessageText"];
-      const isOpenRouter = (b) => String(b.text ?? "").trim().replace(/^▸\s*/, "").trim() === "OpenRouter";
-      const isCancel = (b) => String(b.text ?? "").trim() === "Cancel";
+    const plainText = (call) => [call.body?.text, call.body?.caption, call.body?.rich_message?.markdown]
+      .filter((part) => typeof part === "string").join("\n").replace(/<[^>]+>/g, "");
+    const outboundMethods = ["sendMessage", "editMessageText"];
+    const labelOf = (b) => String(b.text ?? "").trim().replace(/^▸\s*/, "").trim();
+    const isCancel = (b) => String(b.text ?? "").trim() === "Cancel";
 
+    // Opens /login and clicks the provider button `matches` picks. Page 1 is tried first;
+    // with `search`, the keyword is typed into the list (search-as-typing, as /settings
+    // search does) and the filtered list is read. Returns the cursor from before the click.
+    const pickLoginProvider = async ({ label, matches, search }) => {
       const since = await cursor();
       await injectText("/login");
-      const listCall = await waitFor("sign-in list with OpenRouter", (state) =>
-        state.calls.slice(since).findLast((entry) => buttonsOf(entry).some(isOpenRouter)) ?? false,
+      const menu = await keyboardAfter(`${label}: /login list`, since, 30_000);
+      if (!menu) throw new Error(`no /login list offered for ${label}`);
+      if (search) await injectText(search);
+      const listCall = await waitFor(`${label} in the sign-in list`, (state) =>
+        state.calls.slice(since).findLast((entry) => buttonsOf(entry).some((b) => matches(labelOf(b)))) ?? false,
       { timeoutMs: 30_000 }).catch(() => undefined);
       if (!listCall) {
         const seen = (await controlGet()).calls.slice(since)
           .flatMap((c) => buttonsOf(c).map((b) => String(b.text ?? "")));
-        throw new Error(`no OpenRouter in the sign-in list; buttons seen: ${seen.join(" / ").slice(0, 200)}`);
+        throw new Error(`no ${label} in the sign-in list; buttons seen: ${seen.join(" / ").slice(0, 200)}`);
       }
       const since2 = await cursor();
-      await clickButton(buttonsOf(listCall).find(isOpenRouter), listCall.body?.message_id ?? listCall.message_id);
+      const provider = buttonsOf(listCall).find((b) => matches(labelOf(b)));
+      await clickButton(provider, listCall.body?.message_id ?? listCall.message_id);
+      return since2;
+    };
 
-      const linkCall = await waitFor("sign-in link in Telegram output", (state) =>
-        state.calls.slice(since2).findLast((entry) =>
-          outboundMethods.includes(entry.method) && /https?:\/\/\S+/.test(plainText(entry))) ?? false,
-      { timeoutMs: 30_000 }).catch(() => undefined);
-      if (!linkCall) {
-        const lastOut = (await controlGet()).calls.slice(since2)
-          .filter((c) => outboundMethods.includes(c.method)).map(plainText).pop() ?? "none";
-        throw new Error(`no sign-in link sent to Telegram; last outbound text: ${lastOut.slice(0, 200)}`);
+    // One sign-in: pick the provider, then check the link message, the Cancel button, and
+    // the stub log. Always closes the dialog and waits for it to go away before returning.
+    const runLoginSignIn = async ({ name, label, matches, search, wordPattern, wordLabel }) => {
+      try {
+        const since2 = await pickLoginProvider({ label, matches, search });
+        const linkCall = await waitFor(`${label} sign-in link in Telegram output`, (state) =>
+          state.calls.slice(since2).findLast((entry) =>
+            outboundMethods.includes(entry.method) && /https?:\/\/\S+/.test(plainText(entry))) ?? false,
+        { timeoutMs: 30_000 }).catch(() => undefined);
+        if (!linkCall) {
+          const lastOut = (await controlGet()).calls.slice(since2)
+            .filter((c) => outboundMethods.includes(c.method)).map(plainText).pop() ?? "none";
+          throw new Error(`no sign-in link sent to Telegram; last outbound text: ${lastOut.slice(0, 200)}`);
+        }
+        const linkText = plainText(linkCall);
+        const url = linkText.match(/https?:\/\/\S+/)[0];
+        const hasWord = wordPattern.test(linkText);
+        const outbound = (await controlGet()).calls.slice(since2)
+          .filter((c) => outboundMethods.includes(c.method)).map(plainText);
+        const promptLine = outbound.flatMap((text) => text.split("\n")).find((line) => /key|token/i.test(line));
+        const promptDetail = promptLine ? `input prompt: "${promptLine.trim().slice(0, 120)}"` : "no input prompt in the text";
+
+        const dialogCall = await waitFor(`${label} sign-in dialog with Cancel`, (state) =>
+          state.calls.slice(since2).findLast((entry) => buttonsOf(entry).some(isCancel)) ?? false,
+        { timeoutMs: 15_000 }).catch(() => undefined);
+        if (!dialogCall) throw new Error("no Cancel button left on the sign-in dialog");
+        await clickButton(buttonsOf(dialogCall).find(isCancel), dialogCall.body?.message_id ?? dialogCall.message_id);
+        await sleep(1500);
+
+        // Read after Cancel: the stub's open() call can land after the link message.
+        const openLogPath = join(runDir, "open-calls.log");
+        const openedLog = existsSync(openLogPath) ? readFileSync(openLogPath, "utf8") : "";
+        const stubDetail = openedLog.includes("https://")
+          ? `host tried to open the browser (caught by the stub): ${openedLog.match(/https?:\/\/\S+/)[0].slice(0, 80)}`
+          : "no open() call recorded";
+
+        record(name, hasWord,
+          `link ${url.slice(0, 80)} · "${wordLabel}" ${hasWord ? "present" : "missing"} · ${promptDetail} · ${stubDetail}`);
+      } catch (error) {
+        record(name, false, String(error.message).slice(0, 200));
       }
-      const linkText = plainText(linkCall);
-      const url = linkText.match(/https?:\/\/\S+/)[0];
-      const hasBrowser = /browser/i.test(linkText);
-
-      const openLogPath = join(runDir, "open-calls.log");
-      const openedLog = existsSync(openLogPath) ? readFileSync(openLogPath, "utf8") : "";
-      const stubDetail = openedLog.includes("https://")
-        ? `host tried to open the browser (caught by the stub): ${openedLog.match(/https?:\/\/\S+/)[0].slice(0, 80)}`
-        : "no open() call recorded";
-
-      const dialogCall = await waitFor("sign-in dialog with Cancel", (state) =>
-        state.calls.slice(since2).findLast((entry) => buttonsOf(entry).some(isCancel)) ?? false,
-      { timeoutMs: 15_000 }).catch(() => undefined);
-      if (!dialogCall) throw new Error("no Cancel button left on the sign-in dialog");
-      await clickButton(buttonsOf(dialogCall).find(isCancel), dialogCall.body?.message_id ?? dialogCall.message_id);
+      await clearDialog();
       await sleep(1500);
+    };
 
-      record("login sign-in link is shown in Telegram", hasBrowser,
-        `link ${url.slice(0, 80)} · "browser" ${hasBrowser ? "present" : "missing"} · ${stubDetail}`);
-    } catch (error) {
-      record("login sign-in link is shown in Telegram", false, String(error.message).slice(0, 200));
-    }
-    await clearDialog();
+    await runLoginSignIn({
+      name: "login (api key) sign-in link is shown in Telegram",
+      label: "DeepSeek",
+      matches: (text) => /deepseek/i.test(text),
+      search: "deepseek",
+      wordPattern: /browser|key/i,
+      wordLabel: "browser or key",
+    });
+    await runLoginSignIn({
+      name: "login sign-in link is shown in Telegram",
+      label: "OpenRouter",
+      matches: (text) => text === "OpenRouter",
+      wordPattern: /browser/i,
+      wordLabel: "browser",
+    });
   }
 
   // ── pi-goal dialogs (extension `custom`, the /goals parity case) ───────
