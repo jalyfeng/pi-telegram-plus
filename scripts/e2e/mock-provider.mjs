@@ -161,6 +161,17 @@ const server = createServer(async (req, res) => {
   const askArgs = triggerCheckAsk ? checkAskArguments : (triggerMultiAsk ? multiAskArguments : askArguments);
   const triggerAnyAsk = triggerAsk || triggerMultiAsk || triggerCheckAsk;
 
+  // Stage 0 host probe: scripted calls for arbitrary advertised tools. The
+  // prompt names the tool (PROBE_TOOL:<name>) or a pi-goal shape
+  // (PROBE_GOAL_CONFIRM / _QUESTION / _QUESTIONNAIRE); approval probing picks
+  // the first mutating tool the host advertises, and PROBE_APPROVAL_BASH:<path>
+  // pins `bash` to `touch <path>` so a driver can deny the call and then assert
+  // the file was never created. Arguments are derived from the
+  // tool schema, with semantic overrides for the shapes we drive.
+  const probeMatch = /PROBE_TOOL:([A-Za-z0-9_]+)/.exec(latestUserText);
+  const goalMatch = /PROBE_GOAL_(QUESTIONNAIRE|CONFIRM|QUESTION)/.exec(latestUserText);
+  const approvalProbe = !approvalBashMatch && latestUserText.includes("PROBE_APPROVAL");
+
   // Sub-agent probe: a driver message containing TASK_TOOL_PROBE makes the model call
   // OMP's `task` tool once, which spawns a sub-agent session. The sub-agent receives
   // SUBAGENT_E2E_PROMPT as its user message and answers with SUBAGENT_E2E_REPLY.
@@ -173,17 +184,6 @@ const server = createServer(async (req, res) => {
   });
   const isSubAgentRequest = latestUserText.includes("SUBAGENT_E2E_PROMPT");
   const replyText = isSubAgentRequest ? "SUBAGENT_E2E_REPLY" : REPLY;
-
-  // Stage 0 host probe: scripted calls for arbitrary advertised tools. The
-  // prompt names the tool (PROBE_TOOL:<name>) or a pi-goal shape
-  // (PROBE_GOAL_CONFIRM / _QUESTION / _QUESTIONNAIRE); approval probing picks
-  // the first mutating tool the host advertises, and PROBE_APPROVAL_BASH:<path>
-  // pins `bash` to `touch <path>` so a driver can deny the call and then assert
-  // the file was never created. Arguments are derived from the
-  // tool schema, with semantic overrides for the shapes we drive.
-  const probeMatch = /PROBE_TOOL:([A-Za-z0-9_]+)/.exec(latestUserText);
-  const goalMatch = /PROBE_GOAL_(QUESTIONNAIRE|CONFIRM|QUESTION)/.exec(latestUserText);
-  const approvalProbe = !approvalBashMatch && latestUserText.includes("PROBE_APPROVAL");
   const goalToolName = goalMatch
     ? (goalMatch[1] === "CONFIRM"
       ? "propose_goal_draft"
