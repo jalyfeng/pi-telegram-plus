@@ -286,7 +286,9 @@ function renderConfirm(model: Extract<DialogModel, { kind: "confirm" }>, ctx: Re
 }
 
 function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: RenderContext): RenderedDialog {
+  // Plain text, not `<pre>`: Telegram makes a bare URL tappable and copyable.
   const body = [
+    model.detail ? `${escapeHtml(clean(model.detail).slice(0, 900))}\n` : "",
     model.placeholder ? `<pre>${escapeHtml(shorten(model.placeholder, 300))}</pre>\n` : "",
     model.secret ? "<i>Secret input: send a message; the bot will not echo it.</i>\n" : "",
     "Send a message as the input, or tap Cancel.",

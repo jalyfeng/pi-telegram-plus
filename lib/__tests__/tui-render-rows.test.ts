@@ -70,3 +70,22 @@ describe("select footer wraps within Telegram's per-row button limit", () => {
     expect(fitted.flat().map((b) => b.text)).toEqual([...long, ...ok].map((b) => b.text));
   });
 });
+
+describe("input dialog shows the login body as plain text", () => {
+  const URL = "https://example.test/device?x=1&y=2";
+
+  it("renders detail as escaped plain text, not inside <pre>", () => {
+    const model: DialogModel = { kind: "input", title: "Waiting for approval", detail: `Sign in.\nCode: AB-12\n${URL}`, secret: false };
+    const text = renderDialog(model, CTX).text;
+    expect(text).toContain("Sign in.\nCode: AB-12\nhttps://example.test/device?x=1&amp;y=2\n");
+    expect(text).not.toContain(`<pre>${URL}`);
+    expect(text).not.toMatch(/<pre>[^<]*example\.test/);
+  });
+
+  it("renders without detail exactly as before", () => {
+    const model: DialogModel = { kind: "input", title: "Paste your API key", placeholder: "sk-...", secret: false };
+    expect(renderDialog(model, CTX).text).toBe(
+      "<b>Paste your API key</b>\n<pre>sk-...</pre>\nSend a message as the input, or tap Cancel.",
+    );
+  });
+});

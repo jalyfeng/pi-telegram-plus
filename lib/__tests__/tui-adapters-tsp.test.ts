@@ -1031,3 +1031,58 @@ describe("tsp input adapter (OMP built-in text prompts)", () => {
     expect(tspInputAdapter.read(makeLoginDialog({ label: "" }), ctxFor())).toMatchObject({ title: "Input" });
   });
 });
+
+/**
+ * OMP's login dialog for a device-code provider (`/login` → deepseek): the
+ * explanation, the code, the login link and a local shortcut sit above the
+ * prompt line; the field comes last.
+ */
+function makeOmpLoginSheet(opts: { shortcut?: boolean; withBody?: boolean } = {}) {
+  const body: Node[] = opts.withBody === false ? [] : [
+    { k: "text", p: { role: "omp.login.lead", text: "Sign in to DeepSeek in your browser." } },
+    { k: "row", p: { role: "omp.login.code" }, c: [{ k: "text", p: { text: [{ t: "Code: " }, { t: "ABCD-1234" }] } }] },
+    {
+      k: "row",
+      p: { role: "omp.login.link" },
+      c: [{ k: "text", p: { role: "omp.login.url", text: [{ t: "https://example.test/device" }], title: "https://example.test/device" } }],
+    },
+    ...(opts.shortcut ? [{ k: "text", p: { role: "omp.login.shortcut", text: "Press o to open in browser" } }] : []),
+  ];
+  const field: Record<string, unknown> = {
+    describe: () => ({ k: "input", p: { text: "", placeholder: "paste code" } }),
+    handleNativeEvent: () => undefined,
+  };
+  return {
+    describe: () => ({
+      k: "col",
+      c: [
+        ...body,
+        { k: "col", p: { role: "omp.login.prompt" }, c: [{ k: "text", p: { role: "omp.login.label", text: "Waiting for approval, then press Enter" } }, field] },
+      ],
+    }),
+    handleNativeEvent: () => undefined,
+  };
+}
+
+describe("tsp input adapter shows the OMP login body (detail)", () => {
+  it("collects lead, code and URL in document order and keeps the title", () => {
+    const model = tspInputAdapter.read(makeOmpLoginSheet(), ctxFor());
+    expect(model).toEqual({
+      kind: "input",
+      title: "Waiting for approval",
+      placeholder: "paste code",
+      detail: "Sign in to DeepSeek in your browser.\nCode: ABCD-1234\nhttps://example.test/device",
+      secret: false,
+    });
+  });
+
+  it("includes the local shortcut line when OMP shows one", () => {
+    const model = tspInputAdapter.read(makeOmpLoginSheet({ shortcut: true }), ctxFor());
+    expect(model).toMatchObject({ detail: expect.stringContaining("\nPress o to open in browser") });
+  });
+
+  it("sets no detail key when the dialog has no login body", () => {
+    const model = tspInputAdapter.read(makeOmpLoginSheet({ withBody: false }), ctxFor());
+    expect(model).not.toHaveProperty("detail");
+  });
+});

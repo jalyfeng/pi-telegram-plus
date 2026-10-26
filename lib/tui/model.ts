@@ -62,7 +62,7 @@ export type DialogModel =
     }
   | { kind: "approval"; title: string; detail?: string; options: { key: string; label: string }[] }
   | { kind: "confirm"; title: string; message?: string }
-  | { kind: "input"; title: string; placeholder?: string; secret: boolean; prefill?: string }
+  | { kind: "input"; title: string; detail?: string; placeholder?: string; secret: boolean; prefill?: string }
   | { kind: "editor"; title: string; prefill?: string }
   | { kind: "progress"; text: string; cancellable: boolean }
   | { kind: "info"; title?: string; text: string; closable: boolean }

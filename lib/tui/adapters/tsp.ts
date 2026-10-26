@@ -862,9 +862,28 @@ export const tspPrefsAdapter: DialogAdapter = {
 /** What the document-order scan of a prompt returns: the first `input` node
  * and the plain text of the last `text` node printed before it - the prompt
  * line OMP's login dialog puts above the field. */
-type PromptScan = { input: NodeFound<"input">; label?: string };
+type PromptScan = { input: NodeFound<"input">; label?: string; detail?: string };
 
-type ScanState = { lastText?: string };
+type ScanState = { lastText?: string; detail: string[]; detailSeen: Set<object> };
+
+/** OMP login dialog body above the field, by `p.role`: the lead text, the
+ * device code, the login link (its URL text) and the local shortcut. */
+const PROMPT_DETAIL_ROLES = new Set(["omp.login.lead", "omp.login.code", "omp.login.url", "omp.login.shortcut"]);
+
+/** Plain text of a detail node and its native descendants, in document order. */
+function collectPromptDetail(node: NativeNodeLike, state: ScanState): void {
+  if (state.detailSeen.has(node)) return;
+  state.detailSeen.add(node);
+  if (node.k === "text" && isObject(node.p)) {
+    const text = tspText(node.p.text).trim();
+    if (text) state.detail.push(text);
+  }
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  for (const child of children) {
+    if (!isObject(child) || asComponent(child)) continue;
+    collectPromptDetail(child as NativeNodeLike, state);
+  }
+}
 
 function scanPromptRoot(component: object, depth: number, visited: Set<object>, state: ScanState): PromptScan | undefined {
   if (depth > MAX_COMPONENT_DEPTH || visited.has(component)) return undefined;
@@ -882,11 +901,19 @@ function scanPromptRoot(component: object, depth: number, visited: Set<object>, 
 function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visited: Set<object>, state: ScanState): PromptScan | undefined {
   const props = nodeProps(node, "input");
   if (props) {
-    return { input: { owner, keypath: "", props }, ...(state.lastText === undefined ? {} : { label: state.lastText }) };
+    const detail = state.detail.length > 0 ? state.detail.join("\n") : undefined;
+    return {
+      input: { owner, keypath: "", props },
+      ...(state.lastText === undefined ? {} : { label: state.lastText }),
+      ...(detail === undefined ? {} : { detail }),
+    };
   }
   if (node.k === "text" && isObject(node.p)) {
     const text = tspText(node.p.text).trim();
     if (text) state.lastText = text;
+  }
+  if (isObject(node.p) && typeof node.p.role === "string" && PROMPT_DETAIL_ROLES.has(node.p.role)) {
+    collectPromptDetail(node, state);
   }
   const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
   if (!children) return undefined;
@@ -907,7 +934,7 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
 }
 
 function findPrompt(component: object): PromptScan | undefined {
-  return scanPromptRoot(component, 0, new Set<object>(), {});
+  return scanPromptRoot(component, 0, new Set<object>(), { detail: [], detailSeen: new Set<object>() });
 }
 
 /** Trailing hints the terminal needs but Telegram does not ("…, then press
@@ -961,7 +988,13 @@ export const tspInputAdapter: DialogAdapter = {
     const title = promptTitle(found.label) ?? "Input";
     const secret = ownerMasks(found.input.owner) || SECRET_TITLE.test(title);
     const placeholder = tspText(found.input.props.placeholder).trim();
-    return { kind: "input", title, ...(placeholder ? { placeholder } : {}), secret };
+    return {
+      kind: "input",
+      title,
+      ...(placeholder ? { placeholder } : {}),
+      ...(found.detail === undefined ? {} : { detail: found.detail }),
+      secret,
+    };
   },
 
   act(component, action, ctx) {
