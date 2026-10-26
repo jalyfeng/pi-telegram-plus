@@ -109,6 +109,24 @@ reimplementation and several settings, so read **Breaking changes** before upgra
   starts on the rows instead of the input the previous visit left open.
 - **Dialogs with many buttons are delivered.** Footer buttons wrap at three per row; Telegram rejects a row
   of more than eight, which used to make lists like OMP `/agents` never appear in the chat.
+- **OMP sub-agents no longer reach Telegram or take the main connection down.** OMP re-runs the extension
+  factory for every sub-agent session in the same process. The sub-agent's messages were forwarded to the
+  chat, and the factory tore down the main session's Telegram runtime, so replies stopped arriving after a
+  sub-agent ran. Sub-agent sessions are now inert and only the main session owns the runtime. (pi has no
+  built-in sub-agents. A third-party extension that opens a nested session through the SDK would load the
+  plugin again, and pi gives the plugin no way to tell that session apart; this is not handled.)
+- **OMP dialogs no longer fail with `Maximum call stack size exceeded` after a long session.** The host hands
+  out a fresh wrapper function every time a dialog method is read, so the plugin's "already wrapped" check
+  never matched and it added another layer to `ask`, `approve`, `select` and the other dialog methods every
+  second. After roughly 3000 checks (about 50 minutes) the next `ask` overflowed the stack. Wrappers are now
+  tracked per object and method, once per process.
+- **OMP `/login` shows its sign-in dialog in Telegram.** The link, the instructions, the device code and
+  the "Waiting for browser authentication…" status now appear for browser sign-ins, and the key prompt with
+  the link appears for API-key providers such as DeepSeek, each with a Cancel button. The key you paste is
+  passed to the host, never echoed back, and your message with it is deleted from the chat. Before, the
+  dialog was filed under "progress" and never reached Telegram at all.
+- **`sendChatAction` honors a custom Bot API endpoint** (`apiBase` / `PI_TELEGRAM_API_BASE`). The typing
+  indicator was always sent to the public endpoint. Thanks to BotoVed (#12).
 - Several dialog, focus and output-capture fixes found by the end-to-end suites on both hosts.
 
 ## [0.0.12] — 2026-10-19

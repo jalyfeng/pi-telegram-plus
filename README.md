@@ -41,6 +41,11 @@ binary. The mock Bot API enforces Telegram's payload contract and answers 400 on
 violations, and every recorded call is re-validated independently. E2E is not part of the
 publish gate because each run starts isolated `tmux` sessions.
 
+If this repository is also installed as a global OMP plugin (`omp plugin link`), OMP loads the plugin a
+second time next to the copy under test and the two instances fight over the same dialogs. The E2E scripts
+start the hosts with `--no-extensions` for that reason; do the same if you start OMP by hand with `-e`.
+The `/login` steps in `test:e2e:dialogs` put a stub `open` on `PATH` so no browser opens.
+
 ---
 
 ## Features
