@@ -237,7 +237,7 @@ function seed(host, runDir, probePath) {
       },
     }, null, 2) + "\n");
   } else {
-    writeFileSync(join(agentDir, "config.yml"), "setupVersion: 2\nstartup:\n  setupWizard: false\n");
+    writeFileSync(join(agentDir, "config.yml"), "setupVersion: 2\nstartup:\n  setupWizard: false\ndoubleEscapeAction: none\n");
     writeFileSync(join(agentDir, "models.yml"), [
       "providers:", "  mock:", `    baseUrl: http://127.0.0.1:${PROVIDER_PORT}/v1`,
       "    apiKey: mock", "    api: openai-completions", "    models:",
@@ -863,6 +863,26 @@ async function runHost(host, servers) {
           .then(() => true).catch(() => false);
         const detailTwo = `/tg menu ${menu ? "sent" : "missing"} · plain message ${newRequest ? "reached the model" : "never reached the model"} · reply ${replied ? "sent" : "missing"}`;
 
+        // ④ The status line keeps showing the Telegram state after the sub-agent: it is
+        // visible in 6 of 8 one-second samples of the terminal screen, and never reads
+        // "not configured" (the sub-agent's leftover timer used to flip it).
+        await sleep(1000);
+        let statusVisible = 0;
+        let statusFlapped = 0;
+        for (let sample = 0; sample < 8; sample += 1) {
+          const screen = String(tmux("capture-pane", "-p", "-t", session).stdout ?? "");
+          if (screen.includes("telegram+")) statusVisible += 1;
+          if (screen.includes("telegram+") && screen.includes("not configured")) statusFlapped += 1;
+          await sleep(1000);
+        }
+        const statusOk = statusVisible >= 6 && statusFlapped === 0;
+        const statusFail = statusVisible < 6
+          ? `status line not visible (${statusVisible}/8 samples)`
+          : statusFlapped > 0
+            ? `status line showed "not configured" in ${statusFlapped}/8 samples after the sub-agent`
+            : "";
+        const detailStatus = `${statusFail ? ` · ${statusFail}` : ""} · status line samples: ${statusVisible}/8 visible, ${statusFlapped} not configured`;
+
         // ③ /tg in the TUI still opens a dialog: after the editor is focused, typing /tg
         // must make the host focus a component that is not the editor. The editor's class
         // name is taken from the last focus event recorded while the host was idle.
@@ -899,8 +919,8 @@ async function runHost(host, servers) {
         await clearDialog();
 
         record("sub-agent run leaves the Telegram runtime intact",
-          standalone.length === 0 && menu && Boolean(newRequest) && replied && Boolean(tuiDialog),
-          `task approval answered from Telegram: ${approvalText} · ${detailOne} · ${detailTwo}${detailThree}`);
+          standalone.length === 0 && menu && Boolean(newRequest) && replied && statusOk && Boolean(tuiDialog),
+          `task approval answered from Telegram: ${approvalText} · ${detailOne} · ${detailTwo}${detailStatus}${detailThree}`);
       } catch (error) {
         record("sub-agent run leaves the Telegram runtime intact", false, String(error.message).slice(0, 200));
       }
