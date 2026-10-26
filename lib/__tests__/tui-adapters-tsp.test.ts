@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { pickAdapter } from "../tui/adapters/index.ts";
-import { findPicker, tspInputAdapter, tspLoginAdapter, tspPickerAdapter, tspPrefsAdapter } from "../tui/adapters/tsp.ts";
+import { describesLoginSheet, describesTextInput, findPicker, tspInputAdapter, tspLoginAdapter, tspPickerAdapter, tspPrefsAdapter } from "../tui/adapters/tsp.ts";
 import type { AdapterContext, DialogModel } from "../tui/model.ts";
 
 type Node = { k: string; p?: unknown; c?: unknown[]; key?: string };
@@ -1038,7 +1038,7 @@ describe("tsp input adapter (OMP built-in text prompts)", () => {
  * explanation, the code, the login link and a local shortcut sit above the
  * prompt line; the field comes last.
  */
-function makeOmpLoginSheet(opts: { shortcut?: boolean; withBody?: boolean } = {}) {
+function makeOmpLoginSheet(opts: { shortcut?: boolean; withBody?: boolean; wrapped?: boolean } = {}) {
   const body: Node[] = opts.withBody === false ? [] : [
     { k: "text", p: { role: "omp.login.lead", text: "Sign in to DeepSeek in your browser." } },
     { k: "row", p: { role: "omp.login.code" }, c: [{ k: "text", p: { text: [{ t: "Code: " }, { t: "ABCD-1234" }] } }] },
@@ -1058,10 +1058,17 @@ function makeOmpLoginSheet(opts: { shortcut?: boolean; withBody?: boolean } = {}
     },
     ...(opts.shortcut ? [{ k: "text", p: { role: "omp.login.shortcut", text: "Press o to open in browser" } }] : []),
   ];
+  // The real field: a component with its own describe() and no handleNativeEvent.
   const field: Record<string, unknown> = {
     describe: () => ({ k: "input", p: { text: "", placeholder: "paste code" } }),
-    handleNativeEvent: () => undefined,
+    handleInput: () => undefined,
   };
+  const label = { k: "text", p: { role: "omp.login.label", text: "Waiting for approval, then press Enter" } };
+  // `wrapped`: the field sits inside a describe-only container (OMP's FormField),
+  // which holds the label too.
+  const prompt = opts.wrapped
+    ? [{ describe: () => ({ k: "col", c: [label, field] }) }]
+    : [label, field];
   return {
     describe: () => ({
       k: "col",
@@ -1074,7 +1081,7 @@ function makeOmpLoginSheet(opts: { shortcut?: boolean; withBody?: boolean } = {}
               k: "col",
               c: [
                 ...body,
-                { k: "col", p: { role: "omp.login.prompt" }, c: [{ k: "text", p: { role: "omp.login.label", text: "Waiting for approval, then press Enter" } }, field] },
+                { k: "col", p: { role: "omp.login.prompt" }, c: prompt },
               ],
             },
           ],
@@ -1117,9 +1124,9 @@ describe("tsp input adapter shows the OMP login body (detail)", () => {
 function makeLoginSheetPhases() {
   const events: unknown[] = [];
   const state = { prompt: false, status: "Waiting for the browser to finish sign-in." };
+  // The real field: a component with its own describe() and no handleNativeEvent.
   const field: Record<string, unknown> = {
     describe: () => ({ k: "input", p: { text: "", placeholder: "paste code" } }),
-    handleNativeEvent: () => undefined,
     handleInput: () => undefined,
   };
   return {
@@ -1246,5 +1253,56 @@ describe("tsp login adapter (OMP login sheet, link phase and field phase)", () =
     sheet.state.prompt = true;
     expect(pickAdapter(sheet, ctxFor())?.id).toBe("tsp-login");
     expect(pickAdapter(makeLoginDialog(), ctxFor())?.id).toBe("tsp-input");
+  });
+});
+
+/**
+ * H13: the field inside OMP's login prompt is a real component with only a
+ * `describe()` (no `handleNativeEvent`). Reading must still descend into it.
+ */
+describe("tsp login read descends into describe-only form fields (H13)", () => {
+  it("finds the field and reads its prompt line, placeholder and URL detail", () => {
+    const sheet = makeOmpLoginSheet();
+    expect(tspInputAdapter.read(sheet, ctxFor())).toEqual({
+      kind: "input",
+      title: "Waiting for approval",
+      placeholder: "paste code",
+      detail: "Sign in to DeepSeek in your browser.\nCode: ABCD-1234\nhttps://example.test/device",
+      secret: false,
+    });
+    expect(tspLoginAdapter.read(sheet, ctxFor())).toMatchObject({ kind: "input", title: "Waiting for approval" });
+  });
+
+  it("finds the field through a describe-only container (FormField-like) under the prompt", () => {
+    const sheet = makeOmpLoginSheet({ wrapped: true });
+    expect(tspInputAdapter.read(sheet, ctxFor())).toMatchObject({ kind: "input", title: "Waiting for approval", placeholder: "paste code" });
+    expect(tspLoginAdapter.read(sheet, ctxFor())).toMatchObject({ kind: "input" });
+    expect(tspLoginAdapter.detect(sheet, ctxFor())).toBe(true);
+  });
+
+  it("reports the input node for both describe-only shapes", () => {
+    expect(describesTextInput(makeOmpLoginSheet())).toBe(true);
+    expect(describesTextInput(makeOmpLoginSheet({ wrapped: true }))).toBe(true);
+    expect(describesLoginSheet(makeOmpLoginSheet())).toBe(true);
+  });
+
+  it("types the answer on the root and submits, though the field has no handleNativeEvent", () => {
+    const keys: string[] = [];
+    const events: unknown[] = [];
+    const sheet = {
+      ...makeOmpLoginSheet(),
+      handleInput: (data: string) => { keys.push(data); },
+      handleNativeEvent: (event: unknown) => { events.push(event); },
+    };
+    const { ctx, renders } = countingCtx();
+    expect(tspLoginAdapter.act(sheet, { type: "submit", text: "sk-test" }, ctx)).toBe(true);
+    expect(keys).toEqual(["\x15", ..."sk-test"]);
+    expect(events).toEqual([{ type: "action", key: "", act: "submit", mods: [] }]);
+    expect(renders()).toBe(1);
+  });
+
+  it("still reads the older shape where the field also has handleNativeEvent", () => {
+    expect(tspInputAdapter.read(makeLoginDialog(), ctxFor())).toMatchObject({ kind: "input", title: "Paste your API key", placeholder: "sk-..." });
+    expect(describesTextInput(makeLoginDialog())).toBe(true);
   });
 });

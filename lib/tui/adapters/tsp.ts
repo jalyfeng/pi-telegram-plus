@@ -121,6 +121,17 @@ function asComponent(value: unknown): Describable | undefined {
   return value as Describable;
 }
 
+/** A child slot to descend into when reading: only its own describe is needed.
+ * OMP's form fields (`TextFormField`) describe themselves but take no events
+ * of their own; the dialog root takes them. */
+type DescribableChild = Pick<Describable, "describe"> & object;
+
+function describableChild(value: unknown): DescribableChild | undefined {
+  if (!isObject(value)) return undefined;
+  if (typeof (value as Partial<Describable>).describe !== "function") return undefined;
+  return value as DescribableChild;
+}
+
 /** `TspText`: a plain string, or spans whose `t` pieces concatenate. */
 function tspText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -164,7 +175,7 @@ function walkNode<K extends NodeKind>(node: NativeNodeLike, keypath: string, own
   for (let i = 0; i < children.length; i++) {
     const child = children[i];
     if (!isObject(child)) continue;
-    const component = asComponent(child);
+    const component = describableChild(child);
     if (component) {
       const found = findNodeVisited(component, kind, depth + 1, visited);
       if (found) return found;
@@ -258,7 +269,7 @@ function loginSheetNode(node: NativeNodeLike, depth: number, visited: Set<object
   if (!children) return false;
   for (const child of children) {
     if (!isObject(child)) continue;
-    const component = asComponent(child);
+    const component = describableChild(child);
     if (component) {
       if (loginSheetIn(component, depth + 1, visited)) return true;
       continue;
@@ -930,7 +941,7 @@ function collectPromptDetail(node: NativeNodeLike, state: ScanState): void {
   }
   const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
   for (const child of children) {
-    if (!isObject(child) || asComponent(child)) continue;
+    if (!isObject(child) || describableChild(child)) continue;
     collectPromptDetail(child as NativeNodeLike, state);
   }
 }
@@ -969,7 +980,7 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
   if (!children) return undefined;
   for (const child of children) {
     if (!isObject(child)) continue;
-    const component = asComponent(child);
+    const component = describableChild(child);
     if (component) {
       const found = scanPromptRoot(component, depth + 1, visited, state);
       if (found) return found;
@@ -1111,7 +1122,7 @@ function collectLoginNode(node: NativeNodeLike, depth: number, visited: Set<obje
   const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
   for (const child of children) {
     if (!isObject(child)) continue;
-    const component = asComponent(child);
+    const component = describableChild(child);
     if (component) {
       collectLoginLines(component, depth + 1, visited, lines);
       continue;
