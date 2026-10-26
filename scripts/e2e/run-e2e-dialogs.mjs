@@ -769,6 +769,20 @@ async function runHost(host, servers) {
         const since = await cursor();
         const providerBefore = providerEntries().length;
         await injectText("please run the probe TASK_TOOL_PROBE");
+        // OMP's write mode asks before `task`: answer the plain "Approve" from Telegram
+        // (not "Approve task for this session"), as the approval step does for exec.
+        const isPlainApprove = (text) => text.trim().startsWith("Approve") && !text.includes("for this session");
+        const approvalCall = await waitFor("task approval keyboard", (state) =>
+          state.calls.slice(since).findLast((entry) =>
+            buttonsOf(entry).some((b) => isPlainApprove(String(b.text ?? "")))) ?? false, { timeoutMs: 30_000 })
+          .catch(() => undefined);
+        if (!approvalCall) throw new Error("no task approval keyboard offered");
+        const approve = buttonsOf(approvalCall).find((b) => isPlainApprove(String(b.text ?? "")));
+        const approvalText = String(approve.text ?? "");
+        const approvalMessageId = approvalCall.body?.message_id ?? approvalCall.message_id;
+        if (!await clickButton(approve, approvalMessageId)) {
+          throw new Error(`pressing "${approvalText}" was never acknowledged`);
+        }
         const childRequest = await waitForProvider("sub-agent request", (entries) =>
           entries.slice(providerBefore).find((entry) =>
             String(entry.userText ?? "").includes("SUBAGENT_E2E_PROMPT") && entry.lastRole === "user"), 60_000);
@@ -816,7 +830,7 @@ async function runHost(host, servers) {
 
         record("sub-agent run leaves the Telegram runtime intact",
           standalone.length === 0 && menu && Boolean(newRequest) && replied,
-          `${detailOne} · ${detailTwo}`);
+          `task approval answered from Telegram: ${approvalText} · ${detailOne} · ${detailTwo}`);
       } catch (error) {
         record("sub-agent run leaves the Telegram runtime intact", false, String(error.message).slice(0, 200));
       }
