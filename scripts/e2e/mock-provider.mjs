@@ -253,10 +253,13 @@ const server = createServer(async (req, res) => {
     for (const key of required) args[key] = fill(parameters.properties?.[key]);
     return JSON.stringify(args);
   })();
-  const scriptedCall = triggerProbe
-    ? { name: probeTool, arguments: probeArguments }
-    : (triggerAnyAsk ? { name: askTool, arguments: askArgs }
-      : (triggerTaskProbe ? { name: "task", arguments: taskArguments } : undefined));
+  // The task probe is keyed on the latest user message, so it outranks the ask triggers,
+  // which match the whole history (an earlier ASK_TOOL_PROBE_MULTI would otherwise win).
+  const scriptedCall = triggerTaskProbe
+    ? { name: "task", arguments: taskArguments }
+    : (triggerProbe
+      ? { name: probeTool, arguments: probeArguments }
+      : (triggerAnyAsk ? { name: askTool, arguments: askArgs } : undefined));
 
   const wantsStream = parsed.stream === true;
   const id = "chatcmpl-e2e";
