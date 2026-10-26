@@ -10,6 +10,7 @@ import { escapeHtml } from "./lib/html.ts";
 import { createHeartbeat } from "./lib/heartbeat.ts";
 import { replayTelegramHistory, type TelegramHistoryEntry } from "./lib/history-replay.ts";
 import { TelegramInstanceCoordinator, failoverHasOtherLiveInstances, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
+import { mainOnlyEvents } from "./lib/main-only-pi.ts";
 import { registerTelegramRenderer } from "./lib/renderer.ts";
 import { getActiveSession, installAgentSessionCapture } from "./lib/session-capture.ts";
 import { createTelegramTransport, downloadTelegramFile, getTelegramBotUsername, getTelegramFile } from "./lib/telegram-api.ts";
@@ -54,7 +55,10 @@ function getTelegramPlusRuntimeState(): TelegramPlusRuntimeState {
   return state;
 }
 
-export default function piTelegramPlus(pi: ExtensionAPI): void {
+export default function piTelegramPlus(rawPi: ExtensionAPI): void {
+  // OMP sub-agent sessions re-run this factory and register their own event
+  // handlers; the wrapper keeps those handlers from running inside sub-agents.
+  const pi = mainOnlyEvents(rawPi);
   installAgentSessionCapture();
   installTelegramStatusAlignment();
   // Patch the TUI initializer before the host creates InteractiveMode. This is
@@ -69,7 +73,6 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     : "info";
   initLogger({ dir: join(getAgentDir(), "logs"), level });
   const runtimeState = getTelegramPlusRuntimeState();
-  runtimeState.dispose?.();
 
   let config: TelegramConfig = {};
   let resolvedConfig: ResolvedTelegramConfig | undefined;
@@ -797,9 +800,11 @@ export default function piTelegramPlus(pi: ExtensionAPI): void {
     clearStatus();
   }
 
-  runtimeState.dispose = disposeRuntime;
-
   pi.on("session_start", async () => {
+    // Only the main session reaches this handler (sub-agents are filtered by
+    // mainOnlyEvents), so it takes over the process runtime from any earlier one.
+    if (runtimeState.dispose && runtimeState.dispose !== disposeRuntime) runtimeState.dispose();
+    runtimeState.dispose = disposeRuntime;
     // A new session (/new, session switch) must not carry the previous
     // session's remembered secrets into this one.
     secretStore.clearAll();
