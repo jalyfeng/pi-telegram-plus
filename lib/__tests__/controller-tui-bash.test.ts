@@ -288,6 +288,53 @@ describe("Telegram shell commands", () => {
       runText.mockRestore();
     }
   });
+
+  it("refuses a second ! while the first submit has not returned yet", async () => {
+    let resolveFirst!: (value: boolean) => void;
+    const runText = vi.spyOn(CommandGateway.prototype, "runText")
+      .mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValue(true);
+    try {
+      const harness = createHarness();
+      void send(harness.controller, "!ls a", 30);
+      await vi.waitFor(() => expect(runText).toHaveBeenCalledTimes(1));
+
+      await send(harness.controller, "!ls b", 31);
+      await vi.waitFor(() => expect(harness.calls.some((call) => call.text?.includes("already running"))).toBe(true));
+      expect(runText).toHaveBeenCalledTimes(1);
+
+      resolveFirst(true);
+      (harness.session as unknown as Record<string, unknown>).isBashRunning = true;
+      await send(harness.controller, "!ls c", 32);
+      await vi.waitFor(() => expect(harness.calls.filter((call) => call.text?.includes("already running"))).toHaveLength(2));
+      expect(runText).toHaveBeenCalledTimes(1);
+
+      (harness.session as unknown as Record<string, unknown>).isBashRunning = false;
+      await send(harness.controller, "!ls d", 33);
+      await vi.waitFor(() => expect(runText).toHaveBeenLastCalledWith(expect.objectContaining({ text: "!ls d" })));
+      expect(runText).toHaveBeenCalledTimes(2);
+    } finally {
+      runText.mockRestore();
+    }
+  });
+
+  it("clears the in-flight mark when the submit throws", async () => {
+    const runText = vi.spyOn(CommandGateway.prototype, "runText")
+      .mockRejectedValueOnce(new Error("submit failed"))
+      .mockResolvedValue(true);
+    try {
+      const harness = createHarness();
+      await send(harness.controller, "!ls a", 40).catch(() => undefined);
+      await vi.waitFor(() => expect(runText).toHaveBeenCalledTimes(1));
+
+      await send(harness.controller, "!ls b", 41);
+      await vi.waitFor(() => expect(runText).toHaveBeenLastCalledWith(expect.objectContaining({ text: "!ls b" })));
+      expect(runText).toHaveBeenCalledTimes(2);
+      expect(harness.calls.some((call) => call.text?.includes("already running"))).toBe(false);
+    } finally {
+      runText.mockRestore();
+    }
+  });
 });
 
 describe("Mirror text fitting", () => {

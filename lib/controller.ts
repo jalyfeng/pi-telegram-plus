@@ -872,6 +872,10 @@ export function createTelegramController(deps: {
     (hostOwnsPrompts(bridge) ? "host" : "telegram-native");
 
   const BASH_BUSY_TEXT = "⚠️ A bash command is already running. Wait for it to finish, or send /stop to cancel it.";
+  // True from just before the `!` submit until the gateway call returns. The host
+  // sets session.isBashRunning only some ~60ms after the submit starts, so this
+  // flag covers that window for concurrently handled Telegram messages.
+  let bashSubmitInFlight = false;
 
   const runTelegramBash = async (
     command: string,
@@ -900,7 +904,7 @@ export function createTelegramController(deps: {
     // Same rule as the TUI: while a bash command is running, a new `!` is
     // refused here, before any confirmation and before the gateway opens a
     // scope for it (otherwise the running command's output lands on this one).
-    if (isBashRunning(session)) {
+    if (isBashRunning(session) || bashSubmitInFlight) {
       await deps.transport.sendText(chatId, BASH_BUSY_TEXT, messageThreadId, sourceMessageId);
       return;
     }
@@ -924,17 +928,23 @@ export function createTelegramController(deps: {
     // command, and OutputCapture returns the BashExecutionComponent's final
     // render to the ack message.
     // A confirmation may have taken a while; re-check before submitting.
-    if (isBashRunning(session)) {
+    if (isBashRunning(session) || bashSubmitInFlight) {
       await deps.transport.sendText(chatId, BASH_BUSY_TEXT, messageThreadId, sourceMessageId);
       return;
     }
     const text = `${excludeFromContext ? "!!" : "!"}${command}`;
-    const submitted = await commandGateway.runText({
-      text,
-      label: "!",
-      origin: { chatId, messageThreadId, sourceMessageId },
-      transport: deps.transport,
-    });
+    let submitted: boolean;
+    bashSubmitInFlight = true;
+    try {
+      submitted = await commandGateway.runText({
+        text,
+        label: "!",
+        origin: { chatId, messageThreadId, sourceMessageId },
+        transport: deps.transport,
+      });
+    } finally {
+      bashSubmitInFlight = false;
+    }
     if (!submitted) {
       await deps.transport.sendText(chatId, "Shell execution is not available in this session.", messageThreadId, sourceMessageId);
       return;
