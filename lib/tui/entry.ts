@@ -16,7 +16,7 @@
  * nested call merges into the pending entry, so double layers stay one entry.
  */
 import type { EntryInfo } from "./model.ts";
-import { isFunctionMarked, isMarked, mark, markFunction } from "./install-marks.ts";
+import { hasStickyMark, isFunctionMarked, mark, markFunction } from "./install-marks.ts";
 
 /** A recorded entry, returned so the hook that pushed it retires its own record. */
 export type EntryToken = object;
@@ -220,7 +220,7 @@ export function hookEntryMethods(
   for (const spec of specs) {
     const original = target[spec.method];
     if (typeof original !== "function") continue;
-    if (isMarked(target, `entry:${spec.method}`)) continue;
+    if (hasStickyMark(target, spec.method, `entry:${spec.method}`)) continue;
     // Pi hands the same dialog function to two objects as their own property:
     // the function already wrapped through one of them must not be wrapped
     // again (H24). An inherited method is shared by every instance of the class

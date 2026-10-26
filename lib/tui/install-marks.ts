@@ -60,6 +60,29 @@ export function isMarked(target: object, key: string): boolean {
   return marks().get(target)?.has(key) ?? false;
 }
 
+/**
+ * Whether the mark `key` on `target` still holds for `method`.
+ *
+ * A mark is only trusted while the host reads the method stably. Some hosts
+ * (OMP's tool UI context) hand out a fresh function on every read, so the
+ * mark is the only signal and it is trusted. Pi swaps a dialog method on the
+ * same object and swaps it back (the Telegram routed UI); after such a swap
+ * the mark is stale for the new function, so a stable read (two reads return
+ * the same value) makes the mark ignored and the caller falls back to function
+ * identity. A read that throws counts as stable.
+ */
+export function hasStickyMark(target: object, method: string, key: string): boolean {
+  if (!isMarked(target, key)) return false;
+  try {
+    const record = target as Record<string, unknown>;
+    const first = record[method];
+    const second = record[method];
+    return first !== second;
+  } catch {
+    return false;
+  }
+}
+
 /** Record that `target` now carries the mark `key`. */
 export function mark(target: object, key: string): void {
   const table = marks();

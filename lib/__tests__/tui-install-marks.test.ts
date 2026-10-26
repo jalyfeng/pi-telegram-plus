@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { hookMethod } from "../tui/host.ts";
 import { installRace } from "../tui/race.ts";
 import { hookEntryMethods, UI_CONTEXT_SPECS } from "../tui/entry.ts";
-import { isMarked, mark } from "../tui/install-marks.ts";
+import { hasStickyMark, isMarked, mark } from "../tui/install-marks.ts";
 import type { EntrySink } from "../tui/entry.ts";
 
 type Host = Record<string, unknown>;
@@ -212,5 +212,68 @@ describe("pi-style host shares one dialog function between two objects", () => {
 
     expect(installRace(toolUi, "select")).toBe(true);
     expect((toolUi.select as { name: string }).name).toBe("ptp-race:select");
+  });
+});
+
+describe("sticky marks: a mark is trusted only while the host reads the method unstably", () => {
+  it("is false without a mark", () => {
+    const target: Host = { select: () => "host" };
+    expect(hasStickyMark(target, "select", "race:select")).toBe(false);
+  });
+
+  it("is false for a stable read, even with a mark", () => {
+    const target: Host = { select: () => "host" };
+    mark(target, "race:select");
+    expect(hasStickyMark(target, "select", "race:select")).toBe(false);
+  });
+
+  it("is true for an unstable read (a fresh function per read) with a mark", () => {
+    const { target } = hostLike();
+    mark(target, "race:select");
+    expect(hasStickyMark(target, "select", "race:select")).toBe(true);
+  });
+
+  it("is false when reading the property throws", () => {
+    const target: Host = {};
+    Object.defineProperty(target, "select", {
+      get() {
+        throw new Error("no read");
+      },
+    });
+    mark(target, "race:select");
+    expect(hasStickyMark(target, "select", "race:select")).toBe(false);
+  });
+
+  it("re-wraps after pi swaps the dialog out and back on the same object (stable reads)", () => {
+    const ui: Host = { select: async () => "f" };
+    const { sink, pushes } = countingSink();
+
+    const attach = (): void => {
+      hookEntryMethods(ui, UI_CONTEXT_SPECS, sink, "pi");
+      installRace(ui, "select");
+    };
+    const callPushes = (): number => {
+      const before = pushes();
+      void (ui.select as Dialog)(...PI_ARGS());
+      return pushes() - before;
+    };
+
+    // Phase 1: the original dialog function gets our wrappers.
+    attach();
+    const ours = ui.select;
+    expect(callPushes()).toBe(1);
+
+    // Phase 2: the routed UI puts its own, not yet wrapped, function on the same object.
+    const routed = async () => "g";
+    ui.select = routed;
+    attach();
+    expect((ui.select as { name: string }).name).toBe("ptp-race:select");
+    expect(callPushes()).toBe(1);
+
+    // Phase 3: the routed function is put back out and our wrapper back in; no second layer.
+    ui.select = ours;
+    attach();
+    expect((ui.select as { name: string }).name).toBe("ptp-race:select");
+    expect(callPushes()).toBe(1);
   });
 });

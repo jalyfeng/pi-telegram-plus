@@ -9,7 +9,7 @@
  */
 import { getTuiHostState, installTuiBridge, onTuiCaptured, type TuiHost, type TuiHostState } from "../tui-bridge.ts";
 import { log } from "../logger.ts";
-import { inheritFunctionKinds, isFunctionKindMarked, isMarked, mark, markFunctionKind } from "./install-marks.ts";
+import { hasStickyMark, inheritFunctionKinds, isFunctionKindMarked, mark, markFunctionKind } from "./install-marks.ts";
 
 const hostLog = log.child("tui-host");
 
@@ -67,7 +67,7 @@ export function hookMethod(
   const hookKey = `hook:${name}:${kind}`;
   // Pi hands one function to two objects; once it is wrapped for this kind,
   // wrapping it again would report the same entry twice (H24).
-  if (isMarked(object, hookKey) || isFunctionKindMarked(current, kind)) return false;
+  if (hasStickyMark(object, name, hookKey) || isFunctionKindMarked(current, kind)) return false;
   const original = current as HostMethod;
   const wrapped: HostMethod = function patchedHostMethod(this: unknown, ...args: unknown[]): unknown {
     if (before) {
