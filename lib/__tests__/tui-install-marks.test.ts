@@ -379,3 +379,55 @@ describe("pi per-tick attach with one scope does not stack wrappers (H27)", () =
     await expect((ui.select as Dialog)(...PI_ARGS())).resolves.toBe("host");
   });
 });
+
+/**
+ * H28: `hookMethod` marks are kept per scope (one FocusTracker). A runtime
+ * rebuild creates a new tracker that must install its own event hooks on the
+ * same host object; the old tracker's marks must not make it skip them.
+ */
+describe("hookMethod marks are scoped to one owner (H28)", () => {
+  /** A host whose method reads are stable, the way pi's `setFocus` is. */
+  function stableHost(): { ui: Host } {
+    return { ui: { setFocus: () => undefined } };
+  }
+
+  it("lets two scopes each install their own hook on the same method", () => {
+    const { ui } = stableHost();
+    let beforeA = 0;
+    let beforeB = 0;
+    const scopeA = {};
+    const scopeB = {};
+
+    expect(hookMethod(ui, "setFocus", "focus-tracker", () => { beforeA += 1; }, undefined, scopeA)).toBe(true);
+    expect(hookMethod(ui, "setFocus", "focus-tracker", () => { beforeB += 1; }, undefined, scopeB)).toBe(true);
+
+    (ui.setFocus as (...args: unknown[]) => unknown)({});
+    expect(beforeA).toBe(1);
+    expect(beforeB).toBe(1);
+  });
+
+  it("does not stack a hook when one scope installs again", () => {
+    const { ui } = stableHost();
+    let beforeB = 0;
+    const scopeB = {};
+    const hook = (): void => { beforeB += 1; };
+
+    hookMethod(ui, "setFocus", "focus-tracker", hook, undefined, scopeB);
+    for (let i = 0; i < 50; i += 1) expect(hookMethod(ui, "setFocus", "focus-tracker", hook, undefined, scopeB)).toBe(false);
+
+    (ui.setFocus as (...args: unknown[]) => unknown)({});
+    expect(beforeB).toBe(1);
+  });
+
+  it("keeps one layer per scope when the host hands out a fresh function on every read", () => {
+    const { target } = hostLike();
+    let before = 0;
+    const scope = {};
+    const hook = (): void => { before += 1; };
+
+    for (let i = 0; i < 12000; i += 1) hookMethod(target, "select", "focus-tracker", hook, undefined, scope);
+
+    void (target.select as (...args: unknown[]) => unknown)("Pick", []);
+    expect(before).toBe(1);
+  });
+});

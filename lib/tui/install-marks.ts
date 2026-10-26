@@ -45,6 +45,8 @@ const SCOPED_MARKS_KEY = Symbol.for("pi-telegram-plus.install-marks.scoped");
 type ScopedMarks = {
   objects: InstallMarks;
   tagged: WeakSet<object>;
+  /** Hook kinds per wrapped function, as `FunctionMarks.kinds` but for this scope. */
+  kinds: WeakMap<object, Set<string>>;
 };
 
 function marks(): InstallMarks {
@@ -77,7 +79,7 @@ function scopedMarks(scope: object): ScopedMarks {
   }
   let entry = byScope.get(scope);
   if (!entry) {
-    entry = { objects: new WeakMap<object, Set<string>>(), tagged: new WeakSet<object>() };
+    entry = { objects: new WeakMap<object, Set<string>>(), tagged: new WeakSet<object>(), kinds: new WeakMap<object, Set<string>>() };
     byScope.set(scope, entry);
   }
   return entry;
@@ -152,14 +154,19 @@ export function markFunctionRaced(fn: object): void {
   functionMarks().raced.add(fn);
 }
 
-/** Whether this function is already wrapped by a host hook of `kind`. */
-export function isFunctionKindMarked(fn: object, kind: string): boolean {
-  return functionMarks().kinds.get(fn)?.has(kind) ?? false;
+/** Hook-kind table for `scope`, or the process-wide one when no scope is given. */
+function kindTable(scope?: object): WeakMap<object, Set<string>> {
+  return scope ? scopedMarks(scope).kinds : functionMarks().kinds;
 }
 
-/** Record that this function is wrapped by a host hook of `kind`. */
-export function markFunctionKind(fn: object, kind: string): void {
-  const table = functionMarks().kinds;
+/** Whether this function is already wrapped by a host hook of `kind` (in `scope`, when given). */
+export function isFunctionKindMarked(fn: object, kind: string, scope?: object): boolean {
+  return kindTable(scope).get(fn)?.has(kind) ?? false;
+}
+
+/** Record that this function is wrapped by a host hook of `kind` (in `scope`, when given). */
+export function markFunctionKind(fn: object, kind: string, scope?: object): void {
+  const table = kindTable(scope);
   let kinds = table.get(fn);
   if (!kinds) {
     kinds = new Set<string>();
@@ -168,10 +175,9 @@ export function markFunctionKind(fn: object, kind: string): void {
   kinds.add(kind);
 }
 
-/** Copy the hook kinds of `from` onto `to` (a wrapper inherits what it wraps). */
-export function inheritFunctionKinds(from: object, to: object): void {
-  const table = functionMarks().kinds;
-  const inherited = table.get(from);
+/** Copy the hook kinds of `from` onto `to` (a wrapper inherits what it wraps; in `scope`, when given). */
+export function inheritFunctionKinds(from: object, to: object, scope?: object): void {
+  const inherited = kindTable(scope).get(from);
   if (!inherited) return;
-  for (const kind of inherited) markFunctionKind(to, kind);
+  for (const kind of inherited) markFunctionKind(to, kind, scope);
 }

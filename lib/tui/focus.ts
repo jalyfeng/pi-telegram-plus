@@ -299,14 +299,14 @@ export class FocusTracker {
         hookMethod(ui, name, "focus-tracker", (args) => {
           const component = unwrapFocus(args[0]);
           if (component) this.update(component, "event");
-        });
+        }, undefined, this);
       }
       // Overlay swaps that never reach `setFocus` are caught by the tick.
       for (const name of ["showOverlay", "hideOverlay"]) {
         hookMethod(ui, name, "focus-tracker-overlay", undefined, () => {
           const current = this.readCurrent(ui);
           if (current) this.update(current, "getter");
-        });
+        }, this);
       }
     }
   }
@@ -364,7 +364,7 @@ export class FocusTracker {
       if (!insideEntryCall() || !isHostObject(component)) return;
       const top = this.pending[this.pending.length - 1];
       if (top) this.bindEntry(component, top.info);
-    });
+    }, undefined, this);
   }
 
   private readUiContext(runner?: { getUIContext?: () => unknown }): Record<string, unknown> | undefined {

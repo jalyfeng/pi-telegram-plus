@@ -45,6 +45,10 @@ export function onHostState(listener: (state: HostState) => void): () => void {
  * re-capture does not install the same hook twice, while different modules
  * still compose.
  *
+ * `scope` (optional) limits the marks to one owner, such as a FocusTracker: a
+ * second owner then wraps the same method again instead of being skipped. Without
+ * it the process-wide marks are used.
+ *
  * The wrapper never changes the return value and never lets an observer throw
  * into the host.
  */
@@ -54,6 +58,7 @@ export function hookMethod(
   kind: string,
   before?: (args: unknown[], self: unknown) => void,
   after?: (args: unknown[], result: unknown, self: unknown) => void,
+  scope?: object,
 ): boolean {
   if (!isHostObject(target)) return false;
   const object = target as Record<string, unknown>;
@@ -67,7 +72,7 @@ export function hookMethod(
   const hookKey = `hook:${name}:${kind}`;
   // Pi hands one function to two objects; once it is wrapped for this kind,
   // wrapping it again would report the same entry twice (H24).
-  if (hasStickyMark(object, name, hookKey) || isFunctionKindMarked(current, kind)) return false;
+  if (hasStickyMark(object, name, hookKey, scope) || isFunctionKindMarked(current, kind, scope)) return false;
   const original = current as HostMethod;
   const wrapped: HostMethod = function patchedHostMethod(this: unknown, ...args: unknown[]): unknown {
     if (before) {
@@ -91,9 +96,9 @@ export function hookMethod(
   } catch {
     return false;
   }
-  inheritFunctionKinds(original, wrapped);
-  markFunctionKind(wrapped, kind);
-  mark(object, hookKey);
+  inheritFunctionKinds(original, wrapped, scope);
+  markFunctionKind(wrapped, kind, scope);
+  mark(object, hookKey, scope);
   return true;
 }
 
