@@ -472,6 +472,86 @@ describe("OutputCapture shell scope", () => {
     output.finish();
     origin.end(scope, "idle");
   });
+
+  // A bash executor whose name is not an agent ctor and that is not in the
+  // chat's agent gate: only the pending-area claim or the dedup can decide it.
+  class BashRunner {
+    constructor(public lines: string[]) {}
+    render() { return ["$ ls", ...this.lines, "exit: 0"]; }
+    setExpanded(_expanded: boolean): void {}
+    appendOutput(_chunk: string): void {}
+    setComplete(_exitCode: number, _cancelled?: boolean): void {}
+    getOutput(): string { return this.lines.join("\n"); }
+  }
+
+  function attachedPending() {
+    const transport = fakeTransport();
+    const origin = new OriginTracker({ isEditorFocused: () => true, readDraft: () => "", writeDraft: () => true });
+    const output = new OutputCapture(transport, origin);
+    const chat = { addChild: (_child: unknown) => undefined };
+    const pending = { addChild: (_child: unknown) => undefined };
+    (output as unknown as { attach(state: unknown): void }).attach({
+      host: "pi",
+      mode: { pendingMessagesContainer: pending },
+      chat,
+    });
+    return { transport, origin, output, chat, pending };
+  }
+
+  it("claims a ! command that is parked in the pending area while a turn runs", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, pending } = attachedPending();
+    const scope = origin.begin({ chatId: 1 }, "!", "!ls", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !ls</b>" });
+    const component = new BashRunner(["file.txt"]);
+    pending.addChild(component);
+    expect(output.hasRunningBash()).toBe(true);
+    component.setComplete(0);
+    expect(output.hasRunningBash()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1100);
+    const text = transport.edits.at(-1)?.text ?? "";
+    expect(text).toContain("file.txt");
+    expect(text).toContain("exit: 0");
+    output.finish();
+    origin.end(scope, "idle");
+  });
+
+  it("does not push a pending bash component again when it moves into the chat", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat, pending } = attachedPending();
+    const first = origin.begin({ chatId: 1 }, "!", "!ls", "");
+    output.bind(first, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !ls</b>" });
+    const component = new BashRunner(["once-only"]);
+    pending.addChild(component);
+    component.setComplete(0);
+    output.finish();
+    origin.end(first, "idle");
+    await vi.advanceTimersByTimeAsync(1100);
+    const editsBefore = transport.edits.length;
+    // The next submit flushes the pending area into the chat under another scope.
+    const later = origin.begin({ chatId: 1 }, "model", "/model", "");
+    output.bind(later, { chatId: 1, messageId: 10, ackHtml: "<b>▶️ /model</b>" });
+    chat.addChild(component);
+    output.finish();
+    await vi.advanceTimersByTimeAsync(1100);
+    const laterEdits = transport.edits.slice(editsBefore).map((edit) => edit.text);
+    expect(laterEdits.every((text) => !text.includes("once-only"))).toBe(true);
+    origin.end(later, "idle");
+  });
+
+  it("ignores non-bash children in the pending area inside a ! scope", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, pending } = attachedPending();
+    const scope = origin.begin({ chatId: 1 }, "!", "!ls", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !ls</b>" });
+    pending.addChild({ text: "queued user message" });
+    expect(output.hasRunningBash()).toBe(false);
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(transport.edits.every((edit) => !edit.text.includes("queued user message"))).toBe(true);
+    expect(transport.sends.every((send) => !send.text.includes("queued user message"))).toBe(true);
+    origin.end(scope, "idle");
+  });
 });
 
 describe("OutputCapture transcript-reset scopes", () => {

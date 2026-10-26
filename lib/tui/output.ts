@@ -264,6 +264,10 @@ export class OutputCapture {
         if (this.rebuilding.has(chat) && !rebuildScope) return;
         const child = args[0];
         if (!isHostObject(child)) return;
+        // A bash component claimed from the pending area (H34) moves into the
+        // chat on the next user submit; it is already owned, so it is neither
+        // tracked nor pushed a second time from here.
+        if (this.bashTracked.has(child) || this.bashPushed.has(child)) return;
         // D3b: inside a "!" scope the host's bash executor is the command's
         // own output, not agent history; everywhere else it stays excluded as
         // before. The method-shape check runs before the agent gate: a
@@ -280,6 +284,21 @@ export class OutputCapture {
         this.logCaptured(child, html);
         if (!html) return;
         this.push(html);
+      });
+    }
+    // H34: a `!` command run while the agent streams is parked in the host's
+    // pending area (pi interactive-mode.js 5866, OMP command-controller.ts
+    // #executeBashCommand) until the next submit moves it to the chat. Claim
+    // its bash executor here too, so its result still reaches Telegram. Other
+    // pending children (queued user messages) are not command output.
+    const pending = isHostObject(mode) ? mode.pendingMessagesContainer : undefined;
+    if (isHostObject(pending) && !this.attached.has(pending)) {
+      this.attached.add(pending);
+      hookMethod(pending, "addChild", "output-pending-add-child", undefined, (args) => {
+        const child = args[0];
+        if (!isHostObject(child)) return;
+        if (this.binding?.scope.label !== "!" || !isBashExecutor(child)) return;
+        this.trackBashComponent(child);
       });
     }
     // T4.4: `/export` ends with a file on disk; the terminal prints its path,
