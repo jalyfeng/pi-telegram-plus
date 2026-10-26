@@ -8,7 +8,8 @@
  * The prefs tests pin the settings-page mapping and the §4.12 race hand-off.
  */
 import { describe, expect, it } from "vitest";
-import { findPicker, tspInputAdapter, tspPickerAdapter, tspPrefsAdapter } from "../tui/adapters/tsp.ts";
+import { pickAdapter } from "../tui/adapters/index.ts";
+import { findPicker, tspInputAdapter, tspLoginAdapter, tspPickerAdapter, tspPrefsAdapter } from "../tui/adapters/tsp.ts";
 import type { AdapterContext, DialogModel } from "../tui/model.ts";
 
 type Node = { k: string; p?: unknown; c?: unknown[]; key?: string };
@@ -1084,5 +1085,123 @@ describe("tsp input adapter shows the OMP login body (detail)", () => {
   it("sets no detail key when the dialog has no login body", () => {
     const model = tspInputAdapter.read(makeOmpLoginSheet({ withBody: false }), ctxFor());
     expect(model).not.toHaveProperty("detail");
+  });
+});
+
+/**
+ * One OMP login sheet whose tree changes with its phase: the link-only phase
+ * (overlay root with its heading, lead, code, link and a status line), then
+ * the same sheet once the field has appeared. `phase` is flipped in place, the
+ * way OMP's own dialog grows a prompt while the component stays the same.
+ */
+function makeLoginSheetPhases() {
+  const events: unknown[] = [];
+  const state = { prompt: false, status: "Waiting for the browser to finish sign-in." };
+  const field: Record<string, unknown> = {
+    describe: () => ({ k: "input", p: { text: "", placeholder: "paste code" } }),
+    handleNativeEvent: () => undefined,
+    handleInput: () => undefined,
+  };
+  return {
+    events,
+    state,
+    handleInput: () => undefined,
+    describe: () => ({
+      k: "col",
+      p: { role: "omp.overlay.login", head: "Sign in to DeepSeek" },
+      c: [
+        { k: "text", p: { role: "omp.login.lead", text: "Sign in to DeepSeek in your browser." } },
+        { k: "row", p: { role: "omp.login.code" }, c: [{ k: "text", p: { text: [{ t: "Code: " }, { t: "ABCD-1234" }] } }] },
+        {
+          k: "row",
+          p: { role: "omp.login.link" },
+          c: [{ k: "text", p: { role: "omp.login.url", text: [{ t: "https://example.test/device" }] } }],
+        },
+        { k: "col", p: { role: "omp.login.status" }, c: [{ k: "text", p: { text: state.status } }, { k: "text", p: { text: "" } }] },
+        ...(state.prompt
+          ? [{ k: "col", p: { role: "omp.login.prompt" }, c: [{ k: "text", p: { role: "omp.login.label", text: "Paste the code, then press Enter" } }, field] }]
+          : []),
+      ],
+    }),
+    handleNativeEvent: (event: unknown) => { events.push(event); },
+  };
+}
+
+describe("tsp login adapter (OMP login sheet, link phase and field phase)", () => {
+  const linkOnly = () => makeLoginSheetPhases();
+
+  it("detects the sheet in both phases and not a plain text prompt", () => {
+    const sheet = linkOnly();
+    expect(tspLoginAdapter.detect(sheet, ctxFor())).toBe(true);
+    sheet.state.prompt = true;
+    expect(tspLoginAdapter.detect(sheet, ctxFor())).toBe(true);
+    expect(tspLoginAdapter.detect(makeLoginDialog(), ctxFor())).toBe(false);
+  });
+
+  it("declines the pi host and a raced dialog", () => {
+    expect(tspLoginAdapter.detect(linkOnly(), ctxFor("pi"))).toBe(false);
+    expect(tspLoginAdapter.detect(linkOnly(), racedCtx())).toBe(false);
+  });
+
+  it("reads the link phase as a cancellable progress view in document order", () => {
+    const model = tspLoginAdapter.read(linkOnly(), ctxFor());
+    expect(model).toMatchObject({ kind: "progress", cancellable: true });
+    const text = (model as { text: string }).text.split("\n");
+    expect(text).toEqual([
+      "Sign in to DeepSeek",
+      "Sign in to DeepSeek in your browser.",
+      "Code: ABCD-1234",
+      "https://example.test/device",
+      "Waiting for the browser to finish sign-in.",
+    ]);
+  });
+
+  it("falls back to a generic heading when the overlay has none", () => {
+    const bare = makeComponent({ k: "col", c: [{ k: "text", p: { role: "omp.login.lead", text: "Open the link." } }] });
+    expect(tspLoginAdapter.detect(bare, ctxFor())).toBe(true);
+    expect(tspLoginAdapter.read(bare, ctxFor())).toEqual({ kind: "progress", text: "Sign in\nOpen the link.", cancellable: true });
+  });
+
+  it("hands the field phase to the input adapter", () => {
+    const sheet = linkOnly();
+    sheet.state.prompt = true;
+    expect(tspLoginAdapter.read(sheet, ctxFor())).toEqual(tspInputAdapter.read(sheet, ctxFor()));
+    expect(tspLoginAdapter.read(sheet, ctxFor())).toMatchObject({ kind: "input" });
+  });
+
+  it("switches from progress to input when the field appears on the same component", () => {
+    const sheet = linkOnly();
+    expect(tspLoginAdapter.read(sheet, ctxFor())).toMatchObject({ kind: "progress" });
+    sheet.state.prompt = true;
+    expect(tspLoginAdapter.read(sheet, ctxFor())).toMatchObject({ kind: "input" });
+  });
+
+  it("cancels the link phase with the native cancel action and declines other actions", () => {
+    const sheet = linkOnly();
+    const { ctx, renders } = countingCtx();
+    expect(tspLoginAdapter.act(sheet, { type: "submit", text: "x" }, ctx)).toBe(false);
+    expect(sheet.events).toEqual([]);
+    expect(tspLoginAdapter.act(sheet, { type: "cancel" }, ctx)).toBe(true);
+    expect(sheet.events).toEqual([{ type: "action", key: "", act: "cancel", mods: [] }]);
+    expect(renders()).toBe(1);
+  });
+
+  it("acts on the field phase exactly like the input adapter", () => {
+    const sheet = linkOnly();
+    sheet.state.prompt = true;
+    const { ctx, renders } = countingCtx();
+    expect(tspLoginAdapter.act(sheet, { type: "cancel" }, ctx)).toBe(true);
+    expect(sheet.events).toEqual([{ type: "action", key: "", act: "cancel", mods: [] }]);
+    expect(tspLoginAdapter.act(sheet, { type: "submit", text: "abc" }, ctx)).toBe(true);
+    expect(sheet.events.at(-1)).toEqual({ type: "action", key: "", act: "submit", mods: [] });
+    expect(renders()).toBe(2);
+  });
+
+  it("picks tsp-login for both phases and tsp-input for a plain text prompt", () => {
+    const sheet = linkOnly();
+    expect(pickAdapter(sheet, ctxFor())?.id).toBe("tsp-login");
+    sheet.state.prompt = true;
+    expect(pickAdapter(sheet, ctxFor())?.id).toBe("tsp-login");
+    expect(pickAdapter(makeLoginDialog(), ctxFor())?.id).toBe("tsp-input");
   });
 });

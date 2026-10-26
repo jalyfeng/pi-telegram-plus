@@ -1069,3 +1069,98 @@ export const tspInputAdapter: DialogAdapter = {
     return true;
   },
 };
+
+/** Lines of the login sheet's body, by `p.role`: the lead text, the device
+ * code, the login link's URL and the local shortcut. */
+const LOGIN_BODY_ROLES = new Set(["omp.login.lead", "omp.login.code", "omp.login.url", "omp.login.shortcut"]);
+
+/** The status line OMP shows while it waits (progress, failure reason). */
+const LOGIN_STATUS_ROLE = "omp.login.status";
+
+/**
+ * Collect the plain text of a login sheet's body and status, in document
+ * order. A node counts when it, or an ancestor, carries a body role or sits
+ * under the status node; text nodes contribute their trimmed text once.
+ * Component boundaries descend like the other scans do.
+ */
+function collectLoginLines(component: object, depth: number, visited: Set<object>, lines: string[]): void {
+  if (depth > MAX_COMPONENT_DEPTH || visited.has(component)) return;
+  visited.add(component);
+  const root = describeTree(component);
+  if (!root) return;
+  visited.add(root);
+  collectLoginNode(root, depth, visited, lines, false);
+}
+
+function collectLoginNode(node: NativeNodeLike, depth: number, visited: Set<object>, lines: string[], inside: boolean): void {
+  const role = isObject(node.p) && typeof node.p.role === "string" ? node.p.role : undefined;
+  const collecting = inside || (role !== undefined && (LOGIN_BODY_ROLES.has(role) || role === LOGIN_STATUS_ROLE));
+  if (collecting && node.k === "text" && isObject(node.p)) {
+    // Each node is reached once: the loop below guards every child by `visited`.
+    const text = tspText(node.p.text).trim();
+    if (text) lines.push(text);
+  }
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  for (const child of children) {
+    if (!isObject(child)) continue;
+    const component = asComponent(child);
+    if (component) {
+      collectLoginLines(component, depth + 1, visited, lines);
+      continue;
+    }
+    if (visited.has(child)) continue;
+    visited.add(child);
+    collectLoginNode(child as NativeNodeLike, depth, visited, lines, collecting);
+  }
+}
+
+/** The login overlay's heading (`overlay` root `p.head`), or a generic one. */
+function loginHeading(component: object): string {
+  const root = describeTree(component);
+  const head = root && isObject(root.p) ? tspText(root.p.head).trim() : "";
+  return head === "" ? "Sign in" : head;
+}
+
+/**
+ * OMP's login dialog (`/login`), as one adapter for both of its phases: the
+ * "only a link, waiting for the browser" sheet (OAuth providers, and device
+ * codes before any field shows) and the sheet that also holds a text field
+ * (API keys, device-code confirmation). The field phase is delegated to
+ * {@link tspInputAdapter}; the link phase is a progress view with Cancel,
+ * built from the sheet's `omp.login.*` roles and never from its rendered text.
+ */
+export const tspLoginAdapter: DialogAdapter = {
+  id: "tsp-login",
+
+  detect(component, ctx) {
+    if (ctx.entry?.race) return false; // §4.12: the race owns a raced extension dialog.
+    if (ctx.host !== "omp") return false;
+    if (!describesLoginSheet(component)) return false;
+    return findNode(component, "picker") === undefined && findNode(component, "prefs") === undefined;
+  },
+
+  read(component, ctx) {
+    if (findPrompt(component) !== undefined) return tspInputAdapter.read(component, ctx);
+    const lines: string[] = [loginHeading(component)];
+    collectLoginLines(component, 0, new Set<object>(), lines);
+    return { kind: "progress", text: lines.join("\n"), cancellable: true };
+  },
+
+  act(component, action, ctx) {
+    if (findNode(component, "input") !== undefined) return tspInputAdapter.act(component, action, ctx);
+    if (action.type !== "cancel") return false;
+    const handle = (component as Partial<Describable>).handleNativeEvent;
+    if (typeof handle !== "function") return false;
+    try {
+      handle.call(component, { type: "action", key: "", act: "cancel", mods: [] });
+    } catch {
+      return false;
+    }
+    try {
+      ctx.requestRender();
+    } catch {
+      // A host without a live renderer has nothing to redraw; the act landed.
+    }
+    return true;
+  },
+};
