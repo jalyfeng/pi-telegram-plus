@@ -782,6 +782,82 @@ async function runHost(host, servers) {
     await clearDialog();
   }
 
+  // ── issue #17: repeated Telegram `!` commands leave the TUI input clean ─
+  // Stress repro: 12 `!ls -la` submissions from Telegram, each must return its result, and
+  // the TUI editor must be empty afterwards. A variant keeps a typed draft in the editor and
+  // checks the draft comes back unchanged after the command.
+  {
+    const stepName = "Telegram ! commands leave the TUI input clean";
+    const bangText = (call) => [call.body?.text, call.body?.rich_message?.markdown, call.body?.caption]
+      .filter((part) => typeof part === "string").join("\n");
+    const bangResultSince = async (since) => {
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        const hit = (await controlGet()).calls.slice(since).find((call) =>
+          call.direction === "out"
+          && (call.method === "sendMessage" || call.method === "editMessageText")
+          && /-rw-/.test(bangText(call).replace(/<[^>]+>/g, "")));
+        if (hit) return true;
+        await sleep(250);
+      }
+      return false;
+    };
+    const lastEditorText = () => {
+      const entries = probeEntries(probeDoc(probePath)).filter((entry) => entry.kind === "editor-text");
+      if (entries.length === 0) return undefined;
+      return entries.reduce((a, b) => (Number(b.at) > Number(a.at) ? b : a)).data?.text ?? "";
+    };
+    try {
+      writeFileSync(join(projectDir, "ptp-bang-marker.txt"), "bang marker\n");
+      await sleep(1500);
+      if (lastEditorText() === undefined) {
+        record(stepName, false, "no editor-text records from the probe");
+      } else {
+        const failedRuns = new Set();
+        const reasons = [];
+        for (let i = 1; i <= 12; i += 1) {
+          const since = await cursor();
+          await injectText("!ls -la ptp-bang-marker.txt");
+          if (!await bangResultSince(since)) {
+            failedRuns.add(i);
+            reasons.push(`#${i} no result`);
+          }
+          await sleep(1500);
+          const text = lastEditorText() ?? "";
+          if (text.trim() !== "") {
+            failedRuns.add(i);
+            reasons.push(`#${i} leftover "${text.slice(0, 60)}"`);
+          }
+          await sleep(500);
+        }
+        // Draft variant: a typed draft must come back unchanged after a Telegram `!` command.
+        tmux("send-keys", "-t", session, "-l", "mydraft");
+        await sleep(600);
+        const since = await cursor();
+        await injectText("!ls -la ptp-bang-marker.txt");
+        const resultSeen = await bangResultSince(since);
+        await sleep(1500);
+        const draft = lastEditorText() ?? "";
+        let variant;
+        if (!resultSeen) variant = "no result";
+        else if (draft === "mydraft") variant = "ok";
+        else if (draft === "") variant = "draft lost";
+        else if (draft.includes("ls -la")) variant = `leftover "${draft.slice(0, 60)}"`;
+        else variant = `draft changed "${draft.slice(0, 60)}"`;
+        tmux("send-keys", "-t", session, "C-u");
+        await sleep(500);
+        const ok = failedRuns.size === 0 && variant === "ok";
+        const summary = failedRuns.size === 0
+          ? "12/12 ok"
+          : `${12 - failedRuns.size}/12 ok; failures: ${reasons.join(", ")}`;
+        record(stepName, ok, `${summary} · draft variant: ${variant}`);
+      }
+    } catch (error) {
+      record(stepName, false, String(error?.message ?? error).slice(0, 200));
+    }
+    await clearDialog();
+  }
+
   // ── sub-agent run: OMP's `task` tool spawns a child session that loads the plugin again ─
   // Issues #13/#15: the child must not forward its own replies to Telegram, and the
   // main session's Telegram runtime (connection and /tg) must survive the child's start.

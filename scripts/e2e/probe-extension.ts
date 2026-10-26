@@ -145,9 +145,36 @@ function makeUnknownComponent(done: (value: unknown) => void): Record<string, un
   };
 }
 
+let editorTimer: ReturnType<typeof setInterval> | undefined;
+
 export default function probeExtension(pi: {
   registerCommand: (name: string, options: { description?: string; handler: (args: string, ctx: ProbeCtx) => Promise<void> }) => void;
+  on?: (event: string, handler: (event: unknown, ctx: ProbeCtx) => void) => void;
 }): void {
+  // Records what the editor holds, so E2E can tell whether a submitted command left text behind.
+  if (pi.on) {
+    pi.on("session_start", (_event: unknown, ctx: ProbeCtx) => {
+      try {
+        if (editorTimer) clearInterval(editorTimer);
+        const ui = ctx.ui as { getEditorText?: () => unknown };
+        let last: string | undefined;
+        editorTimer = setInterval(() => {
+          try {
+            const text = ui.getEditorText?.();
+            if (typeof text !== "string" || text === last) return;
+            last = text;
+            record("editor-text", { text });
+          } catch {
+            // never break the host
+          }
+        }, 150);
+        (editorTimer as { unref?: () => void }).unref?.();
+      } catch {
+        // never break the host
+      }
+    });
+  }
+
   const register = (name: string, run: (ctx: ProbeCtx) => Promise<void>): void => {
     pi.registerCommand(name, {
       description: `stage 0 probe: ${name}`,
