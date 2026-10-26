@@ -177,6 +177,25 @@ function focusedCtors(path, sinceMs) {
   return [...names];
 }
 
+/**
+ * The editor's component class: the focus class the host returns to most often
+ * (ties go to the class that appeared first). Read before a command is typed, so
+ * progress components seen mid-turn are outnumbered by the editor.
+ */
+function mostFrequentFocusCtor(events) {
+  const counts = new Map();
+  for (const event of Array.isArray(events) ? events : []) {
+    const ctor = String(event?.data?.focus?.ctor ?? "");
+    if (ctor) counts.set(ctor, (counts.get(ctor) ?? 0) + 1);
+  }
+  let best = "";
+  let bestCount = 0;
+  for (const [ctor, count] of counts) {
+    if (count > bestCount) { best = ctor; bestCount = count; }
+  }
+  return best;
+}
+
 async function waitForExtensionResult(path, name, needle, timeoutMs = 25_000) {
   const deadline = Date.now() + timeoutMs;
   let last;
@@ -855,7 +874,7 @@ async function runHost(host, servers) {
         if (!Array.isArray(focusBefore) || focusBefore.length === 0) {
           detailThree = " · TUI /tg opened no dialog (no focus events to use as a baseline)";
         } else {
-          const editorCtor = String(focusBefore.at(-1)?.data?.focus?.ctor ?? "");
+          const editorCtor = mostFrequentFocusCtor(focusBefore);
           const typedAt = Date.now();
           tmux("send-keys", "-t", session, "-l", "/tg");
           tmux("send-keys", "-t", session, "Enter");
@@ -868,13 +887,13 @@ async function runHost(host, servers) {
             else await sleep(250);
           }
           if (tuiDialog) {
-            detailThree = ` · TUI /tg opened a dialog (${tuiDialog})`;
+            detailThree = ` · editor baseline ${editorCtor} · TUI /tg opened a dialog (${tuiDialog})`;
           } else {
             const seen = [...new Set((Array.isArray(probeDoc(probePath)?.focusEvents) ? probeDoc(probePath).focusEvents : [])
               .filter((event) => Number(event?.at ?? 0) >= typedAt)
               .map((event) => String(event?.data?.focus?.ctor ?? ""))
               .filter(Boolean))];
-            detailThree = ` · TUI /tg opened no dialog (host focused: ${seen.join("/") || "nothing"})`;
+            detailThree = ` · editor baseline ${editorCtor} · TUI /tg opened no dialog (host focused: ${seen.join("/") || "nothing"})`;
           }
         }
         await clearDialog();
