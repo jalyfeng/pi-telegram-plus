@@ -24,7 +24,7 @@
  * DIALOGS_ACCEPTANCE reports the regression count (expected gaps do not count).
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { classify, loadPending } from "./pending.mjs";
@@ -271,8 +271,19 @@ async function runHost(host, servers) {
     }
     pluginArgs.push("-e", GOAL_ENTRY);
   }
+  // Browser stub: OMP's login dialog calls `open` / `xdg-open` for the sign-in URL. Put
+  // logging no-ops first on PATH so no real browser opens on this machine.
+  const stubBin = join(runDir, "bin");
+  const openLog = join(runDir, "open-calls.log");
+  mkdirSync(stubBin, { recursive: true });
+  for (const name of ["open", "xdg-open"]) {
+    const stub = join(stubBin, name);
+    writeFileSync(stub, `#!/bin/sh\necho "$@" >> "${openLog}"\nexit 0\n`);
+    chmodSync(stub, 0o755);
+  }
   const env = {
     ...process.env,
+    PATH: `${stubBin}:${process.env.PATH ?? ""}`,
     PI_CODING_AGENT_DIR: agentDir,
     PI_TELEGRAM_API_BASE: `http://127.0.0.1:${TG_PORT}`,
     PI_OFFLINE: "1",
@@ -287,7 +298,9 @@ async function runHost(host, servers) {
   };
   mkdirSync(env.TMPDIR, { recursive: true });
   const envArgs = Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
-  const command = `cd ${shq(projectDir)} && exec ${hostArgs(host, pluginArgs).map(shq).join(" ")}`;
+  // The shell that runs the command may rebuild PATH from its profile (macOS path_helper puts
+  // /usr/bin first), which would hide the stub; export it again right before the host starts.
+  const command = `cd ${shq(projectDir)} && export PATH=${shq(env.PATH)} && exec ${hostArgs(host, pluginArgs).map(shq).join(" ")}`;
   const started = tmux("new-session", "-d", "-s", session, "-x", "200", "-y", "50",
     "-c", projectDir, ...envArgs, command);
   if (started.status !== 0) {
@@ -839,6 +852,63 @@ async function runHost(host, servers) {
       }
       await clearDialog();
     }
+  }
+
+  // ── login: OMP's /login dialog shows the sign-in link in Telegram (issue #14) ─
+  // The dialog opens the URL through `open`; the stub on PATH only logs the call.
+  if (host === "omp") {
+    try {
+      const plainText = (call) => [call.body?.text, call.body?.caption, call.body?.rich_message?.markdown]
+        .filter((part) => typeof part === "string").join("\n").replace(/<[^>]+>/g, "");
+      const outboundMethods = ["sendMessage", "editMessageText"];
+      const isOpenRouter = (b) => String(b.text ?? "").trim().replace(/^▸\s*/, "").trim() === "OpenRouter";
+      const isCancel = (b) => String(b.text ?? "").trim() === "Cancel";
+
+      const since = await cursor();
+      await injectText("/login");
+      const listCall = await waitFor("sign-in list with OpenRouter", (state) =>
+        state.calls.slice(since).findLast((entry) => buttonsOf(entry).some(isOpenRouter)) ?? false,
+      { timeoutMs: 30_000 }).catch(() => undefined);
+      if (!listCall) {
+        const seen = (await controlGet()).calls.slice(since)
+          .flatMap((c) => buttonsOf(c).map((b) => String(b.text ?? "")));
+        throw new Error(`no OpenRouter in the sign-in list; buttons seen: ${seen.join(" / ").slice(0, 200)}`);
+      }
+      const since2 = await cursor();
+      await clickButton(buttonsOf(listCall).find(isOpenRouter), listCall.body?.message_id ?? listCall.message_id);
+
+      const linkCall = await waitFor("sign-in link in Telegram output", (state) =>
+        state.calls.slice(since2).findLast((entry) =>
+          outboundMethods.includes(entry.method) && /https?:\/\/\S+/.test(plainText(entry))) ?? false,
+      { timeoutMs: 30_000 }).catch(() => undefined);
+      if (!linkCall) {
+        const lastOut = (await controlGet()).calls.slice(since2)
+          .filter((c) => outboundMethods.includes(c.method)).map(plainText).pop() ?? "none";
+        throw new Error(`no sign-in link sent to Telegram; last outbound text: ${lastOut.slice(0, 200)}`);
+      }
+      const linkText = plainText(linkCall);
+      const url = linkText.match(/https?:\/\/\S+/)[0];
+      const hasBrowser = /browser/i.test(linkText);
+
+      const openLogPath = join(runDir, "open-calls.log");
+      const openedLog = existsSync(openLogPath) ? readFileSync(openLogPath, "utf8") : "";
+      const stubDetail = openedLog.includes("https://")
+        ? `host tried to open the browser (caught by the stub): ${openedLog.match(/https?:\/\/\S+/)[0].slice(0, 80)}`
+        : "no open() call recorded";
+
+      const dialogCall = await waitFor("sign-in dialog with Cancel", (state) =>
+        state.calls.slice(since2).findLast((entry) => buttonsOf(entry).some(isCancel)) ?? false,
+      { timeoutMs: 15_000 }).catch(() => undefined);
+      if (!dialogCall) throw new Error("no Cancel button left on the sign-in dialog");
+      await clickButton(buttonsOf(dialogCall).find(isCancel), dialogCall.body?.message_id ?? dialogCall.message_id);
+      await sleep(1500);
+
+      record("login sign-in link is shown in Telegram", hasBrowser,
+        `link ${url.slice(0, 80)} · "browser" ${hasBrowser ? "present" : "missing"} · ${stubDetail}`);
+    } catch (error) {
+      record("login sign-in link is shown in Telegram", false, String(error.message).slice(0, 200));
+    }
+    await clearDialog();
   }
 
   // ── pi-goal dialogs (extension `custom`, the /goals parity case) ───────
