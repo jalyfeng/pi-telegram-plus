@@ -769,15 +769,18 @@ async function runHost(host, servers) {
         const since = await cursor();
         const providerBefore = providerEntries().length;
         await injectText("please run the probe TASK_TOOL_PROBE");
-        // OMP's write mode asks before `task`: answer the plain "Approve" from Telegram
-        // (not "Approve task for this session"), as the approval step does for exec.
-        const isPlainApprove = (text) => text.trim().startsWith("Approve") && !text.includes("for this session");
+        // OMP's write mode asks before `task`: answer "Allow once" from Telegram (not
+        // "Approve task for this session"), the same allow button the exec approval uses.
+        const isAllowOnce = (b) => String(b.text ?? "").trim() === "Allow once";
         const approvalCall = await waitFor("task approval keyboard", (state) =>
-          state.calls.slice(since).findLast((entry) =>
-            buttonsOf(entry).some((b) => isPlainApprove(String(b.text ?? "")))) ?? false, { timeoutMs: 30_000 })
-          .catch(() => undefined);
-        if (!approvalCall) throw new Error("no task approval keyboard offered");
-        const approve = buttonsOf(approvalCall).find((b) => isPlainApprove(String(b.text ?? "")));
+          state.calls.slice(since).findLast((entry) => buttonsOf(entry).some(isAllowOnce)) ?? false,
+        { timeoutMs: 30_000 }).catch(() => undefined);
+        if (!approvalCall) {
+          const seen = (await controlGet()).calls.slice(since)
+            .flatMap((c) => buttonsOf(c).map((b) => String(b.text ?? "")));
+          throw new Error(`no task approval keyboard offered; buttons seen: ${seen.join(" / ")}`.slice(0, 200));
+        }
+        const approve = buttonsOf(approvalCall).find(isAllowOnce);
         const approvalText = String(approve.text ?? "");
         const approvalMessageId = approvalCall.body?.message_id ?? approvalCall.message_id;
         if (!await clickButton(approve, approvalMessageId)) {
