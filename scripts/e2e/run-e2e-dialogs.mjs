@@ -807,6 +807,17 @@ async function runHost(host, servers) {
       if (entries.length === 0) return undefined;
       return entries.reduce((a, b) => (Number(b.at) > Number(a.at) ? b : a)).data?.text ?? "";
     };
+    // The origin scope ends only after 1500 ms of quiet plus a 250 ms tick, and the draft is
+    // written back at that end, so poll the editor (250 ms steps, 6 s cap) instead of sleeping.
+    const waitEditorText = async (isExpected) => {
+      const deadline = Date.now() + 6_000;
+      let text = lastEditorText() ?? "";
+      while (!isExpected(text) && Date.now() < deadline) {
+        await sleep(250);
+        text = lastEditorText() ?? "";
+      }
+      return text;
+    };
     try {
       writeFileSync(join(projectDir, "ptp-bang-marker.txt"), "bang marker\n");
       await sleep(1500);
@@ -822,8 +833,7 @@ async function runHost(host, servers) {
             failedRuns.add(i);
             reasons.push(`#${i} no result`);
           }
-          await sleep(1500);
-          const text = lastEditorText() ?? "";
+          const text = await waitEditorText((t) => t.trim() === "");
           if (text.trim() !== "") {
             failedRuns.add(i);
             reasons.push(`#${i} leftover "${text.slice(0, 60)}"`);
@@ -836,8 +846,7 @@ async function runHost(host, servers) {
         const since = await cursor();
         await injectText("!ls -la ptp-bang-marker.txt");
         const resultSeen = await bangResultSince(since);
-        await sleep(1500);
-        const draft = lastEditorText() ?? "";
+        const draft = await waitEditorText((t) => t === "mydraft");
         let variant;
         if (!resultSeen) variant = "no result";
         else if (draft === "mydraft") variant = "ok";

@@ -175,8 +175,11 @@ export class OriginTracker {
       originLog.debug("draft kept (local edit)", { id: scope.id, reason });
       return;
     }
+    // The editor still holds the command text (or nothing): put back the draft
+    // as it was before submit, including an empty one — an empty draft means
+    // the input must end up empty, not keep the command text.
     if (current.trim().length === 0 || current === scope.commandText) {
-      if (scope.draft.length > 0) this.deps.writeDraft(scope.draft);
+      this.deps.writeDraft(scope.draft);
     }
   }
 }
