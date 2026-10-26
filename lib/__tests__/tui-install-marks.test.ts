@@ -172,3 +172,45 @@ describe("long-running sessions", () => {
     expect(pushes()).toBe(1);
   });
 });
+
+/**
+ * Pi hands one dialog function to two objects: the tool UI context and the
+ * mode. Both expose `select` as the same function, so the second object must
+ * not wrap it again (H24).
+ */
+function piHost(): { toolUi: Host; mode: Host; answer: object; calls: () => number } {
+  const answer = { answered: "a" };
+  let calls = 0;
+  const shared = async () => {
+    calls += 1;
+    return answer;
+  };
+  return { toolUi: { select: shared }, mode: { select: shared }, answer, calls: () => calls };
+}
+
+const PI_ARGS = (): unknown[] => ["Pick", ["alpha"], { signal: new AbortController().signal }];
+
+describe("pi-style host shares one dialog function between two objects", () => {
+  it("wraps the shared function once, so both objects push one entry", async () => {
+    const { toolUi, mode, answer, calls } = piHost();
+    const { sink, pushes } = countingSink();
+    for (const target of [toolUi, mode]) {
+      hookEntryMethods(target, UI_CONTEXT_SPECS, sink, "pi");
+      installRace(target, "select");
+    }
+
+    await expect((toolUi.select as Dialog)(...PI_ARGS())).resolves.toBe(answer);
+    await expect((mode.select as Dialog)(...PI_ARGS())).resolves.toBe(answer);
+    expect(calls()).toBe(2);
+    expect(pushes()).toBe(1);
+  });
+
+  it("still races a dialog whose object already carries our entry wrapper", () => {
+    const { toolUi } = piHost();
+    const { sink } = countingSink();
+    hookEntryMethods(toolUi, UI_CONTEXT_SPECS, sink, "pi");
+
+    expect(installRace(toolUi, "select")).toBe(true);
+    expect((toolUi.select as { name: string }).name).toBe("ptp-race:select");
+  });
+});

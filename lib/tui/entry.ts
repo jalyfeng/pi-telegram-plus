@@ -16,7 +16,7 @@
  * nested call merges into the pending entry, so double layers stay one entry.
  */
 import type { EntryInfo } from "./model.ts";
-import { isMarked, mark } from "./install-marks.ts";
+import { isFunctionMarked, isMarked, mark, markFunction } from "./install-marks.ts";
 
 /** A recorded entry, returned so the hook that pushed it retires its own record. */
 export type EntryToken = object;
@@ -221,6 +221,12 @@ export function hookEntryMethods(
     const original = target[spec.method];
     if (typeof original !== "function") continue;
     if (isMarked(target, `entry:${spec.method}`)) continue;
+    // Pi hands the same dialog function to two objects as their own property:
+    // the function already wrapped through one of them must not be wrapped
+    // again (H24). An inherited method is shared by every instance of the class
+    // by design, so it says nothing about the other object.
+    const ownMethod = Object.prototype.hasOwnProperty.call(target, spec.method);
+    if (ownMethod && isFunctionMarked(original)) continue;
     const call = original as (...args: unknown[]) => unknown;
     const wrapped = spec.factory
       ? function patchedCustom(this: unknown, ...args: unknown[]): unknown {
@@ -268,6 +274,8 @@ export function hookEntryMethods(
     try {
       target[spec.method] = wrapped;
       mark(target, `entry:${spec.method}`);
+      markFunction(original);
+      markFunction(wrapped);
       hooked.push(spec.method);
     } catch {
       // Frozen host object: the SnapshotAdapter still covers this dialog.

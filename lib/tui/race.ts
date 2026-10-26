@@ -14,7 +14,7 @@
  * attach it to the entry the very same call pushes.
  */
 
-import { isMarked, mark } from "./install-marks.ts";
+import { isFunctionRaced, isMarked, mark, markFunction, markFunctionRaced } from "./install-marks.ts";
 
 export type RaceHandle = {
   /** Answer from Telegram: the first call settles the race with `value`, aborts the host dialog and returns true; later calls return false. */
@@ -59,7 +59,7 @@ export function installRace(
 ): boolean {
   const current = target[method];
   if (typeof current !== "function") return false;
-  if (isMarked(target, `race:${method}`)) return false;
+  if (isMarked(target, `race:${method}`) || isFunctionRaced(current)) return false;
   const call = current as (...args: unknown[]) => unknown;
   const wrapped = function ptpRace(this: unknown, ...args: unknown[]): unknown {
     const controller = new AbortController();
@@ -111,5 +111,8 @@ export function installRace(
     return false;
   }
   mark(target, `race:${method}`);
+  markFunctionRaced(wrapped);
+  markFunction(current);
+  markFunction(wrapped);
   return true;
 }
