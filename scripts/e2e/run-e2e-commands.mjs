@@ -1062,6 +1062,59 @@ async function runHost(host, label, phase = "main") {
     }
     await settle();
 
+    // H20: observe what Delete does in the /resume picker on Telegram. The
+    // picker above was closed by settle(), so it is opened again. The only
+    // assertion is that no session file disappears without a confirmation;
+    // the reply text and buttons are recorded as observations.
+    try {
+      const sessionsDir = join(runDir, "agent", "sessions");
+      const countSessionFiles = () => {
+        try {
+          return readdirSync(sessionsDir, { recursive: true, encoding: "utf8" })
+            .filter((name) => String(name).endsWith(".jsonl")).length;
+        } catch {
+          return 0;
+        }
+      };
+      const pickerSince = await cursor();
+      await dispatch("/resume", { timeoutMs: 30_000 });
+      const picker = await waitFor("/resume picker for delete", (state) =>
+        state.calls.slice(pickerSince).findLast((c) => !wasRejected(c) && Array.isArray(rowsOf(c))) ?? false, 30_000);
+      const deleteButton = buttonsOf(picker).find((b) => /delete/i.test(String(b.text ?? "")));
+      const stepName = "omp /resume delete asks for confirmation";
+      if (!deleteButton) {
+        record(stepName, true,
+          `no Delete action offered: ${buttonsOf(picker).map((b) => String(b.text ?? "")).join(" / ").slice(0, 200)}`);
+      } else {
+        const messageId = picker.body?.message_id ?? picker.message_id;
+        const before = countSessionFiles();
+        // Raw callback instead of click(): click() throws when no follow-up
+        // message comes, and a silent Delete is exactly what must be observed.
+        const clickSince = await cursor();
+        const callbackId = await injectCallback(String(deleteButton.callback_data), messageId);
+        await waitFor("Delete callback answered", (state) =>
+          state.calls.some((c) => c.method === "answerCallbackQuery" && c.body?.callback_query_id === callbackId), STEP_TIMEOUT_MS);
+        await sleep(4000);
+        const afterClick = await controlGet();
+        const reply = afterClick.calls.slice(clickSince).findLast((c) =>
+          !wasRejected(c) && (c.method === "sendMessage" || c.method === "editMessageText") && c.body
+          && (typeof c.body.text === "string" || Array.isArray(c.body.reply_markup?.inline_keyboard)));
+        const replyText = String(reply?.body?.text ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+        const replyButtons = buttonsOf(reply).map((b) => String(b.text ?? "")).join(" / ").slice(0, 160);
+        const after = countSessionFiles();
+        const observed = `text: "${replyText.slice(0, 160)}" · buttons: ${replyButtons || "(none)"} · has Delete: ${replyText.includes("Delete")} · has "removes the session file": ${replyText.includes("removes the session file")}`;
+        record(stepName, after === before,
+          after === before ? observed : `a session file was deleted without any confirmation (${before} -> ${after})`);
+
+        // Close the dialog without touching a session row or a confirm button.
+        const cancel = buttonsOf(reply).find((b) => /^Cancel$/.test(String(b.text ?? "")) || DIALOG_CANCEL.test(String(b.callback_data ?? "")));
+        if (cancel && reply) await click(cancel, reply.body?.message_id ?? reply.message_id).catch(() => undefined);
+      }
+    } catch (error) {
+      record("omp /resume delete asks for confirmation", false, String(error.message).slice(0, 200));
+    }
+    await settle();
+
     // Z3/Z3b: text typed while the settings page is open is its search term;
     // the keyboard refreshes to the filtered rows.
     try {
