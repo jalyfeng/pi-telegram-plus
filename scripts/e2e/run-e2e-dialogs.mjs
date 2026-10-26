@@ -999,22 +999,39 @@ async function runHost(host, servers) {
       // the second is refused with "already running" on its own message, and the editor stays clean.
       variantResults.push(await runVariant("V2", async () => {
         const since = await cursor();
-        await injectText("!ls -la ptp-bang-a.txt");
-        await injectText("!ls -la ptp-bang-b.txt");
+        // Known inbound message ids, so the refusal can be matched by its reply target.
+        const aId = 7_000_000 + Math.floor(Math.random() * 1e6);
+        const bId = aId + 1;
+        await injectText("!ls -la ptp-bang-a.txt", aId);
+        await injectText("!ls -la ptp-bang-b.txt", bId);
         const a = await waitAck(since, "!ls -la ptp-bang-a.txt",
           (text) => text.includes("ptp-bang-a.txt") && /-rw-/.test(text));
-        const b = await waitAck(since, "!ls -la ptp-bang-b.txt",
-          (text) => /already running/i.test(text) || /-rw-/.test(text));
+        // b is refused by a reply to b's own message (reply_parameters.message_id, see lib/telegram-api.ts).
+        const replyTargetOf = (call) => call.body?.reply_parameters?.message_id ?? call.body?.reply_to_message_id;
+        let refusal;
+        const refusalDeadline = Date.now() + 30_000;
+        while (!refusal && Date.now() < refusalDeadline) {
+          refusal = (await controlGet()).calls.slice(since).find((call) =>
+            call.direction === "out" && call.method === "sendMessage" && Number(replyTargetOf(call)) === bId);
+          if (!refusal) await sleep(250);
+        }
+        const refusalText = refusal ? plainOf(refusal) : "";
+        const bSubmitted = await ackMessageId(since, "!ls -la ptp-bang-b.txt") !== undefined;
+        const bOk = Boolean(refusal) && /already running/i.test(refusalText) && !/-rw-/.test(refusalText) && !bSubmitted;
         const editor = await waitEditor((text) => !text.includes("ptp-bang-b.txt"));
         const aOk = a.ok;
-        const bOk = /already running/i.test(b.text) && !/-rw-/.test(b.text);
         const editorOk = !editor.includes("ptp-bang-b.txt");
         const problems = [];
         if (!aOk) problems.push(`a bad (${a.id === undefined ? "no ack" : `"${a.text.slice(0, 100)}"`})`);
-        if (!bOk) problems.push(`b bad ${b.id === undefined ? "(no ack)" : `("${b.text.slice(0, 100)}")`}`);
+        if (!bOk) {
+          const why = !refusal ? "no refusal reply to b"
+            : bSubmitted ? "b was submitted (ack shown)"
+            : `refusal text "${refusalText.slice(0, 100)}"`;
+          problems.push(`b bad (${why})`);
+        }
         if (!editorOk) problems.push(`editor leftover "${editor.slice(0, 100)}"`);
         if (problems.length > 0) return { ok: false, text: `V2: ${problems.join("; ")}` };
-        return { ok: true, text: "V2: a ok, b rejected (already running), editor clean" };
+        return { ok: true, text: `V2: a ok, b refused ("${refusalText.slice(0, 60)}")` };
       }));
 
       // V3 long output: 400 lines must arrive as text lines or as a document.
