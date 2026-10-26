@@ -127,10 +127,17 @@ reimplementation and several settings, so read **Breaking changes** before upgra
   the link appears for API-key providers such as DeepSeek, each with a Cancel button. The key you paste is
   passed to the host, never echoed back, and your message with it is deleted from the chat. Before, the
   dialog was filed under "progress" and never reached Telegram at all.
-- **A Telegram `!` command no longer leaves its text in the terminal's input box.** The plugin types the
-  command into the host editor to run it and puts back what was there before; when the input was empty,
-  the command text was left behind. Your own draft is still restored, and text you type while the
-  command runs is kept (#17).
+- **Telegram `!` commands always report their result, and no longer leave their text in the terminal's
+  input box** (#17).
+  - A `!` sent while the agent was replying ran in the host, but the host parks its output in the
+    pending area until the next prompt, where the plugin did not look, so the result never reached
+    Telegram. The plugin now picks it up there and sends it as soon as the command finishes.
+  - A second `!` sent while the first was still running was refused by the host, and the first command's
+    output ended up on the second command's message. Like the terminal, the plugin now refuses it up front
+    with "A bash command is already running. Wait for it to finish, or send /stop to cancel it.", and the
+    first command keeps its own result.
+  - When the input box was empty before the command, the command text was left in it afterwards. The
+    previous input is now restored either way; text you type while the command runs is kept.
 - **`sendChatAction` honors a custom Bot API endpoint** (`apiBase` / `PI_TELEGRAM_API_BASE`). The typing
   indicator was always sent to the public endpoint. Thanks to BotoVed (#12).
 - Several dialog, focus and output-capture fixes found by the end-to-end suites on both hosts.
