@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hookMethod } from "../tui/host.ts";
 import { installRace } from "../tui/race.ts";
-import { hookEntryMethods, UI_CONTEXT_SPECS } from "../tui/entry.ts";
+import { hookEntryMethods, PI_ENTRY_SPECS, UI_CONTEXT_SPECS } from "../tui/entry.ts";
 import { hasStickyMark, isMarked, mark } from "../tui/install-marks.ts";
 import type { EntrySink } from "../tui/entry.ts";
 
@@ -144,8 +144,8 @@ function asyncProxiedHost(): { target: Host; answer: object } {
 }
 
 /** One per-tick attach, as `FocusTracker.attachEntryHooks` does it. */
-function attachOnce(target: Host, sink: EntrySink): void {
-  hookEntryMethods(target, UI_CONTEXT_SPECS, sink, "omp");
+function attachOnce(target: Host, sink: EntrySink, scope?: object): void {
+  hookEntryMethods(target, UI_CONTEXT_SPECS, sink, "omp", scope);
   for (const method of RACED_METHODS) installRace(target, method);
 }
 
@@ -275,5 +275,57 @@ describe("sticky marks: a mark is trusted only while the host reads the method u
     attach();
     expect((ui.select as { name: string }).name).toBe("ptp-race:select");
     expect(callPushes()).toBe(1);
+  });
+});
+
+/**
+ * Pi rebuilds its runtime on `/new` and `/reload`: a new FocusTracker (a new
+ * scope) hooks the same mode object again. The new scope must push into its
+ * own sink, and repeated attaches within one scope must not stack (H26).
+ */
+describe("entry hooks are scoped to one FocusTracker instance", () => {
+  function piMode(): { mode: Host; calls: () => number } {
+    let calls = 0;
+    const proto = { showExtensionInput: async () => { calls += 1; return "x"; } };
+    return { mode: Object.create(proto) as Host, calls: () => calls };
+  }
+  const INPUT_ARGS = (): unknown[] => ["Bot name", "unique label"];
+
+  it("reports to the new scope's sink after a runtime rebuild (pi)", async () => {
+    const { mode } = piMode();
+    const sinkA = countingSink();
+    const sinkB = countingSink();
+    const scopeA = {};
+    const scopeB = {};
+
+    hookEntryMethods(mode, PI_ENTRY_SPECS, sinkA.sink, "pi", scopeA);
+    hookEntryMethods(mode, PI_ENTRY_SPECS, sinkB.sink, "pi", scopeB);
+
+    await (mode.showExtensionInput as Dialog)(...INPUT_ARGS());
+    expect(sinkA.pushes()).toBe(1);
+    expect(sinkB.pushes()).toBe(1);
+  });
+
+  it("does not stack wrappers when one scope attaches again (pi)", async () => {
+    const { mode } = piMode();
+    const sinkB = countingSink();
+    const scopeB = {};
+
+    hookEntryMethods(mode, PI_ENTRY_SPECS, sinkB.sink, "pi", scopeB);
+    for (let i = 0; i < 10; i += 1) hookEntryMethods(mode, PI_ENTRY_SPECS, sinkB.sink, "pi", scopeB);
+
+    await (mode.showExtensionInput as Dialog)(...INPUT_ARGS());
+    expect(sinkB.pushes()).toBe(1);
+  });
+
+  it("answers askDialog after 12000 attaches in one scope (omp)", async () => {
+    const { target, answer } = asyncProxiedHost();
+    const { sink, pushes } = countingSink();
+    const scope = {};
+
+    for (let i = 0; i < 12000; i += 1) attachOnce(target, sink, scope);
+
+    await expect((target.askDialog as Dialog)(QUESTIONS, {})).resolves.toBe(answer);
+    expect(pushes()).toBe(1);
   });
 });

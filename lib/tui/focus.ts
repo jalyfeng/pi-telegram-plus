@@ -319,12 +319,12 @@ export class FocusTracker {
       bind: (component, info) => this.bindEntry(component, info),
     };
     const ui = state.ui;
-    if (ui) hookEntryMethods(ui, UI_CONTEXT_SPECS, sink, state.host === "omp" ? "omp" : "pi");
+    if (ui) hookEntryMethods(ui, UI_CONTEXT_SPECS, sink, state.host === "omp" ? "omp" : "pi", this);
     const runner = (state.session as Record<string, unknown> | undefined)?.extensionRunner as
       | { getUIContext?: () => unknown }
       | undefined;
     const toolUi = this.readUiContext(runner);
-    if (toolUi && toolUi !== ui) hookEntryMethods(toolUi, UI_CONTEXT_SPECS, sink, state.host === "omp" ? "omp" : "pi");
+    if (toolUi && toolUi !== ui) hookEntryMethods(toolUi, UI_CONTEXT_SPECS, sink, state.host === "omp" ? "omp" : "pi", this);
     // The race wrapper goes on outside the entry wrapper: it registers its
     // handle before that wrapper pushes, so the entry above can take it (§4.12).
     // `confirm` and `input` are wrapped too: pi's `confirm` draws through the
@@ -340,9 +340,9 @@ export class FocusTracker {
       ? ["select", "confirm", "input", "editor", "approve", "askDialog"] as const
       : ["select", "confirm", "input"] as const;
     if (toolUi) for (const method of racedMethods) installRace(toolUi, method);
-    if (state.host === "omp") hookEntryMethods(state.mode, OMP_ENTRY_SPECS, sink, "omp");
+    if (state.host === "omp") hookEntryMethods(state.mode, OMP_ENTRY_SPECS, sink, "omp", this);
     if (state.host === "pi" && state.mode) {
-      hookEntryMethods(state.mode, PI_ENTRY_SPECS, sink, "pi");
+      hookEntryMethods(state.mode, PI_ENTRY_SPECS, sink, "pi", this);
       this.hookPiDialogStack(state.mode);
     }
   }

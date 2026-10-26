@@ -214,19 +214,20 @@ export function hookEntryMethods(
   specs: EntrySpec[],
   sink: EntrySink,
   source: "pi" | "omp",
+  scope?: object,
 ): string[] {
   if (!target) return [];
   const hooked: string[] = [];
   for (const spec of specs) {
     const original = target[spec.method];
     if (typeof original !== "function") continue;
-    if (hasStickyMark(target, spec.method, `entry:${spec.method}`)) continue;
+    if (hasStickyMark(target, spec.method, `entry:${spec.method}`, scope)) continue;
     // Pi hands the same dialog function to two objects as their own property:
     // the function already wrapped through one of them must not be wrapped
     // again (H24). An inherited method is shared by every instance of the class
     // by design, so it says nothing about the other object.
     const ownMethod = Object.prototype.hasOwnProperty.call(target, spec.method);
-    if (ownMethod && isFunctionMarked(original)) continue;
+    if (ownMethod && isFunctionMarked(original, scope)) continue;
     const call = original as (...args: unknown[]) => unknown;
     const wrapped = spec.factory
       ? function patchedCustom(this: unknown, ...args: unknown[]): unknown {
@@ -273,9 +274,9 @@ export function hookEntryMethods(
     Object.defineProperty(wrapped, "name", { value: `ptp:${spec.method}` });
     try {
       target[spec.method] = wrapped;
-      mark(target, `entry:${spec.method}`);
-      markFunction(original);
-      markFunction(wrapped);
+      mark(target, `entry:${spec.method}`, scope);
+      markFunction(original, scope);
+      markFunction(wrapped, scope);
       hooked.push(spec.method);
     } catch {
       // Frozen host object: the SnapshotAdapter still covers this dialog.

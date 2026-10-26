@@ -34,6 +34,18 @@ type FunctionMarks = {
 
 const MARKS_KEY = Symbol.for("pi-telegram-plus.install-marks");
 const FUNCTION_MARKS_KEY = Symbol.for("pi-telegram-plus.install-marks.functions");
+const SCOPED_MARKS_KEY = Symbol.for("pi-telegram-plus.install-marks.scoped");
+
+/**
+ * Marks kept for one scope (a FocusTracker instance, see H26). A scope is a
+ * lifetime: when pi's `/new` or `/reload` builds a new tracker, the new one
+ * must wrap the host again so its sink gets the entries, and it must not see
+ * the marks the old tracker left behind.
+ */
+type ScopedMarks = {
+  objects: InstallMarks;
+  tagged: WeakSet<object>;
+};
 
 function marks(): InstallMarks {
   const holder = globalThis as unknown as Record<symbol, InstallMarks | undefined>;
@@ -55,9 +67,35 @@ function functionMarks(): FunctionMarks {
   return table;
 }
 
+/** The marks of one scope, created on first use. */
+function scopedMarks(scope: object): ScopedMarks {
+  const holder = globalThis as unknown as Record<symbol, WeakMap<object, ScopedMarks> | undefined>;
+  let byScope = holder[SCOPED_MARKS_KEY];
+  if (!byScope) {
+    byScope = new WeakMap<object, ScopedMarks>();
+    holder[SCOPED_MARKS_KEY] = byScope;
+  }
+  let entry = byScope.get(scope);
+  if (!entry) {
+    entry = { objects: new WeakMap<object, Set<string>>(), tagged: new WeakSet<object>() };
+    byScope.set(scope, entry);
+  }
+  return entry;
+}
+
+/** Object marks for `scope`, or the process-wide ones when no scope is given. */
+function objectMarks(scope?: object): InstallMarks {
+  return scope ? scopedMarks(scope).objects : marks();
+}
+
+/** Entry-hook function marks for `scope`, or the process-wide ones when no scope is given. */
+function entryTagged(scope?: object): WeakSet<object> {
+  return scope ? scopedMarks(scope).tagged : functionMarks().tagged;
+}
+
 /** Whether `target` already carries the mark `key`. */
-export function isMarked(target: object, key: string): boolean {
-  return marks().get(target)?.has(key) ?? false;
+export function isMarked(target: object, key: string, scope?: object): boolean {
+  return objectMarks(scope).get(target)?.has(key) ?? false;
 }
 
 /**
@@ -71,8 +109,8 @@ export function isMarked(target: object, key: string): boolean {
  * the same value) makes the mark ignored and the caller falls back to function
  * identity. A read that throws counts as stable.
  */
-export function hasStickyMark(target: object, method: string, key: string): boolean {
-  if (!isMarked(target, key)) return false;
+export function hasStickyMark(target: object, method: string, key: string, scope?: object): boolean {
+  if (!isMarked(target, key, scope)) return false;
   try {
     const record = target as Record<string, unknown>;
     const first = record[method];
@@ -84,8 +122,8 @@ export function hasStickyMark(target: object, method: string, key: string): bool
 }
 
 /** Record that `target` now carries the mark `key`. */
-export function mark(target: object, key: string): void {
-  const table = marks();
+export function mark(target: object, key: string, scope?: object): void {
+  const table = objectMarks(scope);
   let keys = table.get(target);
   if (!keys) {
     keys = new Set<string>();
@@ -95,13 +133,13 @@ export function mark(target: object, key: string): void {
 }
 
 /** Whether an entry hook or a race wrapper has already touched this function. */
-export function isFunctionMarked(fn: object): boolean {
-  return functionMarks().tagged.has(fn);
+export function isFunctionMarked(fn: object, scope?: object): boolean {
+  return entryTagged(scope).has(fn);
 }
 
 /** Record that this function is now touched by an entry hook or a race wrapper. */
-export function markFunction(fn: object): void {
-  functionMarks().tagged.add(fn);
+export function markFunction(fn: object, scope?: object): void {
+  entryTagged(scope).add(fn);
 }
 
 /** Whether this function is a race wrapper, or was already raced. */
