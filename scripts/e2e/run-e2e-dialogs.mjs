@@ -334,11 +334,13 @@ async function runHost(host, servers) {
     await sleep(600);
   };
   const cursor = async () => (await controlGet()).calls.length;
-  const injectText = (text) => controlPost("/_control/inject", {
+  // Returns the injected message's id too (the mock's inject reply has no id), so a step can
+  // later match the bot's deleteMessage for exactly that message.
+  const injectText = (text, messageId = 8000 + Math.floor(Math.random() * 1e6)) => controlPost("/_control/inject", {
     updates: [{
       update_id: injectedUpdateId(),
       message: {
-        message_id: 8000 + Math.floor(Math.random() * 1e6),
+        message_id: messageId,
         date: Math.floor(Date.now() / 1000),
         chat: { id: 42, type: "private" },
         from: { id: 42, is_bot: false, first_name: "E2E" },
@@ -960,6 +962,49 @@ async function runHost(host, servers) {
       return since2;
     };
 
+    // Types a fake key into the open secret prompt and checks three things: (A) the host took
+    // it, (B) Telegram never got the key back, (C) the user's message with the key was deleted.
+    // The key is fake and only reaches the isolated test agent dir. Returns the detail text.
+    const submitTestKey = async () => {
+      const KEY = "sk-e2e-fake-0123456789";
+      const HINT = "(⎋ to cancel, ⏎ to submit)";
+      const before = paneText();
+      if (before.includes("sk-e2e-fake")) throw new Error("the fake key was already on screen before the submit");
+      const hintBefore = before.includes(HINT);
+      const since3 = await cursor();
+      const keyMessageId = 8000 + Math.floor(Math.random() * 1e6);
+      await injectText(KEY, keyMessageId);
+
+      // (A) Polls the tmux screen for 20 seconds. "Moved on" only counts when the prompt hint
+      // was on screen before the submit; otherwise that check would pass trivially.
+      let evidence;
+      const deadline = Date.now() + 20_000;
+      while (!evidence && Date.now() < deadline) {
+        const pane = paneText();
+        if (pane.includes("sk-e2e-fake")) evidence = "key echoed in the terminal";
+        else if (hintBefore && !pane.includes(HINT)) evidence = "input prompt left the screen";
+        else await sleep(250);
+      }
+      if (!evidence) {
+        const last = paneText().split("\n").filter((line) => line.trim()).slice(-6);
+        throw new Error(`host never showed the submitted key or moved on; last screen: ${last.join(" | ")}`);
+      }
+
+      // (C) Waits for the bot to delete exactly the injected message (chat 42, its message id).
+      const deletion = await waitFor("deleteMessage for the key message", (state) =>
+        state.calls.slice(since3).findLast((c) => c.direction === "out" && c.method === "deleteMessage"
+          && Number(c.body?.chat_id) === 42 && Number(c.body?.message_id) === keyMessageId) ?? false,
+      { timeoutMs: 15_000 }).catch(() => undefined);
+
+      // (B) Every outbound call since the injection, serialized, must lack the key. Inject
+      // entries are skipped: they are the test's own input, not Telegram traffic.
+      const outbound = (await controlGet()).calls.slice(since3).filter((c) => c.direction === "out");
+      const echoed = outbound.filter((c) => JSON.stringify(c.body ?? {}).includes("sk-e2e-fake")).length;
+      if (echoed > 0) throw new Error(`key echoed to Telegram in ${echoed} call(s)`);
+      if (!deletion) throw new Error(`user message ${keyMessageId} with the key was not deleted`);
+      return `host saw it (${evidence}), no echo to Telegram, user message deleted (deleteMessage ${keyMessageId} in chat 42)`;
+    };
+
     // One sign-in: pick the provider, then check the link message, the Cancel button, and
     // the stub log. Always closes the dialog and waits for it to go away before returning.
     const runLoginSignIn = async ({ name, label, matches, search, wordPattern, wordLabel, apiKeyPrompt }) => {
@@ -1008,7 +1053,23 @@ async function runHost(host, servers) {
           { timeoutMs: 15_000 }).catch(() => undefined);
           if (!dialogCall) throw new Error("no Cancel button left on the sign-in dialog");
         }
-        await clickButton(buttonsOf(dialogCall).find(isCancel), dialogCall.body?.message_id ?? dialogCall.message_id);
+        // API-key providers: the key submit runs whether or not earlier checks passed; its
+        // failure is recorded, and Cancel still runs afterwards.
+        let submitDetail = "";
+        let submitFailure;
+        let promptClosed = false;
+        if (apiKeyPrompt) {
+          try {
+            submitDetail = await submitTestKey();
+          } catch (error) {
+            submitFailure = String(error.message);
+          }
+          // A submit that already closed the prompt withdraws its keyboard; then Cancel has nothing to press.
+          promptClosed = Boolean(await keyboardGone(dialogCall.message_id ?? dialogCall.body?.message_id, 5_000));
+        }
+        if (!promptClosed) {
+          await clickButton(buttonsOf(dialogCall).find(isCancel), dialogCall.body?.message_id ?? dialogCall.message_id);
+        }
         await sleep(1500);
 
         // Read after Cancel: the stub's open() call can land after the link message.
@@ -1017,9 +1078,12 @@ async function runHost(host, servers) {
         const stubDetail = openedLog.includes("https://")
           ? `host tried to open the browser (caught by the stub): ${openedLog.match(/https?:\/\/\S+/)[0].slice(0, 80)}`
           : "no open() call recorded";
+        const submitNote = submitFailure !== undefined ? ` · key submit FAILED: ${submitFailure}`
+          : submitDetail ? ` · key submit: ${submitDetail}${promptClosed ? " · prompt closed by the submit, Cancel not clicked" : ""}`
+            : "";
 
-        record(name, hasWord,
-          `link ${url.slice(0, 80)} · "${wordLabel}" ${hasWord ? "present" : "missing"} · ${promptDetail}${keyPromptDetail} · ${stubDetail}`);
+        record(name, hasWord && submitFailure === undefined,
+          `link ${url.slice(0, 80)} · "${wordLabel}" ${hasWord ? "present" : "missing"} · ${promptDetail}${keyPromptDetail} · ${stubDetail}${submitNote}`);
       } catch (error) {
         record(name, false, String(error.message).slice(0, 200));
       }
