@@ -13,9 +13,12 @@ function isSubagentContext(ctx: unknown): boolean {
   return agent?.kind === "sub";
 }
 
-function mainOnlyHandler(handler: AnyHandler): AnyHandler {
+function mainOnlyHandler(handler: AnyHandler, onSubAgent: () => void): AnyHandler {
   return (event, ctx, ...rest) => {
-    if (isSubagentContext(ctx)) return undefined;
+    if (isSubagentContext(ctx)) {
+      onSubAgent();
+      return undefined;
+    }
     return handler(event, ctx, ...rest);
   };
 }
@@ -24,10 +27,24 @@ function mainOnlyHandler(handler: AnyHandler): AnyHandler {
  * Wraps the extension API so that `pi.on` handlers do not run inside sub-agent
  * sessions. Every other member is forwarded unchanged with its `this` bound to
  * the real API.
+ *
+ * `onSubAgent` runs once per wrapper, the first time a handler is triggered by a
+ * sub-agent context. It lets the caller tear down what the factory itself started
+ * for that sub-agent instance. Its errors are swallowed and never reach the host.
  */
-export function mainOnlyEvents(pi: ExtensionAPI): ExtensionAPI {
+export function mainOnlyEvents(pi: ExtensionAPI, onSubAgent?: () => void): ExtensionAPI {
+  let notified = false;
+  const notifySubAgent = (): void => {
+    if (notified || !onSubAgent) return;
+    notified = true;
+    try {
+      onSubAgent();
+    } catch {
+      // Cleanup is best-effort; a failing cleanup must not affect the host.
+    }
+  };
   const on = (event: string, handler: AnyHandler) =>
-    (pi.on as unknown as (event: string, handler: AnyHandler) => () => void)(event, mainOnlyHandler(handler));
+    (pi.on as unknown as (event: string, handler: AnyHandler) => () => void)(event, mainOnlyHandler(handler, notifySubAgent));
   return new Proxy(pi, {
     get(target, prop) {
       if (prop === "on") return on;

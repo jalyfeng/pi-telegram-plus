@@ -58,7 +58,7 @@ function getTelegramPlusRuntimeState(): TelegramPlusRuntimeState {
 export default function piTelegramPlus(rawPi: ExtensionAPI): void {
   // OMP sub-agent sessions re-run this factory and register their own event
   // handlers; the wrapper keeps those handlers from running inside sub-agents.
-  const pi = mainOnlyEvents(rawPi);
+  const pi = mainOnlyEvents(rawPi, () => disposeInertRuntime());
   installAgentSessionCapture();
   installTelegramStatusAlignment();
   // Patch the TUI initializer before the host creates InteractiveMode. This is
@@ -771,6 +771,23 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     } catch (err) {
       indexLog.debug("status clear skipped: session context replaced", { err });
     }
+  }
+
+  // Sub-agent instances re-run this factory, so they start the same timers and
+  // controller. Only the parts that touch instance-local state are torn down here;
+  // disposeRuntime is not used because it clears the shared status line, cancels
+  // process-wide menu refreshes and releases the coordinator lease.
+  function disposeInertRuntime(): void {
+    if (coordinatorTimer) clearInterval(coordinatorTimer);
+    coordinatorTimer = undefined;
+    requestCoordinatorReconcile = () => undefined;
+    pendingHandoffs.clear();
+    replayAbortController?.abort();
+    void polling.stop();
+    heartbeat.dispose();
+    controller.dispose();
+    activeTurns.clear();
+    ui.dispose();
   }
 
   let disposed = false;

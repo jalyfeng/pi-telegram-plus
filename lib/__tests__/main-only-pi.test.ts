@@ -66,4 +66,55 @@ describe("mainOnlyEvents", () => {
     (unsubscribe as unknown as () => boolean)();
     expect(handlers.has("message_end")).toBe(false);
   });
+
+  it("calls onSubAgent once, on the first sub-agent trigger, and never for main sessions", () => {
+    const { api, handlers } = createApi();
+    const onSubAgent = vi.fn();
+    mainOnlyEvents(api as unknown as ExtensionAPI, onSubAgent).on("agent_start" as never, vi.fn() as never);
+
+    const wrapped = handlers.get("agent_start")!;
+    const sub = { agent: { kind: "sub", id: "s", name: "s", depth: 1 } };
+    expect(wrapped({}, sub)).toBeUndefined();
+    expect(onSubAgent).toHaveBeenCalledTimes(1);
+    expect(wrapped({}, sub)).toBeUndefined();
+    expect(onSubAgent).toHaveBeenCalledTimes(1);
+
+    const { api: mainApi, handlers: mainHandlers } = createApi();
+    const mainOnSubAgent = vi.fn();
+    mainOnlyEvents(mainApi as unknown as ExtensionAPI, mainOnSubAgent).on("session_start" as never, vi.fn() as never);
+    const mainWrapped = mainHandlers.get("session_start")!;
+    mainWrapped({}, { agent: { kind: "main", id: "m", name: "main", depth: 0 } });
+    mainWrapped({}, {});
+    mainWrapped({});
+    expect(mainOnSubAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns undefined and does not throw when onSubAgent throws", () => {
+    const { api, handlers } = createApi();
+    const handler = vi.fn(() => "ok");
+    mainOnlyEvents(api as unknown as ExtensionAPI, () => {
+      throw new Error("cleanup failed");
+    }).on("tool_call" as never, handler as never);
+
+    const wrapped = handlers.get("tool_call")!;
+    const sub = { agent: { kind: "sub", id: "s", name: "s", depth: 1 } };
+    expect(() => wrapped({}, sub)).not.toThrow();
+    expect(wrapped({}, sub)).toBeUndefined();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("calls onSubAgent only once across several handlers of the same wrapper", () => {
+    const { api, handlers } = createApi();
+    const onSubAgent = vi.fn();
+    const wrapped = mainOnlyEvents(api as unknown as ExtensionAPI, onSubAgent);
+    wrapped.on("agent_start" as never, vi.fn() as never);
+    wrapped.on("tool_call" as never, vi.fn() as never);
+    wrapped.on("message_end" as never, vi.fn() as never);
+
+    const sub = { agent: { kind: "sub", id: "s", name: "s", depth: 1 } };
+    handlers.get("agent_start")!({}, sub);
+    handlers.get("tool_call")!({}, sub);
+    handlers.get("message_end")!({}, sub);
+    expect(onSubAgent).toHaveBeenCalledTimes(1);
+  });
 });
