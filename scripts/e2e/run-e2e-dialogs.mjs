@@ -888,7 +888,7 @@ async function runHost(host, servers) {
 
     // One sign-in: pick the provider, then check the link message, the Cancel button, and
     // the stub log. Always closes the dialog and waits for it to go away before returning.
-    const runLoginSignIn = async ({ name, label, matches, search, wordPattern, wordLabel }) => {
+    const runLoginSignIn = async ({ name, label, matches, search, wordPattern, wordLabel, apiKeyPrompt }) => {
       try {
         const since2 = await pickLoginProvider({ label, matches, search });
         const linkCall = await waitFor(`${label} sign-in link in Telegram output`, (state) =>
@@ -908,10 +908,32 @@ async function runHost(host, servers) {
         const promptLine = outbound.flatMap((text) => text.split("\n")).find((line) => /key|token/i.test(line));
         const promptDetail = promptLine ? `input prompt: "${promptLine.trim().slice(0, 120)}"` : "no input prompt in the text";
 
-        const dialogCall = await waitFor(`${label} sign-in dialog with Cancel`, (state) =>
-          state.calls.slice(since2).findLast((entry) => buttonsOf(entry).some(isCancel)) ?? false,
-        { timeoutMs: 15_000 }).catch(() => undefined);
-        if (!dialogCall) throw new Error("no Cancel button left on the sign-in dialog");
+        // API-key providers: the plugin's secret input prompt must show up in Telegram.
+        // Only the prompt is checked; no key is ever sent.
+        let keyPromptDetail = "";
+        let dialogCall;
+        if (apiKeyPrompt) {
+          const promptHit = await waitFor(`${label} API key prompt`, (state) =>
+            state.calls.slice(since2).findLast((entry) =>
+              outboundMethods.includes(entry.method) && apiKeyPrompt.test(plainText(entry))) ?? false,
+          { timeoutMs: 20_000 }).catch(() => undefined);
+          if (!promptHit) {
+            const lastOut = (await controlGet()).calls.slice(since2)
+              .filter((c) => outboundMethods.includes(c.method)).map(plainText).pop() ?? "none";
+            throw new Error(`no API key input prompt; last outbound text: ${lastOut.slice(0, 200)}`);
+          }
+          const promptText = plainText(promptHit);
+          if (!/secret input/i.test(promptText)) throw new Error("API key prompt has no \"Secret input\" line");
+          dialogCall = promptHit;
+          if (!buttonsOf(promptHit).some(isCancel)) throw new Error("API key prompt has no Cancel button");
+          const keyLine = promptText.split("\n").find((line) => apiKeyPrompt.test(line)) ?? "";
+          keyPromptDetail = ` · key prompt: "${keyLine.trim().slice(0, 120)}"`;
+        } else {
+          dialogCall = await waitFor(`${label} sign-in dialog with Cancel`, (state) =>
+            state.calls.slice(since2).findLast((entry) => buttonsOf(entry).some(isCancel)) ?? false,
+          { timeoutMs: 15_000 }).catch(() => undefined);
+          if (!dialogCall) throw new Error("no Cancel button left on the sign-in dialog");
+        }
         await clickButton(buttonsOf(dialogCall).find(isCancel), dialogCall.body?.message_id ?? dialogCall.message_id);
         await sleep(1500);
 
@@ -923,7 +945,7 @@ async function runHost(host, servers) {
           : "no open() call recorded";
 
         record(name, hasWord,
-          `link ${url.slice(0, 80)} · "${wordLabel}" ${hasWord ? "present" : "missing"} · ${promptDetail} · ${stubDetail}`);
+          `link ${url.slice(0, 80)} · "${wordLabel}" ${hasWord ? "present" : "missing"} · ${promptDetail}${keyPromptDetail} · ${stubDetail}`);
       } catch (error) {
         record(name, false, String(error.message).slice(0, 200));
       }
@@ -938,6 +960,7 @@ async function runHost(host, servers) {
       search: "deepseek",
       wordPattern: /browser|key/i,
       wordLabel: "browser or key",
+      apiKeyPrompt: /paste your deepseek api key/i,
     });
     await runLoginSignIn({
       name: "login sign-in link is shown in Telegram",
