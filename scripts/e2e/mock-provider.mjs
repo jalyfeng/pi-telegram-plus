@@ -161,6 +161,19 @@ const server = createServer(async (req, res) => {
   const askArgs = triggerCheckAsk ? checkAskArguments : (triggerMultiAsk ? multiAskArguments : askArguments);
   const triggerAnyAsk = triggerAsk || triggerMultiAsk || triggerCheckAsk;
 
+  // Sub-agent probe: a driver message containing TASK_TOOL_PROBE makes the model call
+  // OMP's `task` tool once, which spawns a sub-agent session. The sub-agent receives
+  // SUBAGENT_E2E_PROMPT as its user message and answers with SUBAGENT_E2E_REPLY.
+  const triggerTaskProbe = toolNames.includes("task") && !justAnswered && !approvalProbe && !approvalBashMatch
+    && latestUserText.includes("TASK_TOOL_PROBE");
+  const taskArguments = JSON.stringify({
+    name: "e2e-sub",
+    task: "SUBAGENT_E2E_PROMPT: reply with the word done",
+    solutionSpace: "none",
+  });
+  const isSubAgentRequest = latestUserText.includes("SUBAGENT_E2E_PROMPT");
+  const replyText = isSubAgentRequest ? "SUBAGENT_E2E_REPLY" : REPLY;
+
   // Stage 0 host probe: scripted calls for arbitrary advertised tools. The
   // prompt names the tool (PROBE_TOOL:<name>) or a pi-goal shape
   // (PROBE_GOAL_CONFIRM / _QUESTION / _QUESTIONNAIRE); approval probing picks
@@ -242,7 +255,8 @@ const server = createServer(async (req, res) => {
   })();
   const scriptedCall = triggerProbe
     ? { name: probeTool, arguments: probeArguments }
-    : (triggerAnyAsk ? { name: askTool, arguments: askArgs } : undefined);
+    : (triggerAnyAsk ? { name: askTool, arguments: askArgs }
+      : (triggerTaskProbe ? { name: "task", arguments: taskArguments } : undefined));
 
   const wantsStream = parsed.stream === true;
   const id = "chatcmpl-e2e";
@@ -276,7 +290,7 @@ const server = createServer(async (req, res) => {
       res.write("data: [DONE]\n\n");
       return res.end();
     }
-    for (const word of REPLY.split(" ")) {
+    for (const word of replyText.split(" ")) {
       res.write(chunk({ ...base, choices: [{ index: 0, delta: { content: `${word} ` }, finish_reason: null }] }));
     }
     res.write(chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }));
@@ -305,7 +319,7 @@ const server = createServer(async (req, res) => {
             },
             finish_reason: "tool_calls",
           }
-        : { index: 0, message: { role: "assistant", content: REPLY }, finish_reason: "stop" }],
+        : { index: 0, message: { role: "assistant", content: replyText }, finish_reason: "stop" }],
       usage: { prompt_tokens: 8, completion_tokens: 4, total_tokens: 12 },
     }),
   );

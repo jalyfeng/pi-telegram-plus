@@ -748,6 +748,82 @@ async function runHost(host, servers) {
     await clearDialog();
   }
 
+  // ── sub-agent run: OMP's `task` tool spawns a child session that loads the plugin again ─
+  // Issues #13/#15: the child must not forward its own replies to Telegram, and the
+  // main session's Telegram runtime (connection and /tg) must survive the child's start.
+  if (host === "omp") {
+    const offersTask = providerEntries().some((entry) => (entry.tools ?? []).includes("task"));
+    if (!offersTask) {
+      record("sub-agent run leaves the Telegram runtime intact", true, "skipped: host offers no task tool");
+    } else {
+      try {
+        const textOfCall = (call) => [call.body?.text, call.body?.rich_message?.markdown, call.body?.caption]
+          .filter((part) => typeof part === "string").join("\n");
+        const outboundMethods = ["sendMessage", "editMessageText", "sendRichMessage"];
+        // ① The child's reply forwarded as a standalone assistant message. The main
+        // turn's tool result may echo the child's reply inside a tool-output block, so
+        // only a message whose whole visible text is the reply counts as forwarded.
+        const subReplyCalls = async (since) => (await controlGet()).calls.slice(since)
+          .filter((c) => outboundMethods.includes(c.method) && textOfCall(c).includes("SUBAGENT_E2E_REPLY"));
+
+        const since = await cursor();
+        const providerBefore = providerEntries().length;
+        await injectText("please run the probe TASK_TOOL_PROBE");
+        const childRequest = await waitForProvider("sub-agent request", (entries) =>
+          entries.slice(providerBefore).find((entry) =>
+            String(entry.userText ?? "").includes("SUBAGENT_E2E_PROMPT") && entry.lastRole === "user"), 60_000);
+        if (!childRequest) throw new Error("the sub-agent never sent its request to the model");
+        // The main turn is over once the model has been sent the task tool's result and
+        // Telegram has been silent for 3 seconds.
+        const toolResultRequest = await waitForProvider("task tool result reaches the model", (entries) =>
+          entries.slice(providerBefore).find((entry) =>
+            entry.lastRole === "tool" || entry.lastRole === "toolResult"), 60_000);
+        if (!toolResultRequest) throw new Error("the task tool result never reached the model");
+        const deadline = Date.now() + 60_000;
+        let seenCount = (await controlGet()).calls.length;
+        let quietSince = Date.now();
+        while (Date.now() < deadline && Date.now() - quietSince < 3_000) {
+          const count = (await controlGet()).calls.length;
+          if (count !== seenCount) { seenCount = count; quietSince = Date.now(); }
+          await sleep(250);
+        }
+        const forwarded = await subReplyCalls(since);
+        const standalone = forwarded.filter((c) =>
+          textOfCall(c).replace(/<[^>]+>/g, "").trim() === "SUBAGENT_E2E_REPLY");
+        const replyObserved = forwarded.map((c) =>
+          `${c.method}: ${JSON.stringify(textOfCall(c).slice(0, 80))}`).join(" | ") || "none";
+        const detailOne = `child reply in ${forwarded.length} outbound call(s) [${replyObserved}]`
+          + (standalone.length > 0 ? ` · ${standalone.length} forwarded as a standalone message` : " · none forwarded as a standalone message");
+
+        // ② The Telegram runtime still answers /tg and a plain message after the child ran.
+        const since2 = await cursor();
+        await injectText("/tg");
+        const menu = await waitFor("/tg reply after the sub-agent", (state) =>
+          state.calls.slice(since2).some((c) => c.method === "sendMessage" || c.method === "sendRichMessage"),
+        { timeoutMs: 30_000 })
+          .then(() => true).catch(() => false);
+        const since3 = await cursor();
+        const providerBefore2 = providerEntries().length;
+        await injectText("hello after the sub-agent");
+        const newRequest = await waitForProvider("request after the sub-agent", (entries) =>
+          entries.slice(providerBefore2).find((entry) =>
+            String(entry.lastText ?? "").includes("hello after the sub-agent")), 30_000);
+        const replied = await waitFor("reply after the sub-agent", (state) =>
+          state.calls.slice(since3).some((c) => c.method === "sendMessage"
+            && textOfCall(c).includes("MOCK_OK")), { timeoutMs: 30_000 })
+          .then(() => true).catch(() => false);
+        const detailTwo = `/tg menu ${menu ? "sent" : "missing"} · plain message ${newRequest ? "reached the model" : "never reached the model"} · reply ${replied ? "sent" : "missing"}`;
+
+        record("sub-agent run leaves the Telegram runtime intact",
+          standalone.length === 0 && menu && Boolean(newRequest) && replied,
+          `${detailOne} · ${detailTwo}`);
+      } catch (error) {
+        record("sub-agent run leaves the Telegram runtime intact", false, String(error.message).slice(0, 200));
+      }
+      await clearDialog();
+    }
+  }
+
   // ── pi-goal dialogs (extension `custom`, the /goals parity case) ───────
   if (GOAL) {
     const trigger = GOAL === "confirm" ? "PROBE_GOAL_CONFIRM"
