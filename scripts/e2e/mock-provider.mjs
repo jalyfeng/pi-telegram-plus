@@ -113,8 +113,8 @@ const server = createServer(async (req, res) => {
   // a driver raises the single-question ask and then the multi-question one.
   const justAnswered = lastMessage?.role === "tool" || lastMessage?.role === "toolResult";
   const askTool = toolNames.find((name) => name === "ask");
-  const triggerAsk = Boolean(askTool) && !justAnswered && !approvalBashMatch && userText.includes("ASK_TOOL_PROBE")
-    && !userText.includes("ASK_TOOL_PROBE_MULTI") && !userText.includes("ASK_TOOL_PROBE_CHECK");
+  const triggerAsk = Boolean(askTool) && !justAnswered && !approvalBashMatch && latestUserText.includes("ASK_TOOL_PROBE")
+    && !latestUserText.includes("ASK_TOOL_PROBE_MULTI") && !latestUserText.includes("ASK_TOOL_PROBE_CHECK");
   const askArguments = JSON.stringify({
     questions: [{
       id: "e2e-color",
@@ -129,8 +129,8 @@ const server = createServer(async (req, res) => {
   // question is a checkbox group, the second a single choice, so the mirror
   // must toggle instead of submitting on the first pick.
   // An approval probe in the latest message outranks every ask trigger.
-  const triggerMultiAsk = Boolean(askTool) && !justAnswered && !approvalBashMatch && userText.includes("ASK_TOOL_PROBE_MULTI");
-  const triggerCheckAsk = Boolean(askTool) && !justAnswered && !approvalBashMatch && userText.includes("ASK_TOOL_PROBE_CHECK");
+  const triggerMultiAsk = Boolean(askTool) && !justAnswered && !approvalBashMatch && latestUserText.includes("ASK_TOOL_PROBE_MULTI");
+  const triggerCheckAsk = Boolean(askTool) && !justAnswered && !approvalBashMatch && latestUserText.includes("ASK_TOOL_PROBE_CHECK");
   const checkAskArguments = JSON.stringify({
     questions: [{
       id: "e2e-toppings",
