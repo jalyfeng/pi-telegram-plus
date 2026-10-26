@@ -905,6 +905,56 @@ async function runHost(host, servers) {
       if (text === undefined) return "editor unknown";
       return text.trim() === "" ? "editor clean" : `editor leftover "${text.slice(0, 60)}"`;
     };
+    // Polls the last editor-text (250 ms steps, 6 s cap) until isOk holds; returns the last text seen.
+    const waitEditor = async (isOk, timeoutMs = 6_000) => {
+      const deadline = Date.now() + timeoutMs;
+      let text = lastEditorText() ?? "";
+      while (!isOk(text) && Date.now() < deadline) {
+        await sleep(250);
+        text = lastEditorText() ?? "";
+      }
+      return text;
+    };
+    // Per-message checks. The ack is the `▶️ <command>` sendMessage the bot posts for a `!` command
+    // (its message_id is the top-level `message_id` the mock records on outbound sends and edits).
+    // The result of that command is the text of the last editMessageText on the same message_id,
+    // or the sendMessage text when nothing edited it.
+    const ackMessageId = async (since, commandText) => {
+      const hit = (await controlGet()).calls.slice(since).find((call) =>
+        call.direction === "out" && call.method === "sendMessage"
+        && plainOf(call).startsWith(`▶️ ${commandText}`));
+      return hit ? (hit.message_id ?? hit.body?.message_id) : undefined;
+    };
+    const lastFinal = (calls, messageId) => {
+      let last;
+      calls.forEach((call, index) => {
+        if (call.direction !== "out") return;
+        if (call.method === "editMessageText" && call.body?.message_id === messageId) {
+          last = { text: plainOf(call), index };
+        } else if (!last && call.method === "sendMessage" && (call.message_id ?? call.body?.message_id) === messageId) {
+          last = { text: plainOf(call), index };
+        }
+      });
+      return last ?? { text: "", index: -1 };
+    };
+    const finalTextOf = async (messageId) => lastFinal((await controlGet()).calls, messageId).text;
+    // Waits (up to timeoutMs) for the ack of commandText after `since` to show a final text that
+    // satisfies predicate. Returns the ack id, the final text and its call index, and ok.
+    const waitAck = async (since, commandText, predicate, timeoutMs = 30_000) => {
+      const deadline = Date.now() + timeoutMs;
+      let id;
+      let last = { text: "", index: -1 };
+      for (;;) {
+        id ??= await ackMessageId(since, commandText);
+        if (id !== undefined) {
+          last = lastFinal((await controlGet()).calls, id);
+          if (predicate(last.text)) break;
+        }
+        if (Date.now() >= deadline) break;
+        await sleep(250);
+      }
+      return { id, ...last, ok: id !== undefined && predicate(last.text) };
+    };
     const parts = [];
     // Runs one variant: its own try, then the settle delay and the editor reading (not a failure condition).
     const runVariant = async (label, body) => {
@@ -914,9 +964,9 @@ async function runHost(host, servers) {
       } catch (error) {
         outcome = { ok: false, text: `${label}: error ${String(error?.message ?? error).slice(0, 120)}` };
       }
-      await sleep(1500);
       let note;
       try {
+        await waitEditor((text) => text.trim() === "");
         note = editorNote();
       } catch (error) {
         note = `editor unknown (${String(error?.message ?? error).slice(0, 60)})`;
@@ -936,22 +986,35 @@ async function runHost(host, servers) {
         await injectText("please answer slowly SLOW_REPLY_PROBE");
         await sleep(1500);
         await injectText("!ls -la ptp-bang-busy.txt");
-        const result = (await pollMatches(since, { busy: fileResult("ptp-bang-busy.txt") })).busy;
-        if (!result) return { ok: false, text: "V1 busy: MISSING" };
+        const ack = await waitAck(since, "!ls -la ptp-bang-busy.txt",
+          (text) => text.includes("ptp-bang-busy.txt") && /-rw-/.test(text));
+        if (!ack.ok) return { ok: false, text: `V1 busy: MISSING (ack shows "${ack.text.slice(0, 100)}")` };
         // The slow reply's text is the mock's REPLY constant (MOCK_OK, from the --reply argument).
         const reply = (await pollMatches(since, { reply: ({ call }) => plainOf(call).includes("MOCK_OK") }, 10_000)).reply;
-        const where = !reply ? "reply not seen" : (result.index > reply.index ? "after reply" : "before reply");
+        const where = !reply ? "reply not seen" : (ack.index > reply.index ? "after reply" : "before reply");
         return { ok: true, text: `V1 busy: ok (${where})` };
       }));
 
-      // V2 back-to-back: two `!` commands sent without waiting for the first result.
+      // V2 back-to-back: two `!` commands sent without waiting for the first result. The first runs,
+      // the second is refused with "already running" on its own message, and the editor stays clean.
       variantResults.push(await runVariant("V2", async () => {
         const since = await cursor();
         await injectText("!ls -la ptp-bang-a.txt");
         await injectText("!ls -la ptp-bang-b.txt");
-        const found = await pollMatches(since, { a: fileResult("ptp-bang-a.txt"), b: fileResult("ptp-bang-b.txt") });
-        const ok = Boolean(found.a) && Boolean(found.b);
-        return { ok, text: `V2: a ${found.a ? "ok" : "MISSING"}, b ${found.b ? "ok" : "MISSING"}` };
+        const a = await waitAck(since, "!ls -la ptp-bang-a.txt",
+          (text) => text.includes("ptp-bang-a.txt") && /-rw-/.test(text));
+        const b = await waitAck(since, "!ls -la ptp-bang-b.txt",
+          (text) => /already running/i.test(text) || /-rw-/.test(text));
+        const editor = await waitEditor((text) => !text.includes("ptp-bang-b.txt"));
+        const aOk = a.ok;
+        const bOk = /already running/i.test(b.text) && !/-rw-/.test(b.text);
+        const editorOk = !editor.includes("ptp-bang-b.txt");
+        const problems = [];
+        if (!aOk) problems.push(`a bad (${a.id === undefined ? "no ack" : `"${a.text.slice(0, 100)}"`})`);
+        if (!bOk) problems.push(`b bad ${b.id === undefined ? "(no ack)" : `("${b.text.slice(0, 100)}")`}`);
+        if (!editorOk) problems.push(`editor leftover "${editor.slice(0, 100)}"`);
+        if (problems.length > 0) return { ok: false, text: `V2: ${problems.join("; ")}` };
+        return { ok: true, text: "V2: a ok, b rejected (already running), editor clean" };
       }));
 
       // V3 long output: 400 lines must arrive as text lines or as a document.
