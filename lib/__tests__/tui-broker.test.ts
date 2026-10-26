@@ -14,6 +14,7 @@ import type { FocusInfo } from "../tui/focus.ts";
 import type { DialogModel, EntryInfo } from "../tui/model.ts";
 import type { TelegramTurn } from "../types.ts";
 import type { CommandScope } from "../tui/origin.ts";
+import { SecretStore } from "../tui/secrets.ts";
 
 const turn = (chatId: number, sourceMessageId = 7): TelegramTurn => ({
   chatId,
@@ -85,6 +86,7 @@ function makeBroker(options: {
   turns?: TelegramTurn[];
   entry?: EntryInfo;
   scope?: CommandScope;
+  secrets?: SecretStore;
 } = {}) {
   const transport = fakeTransport();
   const written: string[] = [];
@@ -99,6 +101,7 @@ function makeBroker(options: {
       written.push(text);
       return true;
     },
+    secrets: options.secrets,
     enabled: () => true,
   });
   broker.start();
@@ -366,12 +369,81 @@ describe("dialog broker", () => {
     expect(session?.pendingInput).toBeUndefined();
 
     // The input still owns the keyboard, so a second message is still dialog
-    // input - but the secret flow is over, so nothing is hidden this time.
+    // input. The dialog still shows a secret field, so a retry is a secret too.
     const followUp = broker.handleText(session!, "again", 56);
     await settle();
     expect(followUp.handled).toBe(true);
     expect(written).toEqual([]);
-    expect(transport.deleted).toEqual([55]);
+    expect(transport.deleted).toEqual([55, 56]);
+  });
+
+  it("does not hide a message once the redrawn input is no longer secret", async () => {
+    const secrets = new SecretStore();
+    const remember = vi.spyOn(secrets, "remember");
+    const { broker, transport, focus } = makeBroker({
+      turns: [turn(42)],
+      entry: { kind: "input", title: "Paste your API key", secret: true, source: "pi" },
+      secrets,
+    });
+    focus.openDialog({ getValue: () => "", handleInput: () => undefined });
+    await settle();
+    const session = broker.current()!;
+    expect(broker.handleText(session, "sk-test-123", 57)).toEqual({ handled: true });
+    await settle();
+    expect(transport.deleted).toEqual([57]);
+    expect(remember).toHaveBeenCalledTimes(1);
+
+    // The host redraws the same dialog as a plain (non-secret) input, and the
+    // marker is gone after the answer, so the model alone decides.
+    session.model = { kind: "input", title: "Paste your API key", secret: false };
+    expect(broker.handleText(session, "plain-text", 58)).toEqual({ handled: true });
+    await settle();
+    expect(transport.deleted).toEqual([57]);
+    expect(remember).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes and remembers a secret answer when the secret input appeared after the dialog opened", async () => {
+    // A progress panel opened the dialog, so no `pendingInput` marker was set; the
+    // redraw that added the secret field never sets one either.
+    const secrets = new SecretStore();
+    const remember = vi.spyOn(secrets, "remember");
+    const { broker, transport, focus } = makeBroker({
+      turns: [turn(42)],
+      entry: { kind: "input", title: "Paste your API key", secret: true, source: "pi" },
+      secrets,
+    });
+    focus.openDialog({ getValue: () => "", handleInput: () => undefined });
+    await settle();
+    const session = broker.current()!;
+    session.pendingInput = undefined;
+
+    const result = broker.handleText(session, "sk-test-123", 4242);
+    await settle();
+
+    expect(result).toEqual({ handled: true });
+    expect(transport.deleted).toContain(4242);
+    expect(remember).toHaveBeenCalled();
+  });
+
+  it("keeps a plain answer when the input that appeared after the dialog opened is not secret", async () => {
+    const secrets = new SecretStore();
+    const remember = vi.spyOn(secrets, "remember");
+    const { broker, transport, focus } = makeBroker({
+      turns: [turn(42)],
+      entry: { kind: "input", title: "Paste your API key", secret: false, source: "pi" },
+      secrets,
+    });
+    focus.openDialog({ getValue: () => "", handleInput: () => undefined });
+    await settle();
+    const session = broker.current()!;
+    session.pendingInput = undefined;
+
+    const result = broker.handleText(session, "plain-text", 4243);
+    await settle();
+
+    expect(result).toEqual({ handled: true });
+    expect(transport.deleted).toEqual([]);
+    expect(remember).not.toHaveBeenCalled();
   });
 
   it("cancels the dialog before /stop interrupts anything", async () => {

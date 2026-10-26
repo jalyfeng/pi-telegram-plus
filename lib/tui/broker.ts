@@ -190,6 +190,18 @@ function effectiveInput(model: DialogModel): EffectiveInput | undefined {
   }
 }
 
+/**
+ * Whether the text the chat is waiting for is a secret. The `pendingInput` marker
+ * is only written when a text field is already on screen at the time it is set,
+ * so a dialog that starts as a progress panel and turns into a secret input later
+ * has no marker: the model is the source of truth then.
+ */
+function isSecretSession(session: DialogSession): boolean {
+  return session.pendingInput
+    ? session.pendingInput.secret === true
+    : effectiveInput(session.model)?.secret === true;
+}
+
 function findLast<T>(list: T[], predicate: (item: T) => boolean): T | undefined {
   for (let index = list.length - 1; index >= 0; index -= 1) {
     if (predicate(list[index])) return list[index];
@@ -356,7 +368,7 @@ export class DialogBroker {
 
     session.closedBy = byTelegram ? "telegram" : "terminal";
     const summary = byTelegram
-      ? `✅ ${session.pendingInput?.secret === true ? "Submitted (hidden)" : session.lastAction ?? "Done"}`
+      ? `✅ ${isSecretSession(session) ? "Submitted (hidden)" : session.lastAction ?? "Done"}`
       : "Answered in the terminal";
     this.publish(session, summary);
     return session.closedBy;
@@ -537,7 +549,7 @@ export class DialogBroker {
     }
     const purpose = session.pendingInput?.purpose ?? textPurpose(session.model);
     if (!purpose) return { handled: false };
-    const secret = session.pendingInput?.secret === true;
+    const secret = isSecretSession(session);
     const flowId = session.pendingInput?.flowId ?? session.id;
     session.pendingInput = undefined;
 
