@@ -160,6 +160,21 @@ describe("createTelegramTransport — network-failure suppression & logging", ()
     });
   });
 
+  it("sendChatAction targets the configured apiBase instead of the public endpoint", async () => {
+    const urls: string[] = [];
+    const stub = vi.fn(async (url: string) => {
+      urls.push(url);
+      return telegramResponse(true, true);
+    });
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 0, apiBase: "http://self-hosted.example:8081" });
+    await transport.sendChatAction(123, "typing");
+
+    expect(urls).toEqual(["http://self-hosted.example:8081/bottok/sendChatAction"]);
+  });
+
   it("editText swallows network failures (no console.warn, no log warn)", async () => {
     const failingFetch = vi.fn(async () => { throw new TypeError("fetch failed"); });
     globalThis.fetch = failingFetch as unknown as FetchImpl;

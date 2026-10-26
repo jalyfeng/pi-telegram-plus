@@ -547,7 +547,7 @@ export function createTelegramTransport(
         chat_id: chatId,
         action,
         ...(messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
-      }, options.getAbortSignal?.()).catch(apiLog.swallow("debug", "sendChatAction failed", { chatId, action, messageThreadId }));
+      }, options.getAbortSignal?.(), cfg().apiBase).catch(apiLog.swallow("debug", "sendChatAction failed", { chatId, action, messageThreadId }));
     },
   };
 }
