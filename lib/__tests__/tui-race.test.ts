@@ -100,7 +100,7 @@ function callApprove(target: Record<string, unknown>) {
 describe("race wrapper (installRace)", () => {
   it("a plugin answer wins, aborts the host signal, and drops the host's late undefined", async () => {
     const { target, seen, settle } = fakeHost();
-    expect(installRace(target, "select", new WeakSet<object>())).toBe(true);
+    expect(installRace(target, "select")).toBe(true);
     const dialog = callSelect(target)("Pick", ["alpha", "beta"], {});
     const handle = seen.handles[0];
     expect(handle).toBeDefined();
@@ -118,7 +118,7 @@ describe("race wrapper (installRace)", () => {
 
   it("a host answer wins first and later answers return false", async () => {
     const { target, seen, settle } = fakeHost();
-    installRace(target, "select", new WeakSet<object>());
+    installRace(target, "select");
     const dialog = callSelect(target)("Pick", ["alpha", "beta"], {});
     const handle = seen.handles[0];
     settle[0]?.("alpha");
@@ -130,7 +130,7 @@ describe("race wrapper (installRace)", () => {
 
   it("a host rejection still reaches the extension", async () => {
     const { target, seen, reject } = fakeHost();
-    installRace(target, "select", new WeakSet<object>());
+    installRace(target, "select");
     const dialog = callSelect(target)("Pick", ["alpha"], {});
     reject[0]?.(new Error("host died"));
     await expect(dialog).rejects.toThrow("host died");
@@ -139,7 +139,7 @@ describe("race wrapper (installRace)", () => {
 
   it("confirm: a plugin answer wins, a host answer wins when it is first", async () => {
     const { target, seen, settle } = fakeHost();
-    expect(installRace(target, "confirm", new WeakSet<object>())).toBe(true);
+    expect(installRace(target, "confirm")).toBe(true);
     const pluginWins = callConfirm(target)("Sure?", "Delete it", {});
     expect(seen.handles[0]?.settled).toBe(false);
     expect(seen.handles[0]?.answer(true)).toBe(true);
@@ -156,7 +156,7 @@ describe("race wrapper (installRace)", () => {
 
   it("input: a plugin answer wins, a host answer wins when it is first", async () => {
     const { target, seen, settle } = fakeHost();
-    expect(installRace(target, "input", new WeakSet<object>())).toBe(true);
+    expect(installRace(target, "input")).toBe(true);
     const pluginWins = callInput(target)("Name", "your name", {});
     expect(seen.handles[0]?.answer("hello")).toBe(true);
     await expect(pluginWins).resolves.toBe("hello");
@@ -171,7 +171,7 @@ describe("race wrapper (installRace)", () => {
 
   it("the caller's own signal still aborts the signal the host receives", () => {
     const { target, seen } = fakeHost();
-    installRace(target, "select", new WeakSet<object>());
+    installRace(target, "select");
     const caller = new AbortController();
     callSelect(target)("Pick", ["alpha"], { signal: caller.signal });
     expect(seen.signals[0]?.aborted).toBe(false);
@@ -181,7 +181,7 @@ describe("race wrapper (installRace)", () => {
 
   it("keeps the other option fields the caller passed", () => {
     const { target, seen } = fakeHost();
-    installRace(target, "select", new WeakSet<object>());
+    installRace(target, "select");
     callSelect(target)("Pick", ["alpha"], { placeholder: "keep me" });
     const opts = seen.opts[0] as Record<string, unknown>;
     expect(opts?.placeholder).toBe("keep me");
@@ -190,7 +190,7 @@ describe("race wrapper (installRace)", () => {
 
   it("registers the handle for the host call's synchronous run only", () => {
     const { target, seen } = fakeHost();
-    installRace(target, "select", new WeakSet<object>());
+    installRace(target, "select");
     callSelect(target)("Pick", ["alpha"], {});
     expect(seen.handles[0]).toBeInstanceOf(Object);
     expect(takePendingRace()).toBeUndefined();
@@ -198,10 +198,9 @@ describe("race wrapper (installRace)", () => {
 
   it("installs once per function and stays identifiable by name", () => {
     const { target, seen } = fakeHost();
-    const tagged = new WeakSet<object>();
     for (const method of ["select", "confirm", "input"] as const) {
-      expect(installRace(target, method, tagged)).toBe(true);
-      expect(installRace(target, method, tagged)).toBe(false);
+      expect(installRace(target, method)).toBe(true);
+      expect(installRace(target, method)).toBe(false);
       expect((target[method] as () => unknown).name).toBe(`ptp-race:${method}`);
     }
     callSelect(target)("Pick", ["alpha"], {});
@@ -210,7 +209,7 @@ describe("race wrapper (installRace)", () => {
 
   it("editor: the options go in at index 2 and editorOptions survives at index 3", async () => {
     const { target, seen, settle } = fakeHost();
-    expect(installRace(target, "editor", new WeakSet<object>())).toBe(true);
+    expect(installRace(target, "editor")).toBe(true);
     const editorOptions = { multiLine: true };
     const dialog = callEditor(target)("Compose", "draft", { placeholder: "keep me" }, editorOptions);
     const opts = seen.opts[0] as Record<string, unknown>;
@@ -231,7 +230,7 @@ describe("race wrapper (installRace)", () => {
 
   it("approve: the wrapped call supplies the options object at index 1", async () => {
     const { target, seen, settle } = fakeHost();
-    expect(installRace(target, "approve", new WeakSet<object>())).toBe(true);
+    expect(installRace(target, "approve")).toBe(true);
     // OMP's built-in tool approval passes no dialogOptions at all.
     const dialog = callApprove(target)({ full: "Run `git push`?", compact: "git push?", session: "all session" });
     const opts = seen.opts[0] as Record<string, unknown>;
@@ -379,7 +378,6 @@ describe("extensionInputAdapter with a race handle", () => {
 describe("FocusTracker takes the pending race into the entry", () => {
   function wired(options?: { confirmViaSelector?: boolean }) {
     const tracker = new FocusTracker();
-    const tagged = new WeakSet<object>();
     const fake = fakeHost(options);
     // The entry wrapper first, then the race wrapper on the outside - exactly
     // the order `attachEntryHooks` installs on the tool UI context.
@@ -387,11 +385,11 @@ describe("FocusTracker takes the pending race into the entry", () => {
       push: (info, nested) => tracker.pushEntry(info, nested),
       pop: (token) => tracker.popEntry(token),
       bind: (component, info) => tracker.bindEntry(component, info),
-    }, "pi", tagged);
+    }, "pi");
     for (const method of ["select", "confirm", "input"] as const) {
-      expect(installRace(fake.target, method, tagged)).toBe(true);
+      expect(installRace(fake.target, method)).toBe(true);
     }
-    return { tracker, fake, tagged };
+    return { tracker, fake };
   }
 
   it("a top-level select entry carries the handle the host method never saw", () => {
@@ -574,7 +572,7 @@ describe("FocusTracker host gating of the raced methods", () => {
     expect((fake.target.select as () => unknown).name).toBe("ptp-race:select");
     expect((fake.target.editor as () => unknown).name).not.toBe("ptp-race:editor");
     // pi has no `approve` to race: a target without the method installs nothing.
-    expect(installRace({ notify: () => undefined }, "approve", new WeakSet<object>())).toBe(false);
+    expect(installRace({ notify: () => undefined }, "approve")).toBe(false);
     // pi has no `askDialog` on its tool context either.
     expect((fake.target.askDialog as () => unknown).name).not.toBe("ptp-race:askDialog");
   });

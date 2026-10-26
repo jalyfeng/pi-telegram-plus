@@ -14,6 +14,8 @@
  * attach it to the entry the very same call pushes.
  */
 
+import { isMarked, mark } from "./install-marks.ts";
+
 export type RaceHandle = {
   /** Answer from Telegram: the first call settles the race with `value`, aborts the host dialog and returns true; later calls return false. */
   answer(value: unknown): boolean;
@@ -33,9 +35,6 @@ export const OPTS_INDEX: Record<RaceMethod, number> = { select: 2, confirm: 2, i
 /** The handle of the race call currently running synchronously. */
 let pendingRace: RaceHandle | undefined;
 
-/** Wrappers installed so far, so `installRace` never wraps the same function twice. */
-const raced = new WeakSet<object>();
-
 /**
  * Take the handle registered by the race wrapper whose host call is running
  * right now (the entry wrapper calls this while pushing), so a later
@@ -49,20 +48,18 @@ export function takePendingRace(): RaceHandle | undefined {
 }
 
 /**
- * Wrap `target[method]` in the race. Skips a function that is already a race
- * wrapper, so the per-tick `attachEntryHooks` stays idempotent. Both the old
- * function and the wrapper go into `tagged` so `hookEntryMethods` never
- * re-wraps the race back under an entry layer. Returns whether a new wrapper
- * was installed.
+ * Wrap `target[method]` in the race. Skips an object/method pair that already
+ * has a race wrapper (keyed by the object, not the function: hosts hand out a
+ * new wrapper on every read), so the per-tick `attachEntryHooks` stays
+ * idempotent. Returns whether a new wrapper was installed.
  */
 export function installRace(
   target: Record<string, unknown>,
   method: RaceMethod,
-  tagged: WeakSet<object>,
 ): boolean {
   const current = target[method];
   if (typeof current !== "function") return false;
-  if (raced.has(current as object)) return false;
+  if (isMarked(target, `race:${method}`)) return false;
   const call = current as (...args: unknown[]) => unknown;
   const wrapped = function ptpRace(this: unknown, ...args: unknown[]): unknown {
     const controller = new AbortController();
@@ -107,14 +104,12 @@ export function installRace(
     return Promise.race([plugin.promise, host]);
   };
   Object.defineProperty(wrapped, "name", { value: `ptp-race:${method}` });
-  raced.add(wrapped);
-  tagged.add(current as object);
-  tagged.add(wrapped);
   try {
     target[method] = wrapped;
   } catch {
     // Frozen host object: this dialog stays keystroke-driven.
     return false;
   }
+  mark(target, `race:${method}`);
   return true;
 }

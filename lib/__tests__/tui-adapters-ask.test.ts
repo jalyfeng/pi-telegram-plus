@@ -93,7 +93,7 @@ function raceContext(questions: AskQuestion[]) {
       return promise;
     },
   };
-  expect(installRace(target, "askDialog", new WeakSet<object>())).toBe(true);
+  expect(installRace(target, "askDialog")).toBe(true);
   // The wrapped method is a function on a `Record<string, unknown>`: the cast
   // just restores the signature the fake host above implements.
   const ask = target.askDialog as (q: unknown, o?: { signal?: AbortSignal }) => Promise<AskValue>;

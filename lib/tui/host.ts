@@ -9,13 +9,12 @@
  */
 import { getTuiHostState, installTuiBridge, onTuiCaptured, type TuiHost, type TuiHostState } from "../tui-bridge.ts";
 import { log } from "../logger.ts";
+import { isMarked, mark } from "./install-marks.ts";
 
 const hostLog = log.child("tui-host");
 
 export type HostState = TuiHostState;
 export type HostMethod = (this: unknown, ...args: unknown[]) => unknown;
-
-type HookedFunction = HostMethod & { __ptpHookKinds?: Set<string> };
 
 export function isHostObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object";
@@ -42,8 +41,9 @@ export function onHostState(listener: (state: HostState) => void): () => void {
 
 /**
  * Wrap a method on an instance or prototype. Multiple hooks may wrap the same
- * method: each wrapper is tagged with its `kind`, so a re-capture does not
- * install the same hook twice, while different modules still compose.
+ * method: each object/method/kind is marked (see `install-marks.ts`), so a
+ * re-capture does not install the same hook twice, while different modules
+ * still compose.
  *
  * The wrapper never changes the return value and never lets an observer throw
  * into the host.
@@ -64,10 +64,10 @@ export function hookMethod(
     return false;
   }
   if (typeof current !== "function") return false;
-  const original = current as HookedFunction;
-  const kinds = original.__ptpHookKinds;
-  if (kinds?.has(kind)) return false;
-  const wrapped: HookedFunction = function patchedHostMethod(this: unknown, ...args: unknown[]): unknown {
+  const hookKey = `hook:${name}:${kind}`;
+  if (isMarked(object, hookKey)) return false;
+  const original = current as HostMethod;
+  const wrapped: HostMethod = function patchedHostMethod(this: unknown, ...args: unknown[]): unknown {
     if (before) {
       try { before(args, this); } catch (err) { hostLog.debug("host before-hook failed", { kind, name, err }); }
     }
@@ -84,13 +84,12 @@ export function hookMethod(
     if (failure !== undefined) throw failure;
     return result;
   };
-  wrapped.__ptpHookKinds = new Set(kinds ?? []);
-  wrapped.__ptpHookKinds.add(kind);
   try {
     object[name] = wrapped;
   } catch {
     return false;
   }
+  mark(object, hookKey);
   return true;
 }
 

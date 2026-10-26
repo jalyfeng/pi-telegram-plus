@@ -64,9 +64,7 @@ describe("entry hooks record the dialog on the component (§4.1.2)", () => {
       mode as unknown as Record<string, unknown>,
       PI_ENTRY_SPECS,
       trackerSink(tracker),
-      "pi",
-      new WeakSet<object>(),
-    );
+      "pi");
     tracker.hookPiDialogStack(mode as unknown as Record<string, unknown>);
 
     // The promise stays pending: this is exactly the window a mirrored dialog lives in.
@@ -88,9 +86,7 @@ describe("entry hooks record the dialog on the component (§4.1.2)", () => {
       mode as unknown as Record<string, unknown>,
       PI_ENTRY_SPECS,
       trackerSink(tracker),
-      "pi",
-      new WeakSet<object>(),
-    );
+      "pi");
     tracker.hookPiDialogStack(mode as unknown as Record<string, unknown>);
 
     // An input dialog is open and has claimed its entry.
@@ -120,9 +116,7 @@ describe("an entry lives as long as the host's dialog (§4.1.2)", () => {
       mode,
       PI_ENTRY_SPECS.filter((spec) => spec.method === "showExtensionInput"),
       trackerSink(tracker),
-      "pi",
-      new WeakSet<object>(),
-    );
+      "pi");
 
     const dialog = mode.showExtensionInput as () => Promise<string>;
     const resolving = dialog();

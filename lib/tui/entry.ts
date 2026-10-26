@@ -16,6 +16,7 @@
  * nested call merges into the pending entry, so double layers stay one entry.
  */
 import type { EntryInfo } from "./model.ts";
+import { isMarked, mark } from "./install-marks.ts";
 
 /** A recorded entry, returned so the hook that pushed it retires its own record. */
 export type EntryToken = object;
@@ -203,23 +204,23 @@ const isThenable = (value: unknown): value is PromiseLike<unknown> =>
   !!value && typeof value === "object" && typeof (value as PromiseLike<unknown>).then === "function";
 
 /**
- * Wrap every listed entry method of one object. `tagged` prevents wrapping the
- * same function twice, which matters because both hosts expose the same dialog
- * through a tool context *and* a mode method.
+ * Wrap every listed entry method of one object. An object/method pair that is
+ * already wrapped is skipped (keyed by the object, not the function: hosts hand
+ * out a new wrapper on every read), which matters because both hosts expose the
+ * same dialog through a tool context *and* a mode method.
  */
 export function hookEntryMethods(
   target: Record<string, unknown> | undefined,
   specs: EntrySpec[],
   sink: EntrySink,
   source: "pi" | "omp",
-  tagged: WeakSet<object>,
 ): string[] {
   if (!target) return [];
   const hooked: string[] = [];
   for (const spec of specs) {
     const original = target[spec.method];
     if (typeof original !== "function") continue;
-    if (tagged.has(original as object)) continue;
+    if (isMarked(target, `entry:${spec.method}`)) continue;
     const call = original as (...args: unknown[]) => unknown;
     const wrapped = spec.factory
       ? function patchedCustom(this: unknown, ...args: unknown[]): unknown {
@@ -264,10 +265,9 @@ export function hookEntryMethods(
           return result;
         };
     Object.defineProperty(wrapped, "name", { value: `ptp:${spec.method}` });
-    tagged.add(original as object);
-    tagged.add(wrapped);
     try {
       target[spec.method] = wrapped;
+      mark(target, `entry:${spec.method}`);
       hooked.push(spec.method);
     } catch {
       // Frozen host object: the SnapshotAdapter still covers this dialog.
