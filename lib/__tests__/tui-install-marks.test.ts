@@ -119,3 +119,56 @@ describe("install marks are keyed by object and method", () => {
     expect((open.select as () => unknown).name).toBe("ptp-race:select");
   });
 });
+
+/** Dialog methods of the UI context, all async, as OMP's tool UI context exposes them. */
+const DIALOG_METHODS = ["askDialog", "select", "confirm", "input", "inputSecret", "editor", "approve", "custom"] as const;
+/** Methods the per-tick attach races (the same set the focus tracker hands to `installRace`). */
+const RACED_METHODS = ["askDialog", "approve", "select", "confirm", "input", "editor"] as const;
+
+type Dialog = (...args: unknown[]) => Promise<unknown>;
+
+/** A host whose reads hand out a fresh wrapper per function property, and whose dialogs all resolve to `answer`. */
+function asyncProxiedHost(): { target: Host; answer: object } {
+  const answer = { answered: "a" };
+  const raw: Host = { label: "tool-ui" };
+  for (const name of DIALOG_METHODS) raw[name] = async () => answer;
+  const target = new Proxy(raw, {
+    get(object, property) {
+      const value = Reflect.get(object, property);
+      if (typeof value !== "function") return value;
+      const real = value as (...args: unknown[]) => unknown;
+      return (...args: unknown[]) => real.apply(object, args);
+    },
+  });
+  return { target, answer };
+}
+
+/** One per-tick attach, as `FocusTracker.attachEntryHooks` does it. */
+function attachOnce(target: Host, sink: EntrySink): void {
+  hookEntryMethods(target, UI_CONTEXT_SPECS, sink, "omp");
+  for (const method of RACED_METHODS) installRace(target, method);
+}
+
+const QUESTIONS = [{ id: "q", question: "?", options: [{ label: "a" }] }];
+
+describe("long-running sessions", () => {
+  it("answers askDialog after 12000 attaches without overflowing the stack", async () => {
+    const { target, answer } = asyncProxiedHost();
+    const { sink } = countingSink();
+
+    for (let i = 0; i < 12000; i += 1) attachOnce(target, sink);
+
+    const ask = target.askDialog as Dialog;
+    await expect(ask(QUESTIONS, {})).resolves.toBe(answer);
+  });
+
+  it("pushes exactly one entry for askDialog after 12000 attaches", async () => {
+    const { target } = asyncProxiedHost();
+    const { sink, pushes } = countingSink();
+
+    for (let i = 0; i < 12000; i += 1) attachOnce(target, sink);
+
+    await (target.askDialog as Dialog)(QUESTIONS, {});
+    expect(pushes()).toBe(1);
+  });
+});
