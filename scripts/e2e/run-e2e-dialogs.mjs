@@ -867,6 +867,151 @@ async function runHost(host, servers) {
     await clearDialog();
   }
 
+  // ── issue #17 under load: `!` results while a turn runs, back-to-back, long output, dialog open, `!!` ─
+  // Five variants of the bang step. Each is judged on its own; one failure does not stop the rest.
+  {
+    const stepName = "Telegram ! command results under load";
+    const OUT_METHODS = new Set(["sendMessage", "editMessageText", "sendDocument"]);
+    const plainOf = (call) => [call.body?.text, call.body?.rich_message?.markdown, call.body?.caption]
+      .filter((part) => typeof part === "string").join("\n").replace(/<[^>]+>/g, "");
+    const outSince = (calls, since) => calls.slice(since)
+      .map((call, i) => ({ call, index: since + i }))
+      .filter(({ call }) => call.direction === "out" && OUT_METHODS.has(call.method));
+    const fileResult = (name) => ({ call }) => /-rw-/.test(plainOf(call)) && plainOf(call).includes(name);
+    // Polls the call log until every predicate has matched (or the timeout passes). Returns the
+    // matching { call, index } per key; keys that never matched are absent.
+    const pollMatches = async (since, predicates, timeoutMs = 30_000) => {
+      const deadline = Date.now() + timeoutMs;
+      const found = {};
+      for (;;) {
+        const outs = outSince((await controlGet()).calls, since);
+        for (const [key, predicate] of Object.entries(predicates)) {
+          if (!found[key]) {
+            const hit = outs.find(predicate);
+            if (hit) found[key] = hit;
+          }
+        }
+        if (Object.keys(found).length === Object.keys(predicates).length || Date.now() >= deadline) return found;
+        await sleep(250);
+      }
+    };
+    const lastEditorText = () => {
+      const entries = probeEntries(probeDoc(probePath)).filter((entry) => entry.kind === "editor-text");
+      if (entries.length === 0) return undefined;
+      return entries.reduce((a, b) => (Number(b.at) > Number(a.at) ? b : a)).data?.text ?? "";
+    };
+    const editorNote = () => {
+      const text = lastEditorText();
+      if (text === undefined) return "editor unknown";
+      return text.trim() === "" ? "editor clean" : `editor leftover "${text.slice(0, 60)}"`;
+    };
+    const parts = [];
+    // Runs one variant: its own try, then the settle delay and the editor reading (not a failure condition).
+    const runVariant = async (label, body) => {
+      let outcome;
+      try {
+        outcome = await body();
+      } catch (error) {
+        outcome = { ok: false, text: `${label}: error ${String(error?.message ?? error).slice(0, 120)}` };
+      }
+      await sleep(1500);
+      let note;
+      try {
+        note = editorNote();
+      } catch (error) {
+        note = `editor unknown (${String(error?.message ?? error).slice(0, 60)})`;
+      }
+      parts.push(`${outcome.text} (${note})`);
+      return outcome.ok;
+    };
+    const variantResults = [];
+    try {
+      for (const name of ["ptp-bang-busy.txt", "ptp-bang-a.txt", "ptp-bang-b.txt", "ptp-bang-dialog.txt", "ptp-bang-quiet.txt"]) {
+        writeFileSync(join(projectDir, name), `${name}\n`);
+      }
+
+      // V1 busy: a `!` command sent while a slow model turn is still running.
+      variantResults.push(await runVariant("V1", async () => {
+        const since = await cursor();
+        await injectText("please answer slowly SLOW_REPLY_PROBE");
+        await sleep(1500);
+        await injectText("!ls -la ptp-bang-busy.txt");
+        const result = (await pollMatches(since, { busy: fileResult("ptp-bang-busy.txt") })).busy;
+        if (!result) return { ok: false, text: "V1 busy: MISSING" };
+        // The slow reply's text is the mock's REPLY constant (MOCK_OK, from the --reply argument).
+        const reply = (await pollMatches(since, { reply: ({ call }) => plainOf(call).includes("MOCK_OK") }, 10_000)).reply;
+        const where = !reply ? "reply not seen" : (result.index > reply.index ? "after reply" : "before reply");
+        return { ok: true, text: `V1 busy: ok (${where})` };
+      }));
+
+      // V2 back-to-back: two `!` commands sent without waiting for the first result.
+      variantResults.push(await runVariant("V2", async () => {
+        const since = await cursor();
+        await injectText("!ls -la ptp-bang-a.txt");
+        await injectText("!ls -la ptp-bang-b.txt");
+        const found = await pollMatches(since, { a: fileResult("ptp-bang-a.txt"), b: fileResult("ptp-bang-b.txt") });
+        const ok = Boolean(found.a) && Boolean(found.b);
+        return { ok, text: `V2: a ${found.a ? "ok" : "MISSING"}, b ${found.b ? "ok" : "MISSING"}` };
+      }));
+
+      // V3 long output: 400 lines must arrive as text lines or as a document.
+      variantResults.push(await runVariant("V3", async () => {
+        const since = await cursor();
+        await injectText("!seq 1 400");
+        const line400 = ({ call }) => /(^|\n)\s*400\s*(\n|$)/.test(plainOf(call));
+        const isDocument = ({ call }) => call.method === "sendDocument";
+        const found = (await pollMatches(since, { any: (entry) => line400(entry) || isDocument(entry) })).any;
+        if (!found) return { ok: false, text: "V3: MISSING" };
+        const outs = outSince((await controlGet()).calls, since);
+        const documents = outs.filter(isDocument).length;
+        const textHits = outs.filter((entry) => !isDocument(entry) && line400(entry)).length;
+        const kinds = [];
+        if (textHits > 0) kinds.push(textHits === 1 ? "text" : `text x${textHits}`);
+        if (documents > 0) kinds.push("document");
+        return { ok: true, text: `V3: ok (${kinds.join(" + ")})` };
+      }));
+
+      // V4 dialog open: the terminal is showing a select dialog while the `!` command arrives.
+      variantResults.push(await runVariant("V4", async () => {
+        try {
+          const since = await cursor();
+          await injectText("/probe-select");
+          const kb = await keyboardAfter("V4 select keyboard", since);
+          if (!kb) return { ok: false, text: "V4: MISSING (no dialog keyboard)" };
+          const sinceBang = await cursor();
+          await injectText("!ls -la ptp-bang-dialog.txt");
+          const deadline = Date.now() + 30_000;
+          let result;
+          let notice;
+          while (!result && Date.now() < deadline) {
+            const outs = outSince((await controlGet()).calls, sinceBang);
+            result = outs.find(fileResult("ptp-bang-dialog.txt"));
+            notice ??= outs.find(({ call }) => plainOf(call).trim() !== "");
+            if (!result) await sleep(250);
+          }
+          if (result) return { ok: true, text: "V4: ok (result)" };
+          if (notice) return { ok: true, text: `V4: notice "${plainOf(notice.call).trim().slice(0, 120)}"` };
+          return { ok: false, text: "V4: MISSING (no feedback)" };
+        } finally {
+          await clearDialog();
+        }
+      }));
+
+      // V5 `!!`: runs without entering the model context, but the result must still arrive.
+      variantResults.push(await runVariant("V5", async () => {
+        const since = await cursor();
+        await injectText("!!ls -la ptp-bang-quiet.txt");
+        const found = (await pollMatches(since, { quiet: fileResult("ptp-bang-quiet.txt") })).quiet;
+        return found ? { ok: true, text: "V5: ok" } : { ok: false, text: "V5: MISSING" };
+      }));
+
+      record(stepName, variantResults.every(Boolean), parts.join("; "));
+    } catch (error) {
+      record(stepName, false, String(error?.message ?? error).slice(0, 200));
+    }
+    await clearDialog();
+  }
+
   // ── sub-agent run: OMP's `task` tool spawns a child session that loads the plugin again ─
   // Issues #13/#15: the child must not forward its own replies to Telegram, and the
   // main session's Telegram runtime (connection and /tg) must survive the child's start.

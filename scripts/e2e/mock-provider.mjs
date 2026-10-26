@@ -261,6 +261,13 @@ const server = createServer(async (req, res) => {
       ? { name: probeTool, arguments: probeArguments }
       : (triggerAnyAsk ? { name: askTool, arguments: askArgs } : undefined));
 
+  // Slow reply probe: a driver message containing SLOW_REPLY_PROBE gets an ordinary text reply
+  // that starts only after 6 s, so a turn is still running while the driver sends more input.
+  // Tool-result turns are excluded so the probe reply is never delayed mid-tool-loop.
+  if (!scriptedCall && !justAnswered && latestUserText.includes("SLOW_REPLY_PROBE")) {
+    await new Promise((resolve) => setTimeout(resolve, 6000));
+  }
+
   const wantsStream = parsed.stream === true;
   const id = "chatcmpl-e2e";
   const created = Math.floor(Date.now() / 1000);
