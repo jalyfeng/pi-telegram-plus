@@ -56,6 +56,7 @@ export function takePendingRace(): RaceHandle | undefined {
 export function installRace(
   target: Record<string, unknown>,
   method: RaceMethod,
+  scope?: object,
 ): boolean {
   const current = target[method];
   if (typeof current !== "function") return false;
@@ -112,7 +113,7 @@ export function installRace(
   }
   mark(target, `race:${method}`);
   markFunctionRaced(wrapped);
-  markFunction(current);
-  markFunction(wrapped);
+  markFunction(current, scope);
+  markFunction(wrapped, scope);
   return true;
 }

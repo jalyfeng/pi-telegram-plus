@@ -339,7 +339,7 @@ export class FocusTracker {
     const racedMethods = state.host === "omp"
       ? ["select", "confirm", "input", "editor", "approve", "askDialog"] as const
       : ["select", "confirm", "input"] as const;
-    if (toolUi) for (const method of racedMethods) installRace(toolUi, method);
+    if (toolUi) for (const method of racedMethods) installRace(toolUi, method, this);
     if (state.host === "omp") hookEntryMethods(state.mode, OMP_ENTRY_SPECS, sink, "omp", this);
     if (state.host === "pi" && state.mode) {
       hookEntryMethods(state.mode, PI_ENTRY_SPECS, sink, "pi", this);

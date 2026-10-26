@@ -329,3 +329,53 @@ describe("entry hooks are scoped to one FocusTracker instance", () => {
     expect(pushes()).toBe(1);
   });
 });
+
+/**
+ * H27: pi's per-tick flow (entry hooks, then the race on the same object) must
+ * not stack a new entry wrapper and a new race wrapper on every tick. The
+ * race has to be scoped to the same FocusTracker as the entry hooks, or the
+ * entry hook never sees the race wrapper as its own and wraps again.
+ */
+describe("pi per-tick attach with one scope does not stack wrappers (H27)", () => {
+  const PI_TICK_METHODS = ["select", "confirm", "input"] as const;
+
+  function stableUi(): Host {
+    return {
+      select: async () => "host",
+      confirm: async () => "host",
+      input: async () => "host",
+    };
+  }
+
+  it("keeps one entry layer and one race layer after 100 ticks in one scope", async () => {
+    const ui = stableUi();
+    const { sink, pushes } = countingSink();
+    const scope = {};
+    const hookedPerTick: string[][] = [];
+    const racedPerTick: boolean[][] = [];
+
+    for (let tick = 0; tick < 100; tick += 1) {
+      hookedPerTick.push(hookEntryMethods(ui, UI_CONTEXT_SPECS, sink, "pi", scope));
+      racedPerTick.push(PI_TICK_METHODS.map((method) => installRace(ui, method, scope)));
+    }
+
+    // Only the first tick wraps anything.
+    for (const hooked of hookedPerTick.slice(1)) expect(hooked).toEqual([]);
+    for (const raced of racedPerTick.slice(1)) expect(raced.every((installed) => !installed)).toBe(true);
+
+    await expect((ui.select as Dialog)(...PI_ARGS())).resolves.toBe("host");
+    expect(pushes()).toBe(1);
+  });
+
+  it("still resolves the host answer without a scope (old behavior, not changed)", async () => {
+    const ui = stableUi();
+    const { sink } = countingSink();
+
+    for (let tick = 0; tick < 100; tick += 1) {
+      hookEntryMethods(ui, UI_CONTEXT_SPECS, sink, "pi");
+      for (const method of PI_TICK_METHODS) installRace(ui, method);
+    }
+
+    await expect((ui.select as Dialog)(...PI_ARGS())).resolves.toBe("host");
+  });
+});
