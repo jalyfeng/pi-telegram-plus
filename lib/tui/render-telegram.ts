@@ -296,8 +296,24 @@ function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: Render
   return { text: header(model.title, undefined, body), rows: [cancelRow(ctx)], keyMap: new Map(), page: 0, pages: 1 };
 }
 
+/** Progress lines keep their line breaks: each line is shortened on its own,
+ * and whole lines are dropped from the end once the 900-character budget is spent. */
+function progressBody(text: string): string {
+  const kept: string[] = [];
+  let total = 0;
+  for (const raw of text.split("\n")) {
+    const line = shorten(raw, 900);
+    if (line === "") continue;
+    const cost = line.length + (kept.length > 0 ? 1 : 0);
+    if (total + cost > 900) break;
+    kept.push(line);
+    total += cost;
+  }
+  return kept.join("\n");
+}
+
 function renderProgress(model: Extract<DialogModel, { kind: "progress" }>, ctx: RenderContext): RenderedDialog {
-  const body = `⏳ ${escapeHtml(shorten(model.text, 900))}\n`;
+  const body = `⏳ ${escapeHtml(progressBody(model.text))}\n`;
   return {
     text: header("Running", undefined, [body]),
     rows: model.cancellable ? [cancelRow(ctx)] : [],

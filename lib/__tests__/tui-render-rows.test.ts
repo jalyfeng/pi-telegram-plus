@@ -89,3 +89,17 @@ describe("input dialog shows the login body as plain text", () => {
     );
   });
 });
+
+describe("progress dialog keeps its lines", () => {
+  it("renders each line of a multi-line progress text on its own line", () => {
+    const url = "https://platform.deepseek.com/api_keys";
+    const text = ["Sign in to DeepSeek", "Create or copy your API key.", url, "Waiting for browser authentication…"].join("\n");
+    const rendered = renderDialog({ kind: "progress", text, cancellable: true }, CTX).text;
+    expect(rendered).toContain(`Sign in to DeepSeek\nCreate or copy your API key.\n${url}\nWaiting for browser authentication…`);
+  });
+
+  it("escapes HTML in progress lines and keeps the whole URL", () => {
+    const rendered = renderDialog({ kind: "progress", text: "A & B\nhttps://example.test/a?x=1&y=2", cancellable: true }, CTX).text;
+    expect(rendered).toContain("A &amp; B\nhttps://example.test/a?x=1&amp;y=2");
+  });
+});

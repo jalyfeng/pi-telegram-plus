@@ -130,6 +130,14 @@ function tspText(value: unknown): string {
   return "";
 }
 
+/** A node's readable text: `p.text`, else `p.spans` (styled or linked text
+ * keeps its content there), or a spinner's `p.label`. Empty when it has none. */
+function nodeText(node: NativeNodeLike): string {
+  if (!isObject(node.p)) return "";
+  if (node.k === "spinner") return tspText(node.p.label);
+  return tspText(node.p.text) || tspText(node.p.spans);
+}
+
 function describeTree(component: object): NativeNodeLike | undefined {
   const describe = (component as Partial<Describable>).describe;
   if (typeof describe !== "function") return undefined;
@@ -917,7 +925,7 @@ function collectPromptDetail(node: NativeNodeLike, state: ScanState): void {
   if (state.detailSeen.has(node)) return;
   state.detailSeen.add(node);
   if (node.k === "text" && isObject(node.p)) {
-    const text = tspText(node.p.text).trim();
+    const text = nodeText(node).trim();
     if (text) state.detail.push(text);
   }
   const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
@@ -1095,9 +1103,9 @@ function collectLoginLines(component: object, depth: number, visited: Set<object
 function collectLoginNode(node: NativeNodeLike, depth: number, visited: Set<object>, lines: string[], inside: boolean): void {
   const role = isObject(node.p) && typeof node.p.role === "string" ? node.p.role : undefined;
   const collecting = inside || (role !== undefined && (LOGIN_BODY_ROLES.has(role) || role === LOGIN_STATUS_ROLE));
-  if (collecting && node.k === "text" && isObject(node.p)) {
+  if (collecting && (node.k === "text" || node.k === "spinner") && isObject(node.p)) {
     // Each node is reached once: the loop below guards every child by `visited`.
-    const text = tspText(node.p.text).trim();
+    const text = nodeText(node).trim();
     if (text) lines.push(text);
   }
   const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
@@ -1114,11 +1122,28 @@ function collectLoginNode(node: NativeNodeLike, depth: number, visited: Set<obje
   }
 }
 
-/** The login overlay's heading (`overlay` root `p.head`), or a generic one. */
+/** The login overlay's heading: `p.head` of the first `overlay` node in the
+ * described tree (depth-first), or a generic one. */
 function loginHeading(component: object): string {
   const root = describeTree(component);
-  const head = root && isObject(root.p) ? tspText(root.p.head).trim() : "";
+  const head = root ? overlayHead(root, new Set<object>()) : "";
   return head === "" ? "Sign in" : head;
+}
+
+function overlayHead(node: NativeNodeLike, visited: Set<object>): string {
+  if (visited.has(node)) return "";
+  visited.add(node);
+  if (node.k === "overlay" && isObject(node.p)) {
+    const head = tspText(node.p.head).trim();
+    if (head !== "") return head;
+  }
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  for (const child of children) {
+    if (!isObject(child)) continue;
+    const head = overlayHead(child as NativeNodeLike, visited);
+    if (head !== "") return head;
+  }
+  return "";
 }
 
 /**

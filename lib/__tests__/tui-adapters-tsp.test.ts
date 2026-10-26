@@ -1045,7 +1045,16 @@ function makeOmpLoginSheet(opts: { shortcut?: boolean; withBody?: boolean } = {}
     {
       k: "row",
       p: { role: "omp.login.link" },
-      c: [{ k: "text", p: { role: "omp.login.url", text: [{ t: "https://example.test/device" }], title: "https://example.test/device" } }],
+      c: [
+        {
+          k: "text",
+          p: {
+            role: "omp.login.url",
+            title: "https://example.test/device",
+            spans: [{ t: "https://example.test/device", s: "mono", href: "https://example.test/device" }],
+          },
+        },
+      ],
     },
     ...(opts.shortcut ? [{ k: "text", p: { role: "omp.login.shortcut", text: "Press o to open in browser" } }] : []),
   ];
@@ -1057,8 +1066,19 @@ function makeOmpLoginSheet(opts: { shortcut?: boolean; withBody?: boolean } = {}
     describe: () => ({
       k: "col",
       c: [
-        ...body,
-        { k: "col", p: { role: "omp.login.prompt" }, c: [{ k: "text", p: { role: "omp.login.label", text: "Waiting for approval, then press Enter" } }, field] },
+        {
+          k: "overlay",
+          p: { role: "omp.overlay.login", head: "Sign in to DeepSeek" },
+          c: [
+            {
+              k: "col",
+              c: [
+                ...body,
+                { k: "col", p: { role: "omp.login.prompt" }, c: [{ k: "text", p: { role: "omp.login.label", text: "Waiting for approval, then press Enter" } }, field] },
+              ],
+            },
+          ],
+        },
       ],
     }),
     handleNativeEvent: () => undefined,
@@ -1108,19 +1128,42 @@ function makeLoginSheetPhases() {
     handleInput: () => undefined,
     describe: () => ({
       k: "col",
-      p: { role: "omp.overlay.login", head: "Sign in to DeepSeek" },
       c: [
-        { k: "text", p: { role: "omp.login.lead", text: "Sign in to DeepSeek in your browser." } },
-        { k: "row", p: { role: "omp.login.code" }, c: [{ k: "text", p: { text: [{ t: "Code: " }, { t: "ABCD-1234" }] } }] },
         {
-          k: "row",
-          p: { role: "omp.login.link" },
-          c: [{ k: "text", p: { role: "omp.login.url", text: [{ t: "https://example.test/device" }] } }],
+          k: "overlay",
+          p: { role: "omp.overlay.login", head: "Sign in to DeepSeek" },
+          c: [
+            {
+              k: "col",
+              c: [
+                { k: "text", p: { role: "omp.login.lead", text: "Sign in to DeepSeek in your browser." } },
+                { k: "row", p: { role: "omp.login.code" }, c: [{ k: "text", p: { text: [{ t: "Code: " }, { t: "ABCD-1234" }] } }] },
+                {
+                  k: "row",
+                  p: { role: "omp.login.link" },
+                  c: [
+                    {
+                      k: "text",
+                      p: {
+                        role: "omp.login.url",
+                        title: "https://example.test/device",
+                        spans: [{ t: "https://example.test/device", s: "mono", href: "https://example.test/device" }],
+                      },
+                    },
+                  ],
+                },
+                {
+                  k: "col",
+                  p: { role: "omp.login.status" },
+                  c: [{ k: "row", p: { role: "omp.login.waiting" }, c: [{ k: "spinner", p: { style: "orbit", label: state.status, tone: "muted" } }] }],
+                },
+                ...(state.prompt
+                  ? [{ k: "col", p: { role: "omp.login.prompt" }, c: [{ k: "text", p: { role: "omp.login.label", text: "Paste the code, then press Enter" } }, field] }]
+                  : []),
+              ],
+            },
+          ],
         },
-        { k: "col", p: { role: "omp.login.status" }, c: [{ k: "text", p: { text: state.status } }, { k: "text", p: { text: "" } }] },
-        ...(state.prompt
-          ? [{ k: "col", p: { role: "omp.login.prompt" }, c: [{ k: "text", p: { role: "omp.login.label", text: "Paste the code, then press Enter" } }, field] }]
-          : []),
       ],
     }),
     handleNativeEvent: (event: unknown) => { events.push(event); },
