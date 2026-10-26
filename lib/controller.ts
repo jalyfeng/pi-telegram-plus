@@ -871,6 +871,8 @@ export function createTelegramController(deps: {
   const promptUiMode = (): "telegram-native" | "host" =>
     (hostOwnsPrompts(bridge) ? "host" : "telegram-native");
 
+  const BASH_BUSY_TEXT = "⚠️ A bash command is already running. Wait for it to finish, or send /stop to cancel it.";
+
   const runTelegramBash = async (
     command: string,
     excludeFromContext: boolean,
@@ -895,6 +897,14 @@ export function createTelegramController(deps: {
       return;
     }
 
+    // Same rule as the TUI: while a bash command is running, a new `!` is
+    // refused here, before any confirmation and before the gateway opens a
+    // scope for it (otherwise the running command's output lands on this one).
+    if (isBashRunning(session)) {
+      await deps.transport.sendText(chatId, BASH_BUSY_TEXT, messageThreadId, sourceMessageId);
+      return;
+    }
+
     const policy: TelegramBashConfirm = deps.getConfig?.().bashConfirm ?? "dangerous";
     if (policy === "always" || (policy === "dangerous" && isDangerousBash(command))) {
       const confirmUi = deps.ui.create(chatId, messageThreadId, sourceMessageId);
@@ -913,6 +923,11 @@ export function createTelegramController(deps: {
     // host's own user_bash pipeline decides context inclusion and runs the
     // command, and OutputCapture returns the BashExecutionComponent's final
     // render to the ack message.
+    // A confirmation may have taken a while; re-check before submitting.
+    if (isBashRunning(session)) {
+      await deps.transport.sendText(chatId, BASH_BUSY_TEXT, messageThreadId, sourceMessageId);
+      return;
+    }
     const text = `${excludeFromContext ? "!!" : "!"}${command}`;
     const submitted = await commandGateway.runText({
       text,

@@ -245,6 +245,49 @@ describe("Telegram shell commands", () => {
       runText.mockRestore();
     }
   });
+
+  it("refuses a new ! while a bash command is already running", async () => {
+    const runText = vi.spyOn(CommandGateway.prototype, "runText").mockResolvedValue(true);
+    try {
+      const harness = createHarness({ session: createSession({ isBashRunning: true }) });
+      await send(harness.controller, "!ls", 20);
+
+      await vi.waitFor(() => expect(harness.calls.some((call) => call.text?.includes("already running"))).toBe(true));
+      expect(runText).not.toHaveBeenCalled();
+    } finally {
+      runText.mockRestore();
+    }
+  });
+
+  it("submits ! as usual when no bash command is running", async () => {
+    const runText = vi.spyOn(CommandGateway.prototype, "runText").mockResolvedValue(true);
+    try {
+      const harness = createHarness({ session: createSession({ isBashRunning: false }) });
+      await send(harness.controller, "!ls", 21);
+
+      await vi.waitFor(() => expect(runText).toHaveBeenCalledWith(expect.objectContaining({ text: "!ls", label: "!" })));
+      expect(harness.calls.some((call) => call.text?.includes("already running"))).toBe(false);
+    } finally {
+      runText.mockRestore();
+    }
+  });
+
+  it("refuses a dangerous ! while running without asking for confirmation", async () => {
+    const runText = vi.spyOn(CommandGateway.prototype, "runText").mockResolvedValue(true);
+    try {
+      const harness = createHarness({
+        session: createSession({ isBashRunning: true }),
+        config: { bashConfirm: "dangerous", activeChatId: 42 },
+      });
+      await send(harness.controller, "!rm -rf /tmp/example", 22);
+
+      await vi.waitFor(() => expect(harness.calls.some((call) => call.text?.includes("already running"))).toBe(true));
+      expect(harness.confirm).not.toHaveBeenCalled();
+      expect(runText).not.toHaveBeenCalled();
+    } finally {
+      runText.mockRestore();
+    }
+  });
 });
 
 describe("Mirror text fitting", () => {
