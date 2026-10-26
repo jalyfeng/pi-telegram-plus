@@ -7,7 +7,7 @@
  * as nothing but a command receipt.
  */
 import { describe, expect, it } from "vitest";
-import { describesDialog } from "../tui/adapters/tsp.ts";
+import { describesDialog, describesLoginSheet } from "../tui/adapters/tsp.ts";
 import { FocusTracker, type FocusKind } from "../tui/focus.ts";
 
 /** OMP's model picker: keys, a render, a cancellation signal, a TSP description. */
@@ -120,5 +120,88 @@ describe("describesDialog", () => {
   it("is false for a describe that throws or a component that has none", () => {
     expect(describesDialog({ describe: () => { throw new Error("no tree"); }, handleNativeEvent: () => undefined })).toBe(false);
     expect(describesDialog({ render: () => "", handleInput: () => undefined })).toBe(false);
+  });
+});
+
+/** OMP's login sheet as a class: a `signal` getter like the real dialog, keys and a TSP description. */
+class OmpLoginSheetLike {
+  get signal() { return new AbortController().signal; }
+  render() { return ""; }
+  handleInput() { return undefined; }
+  handleNativeEvent() { return undefined; }
+  constructor(private readonly tree: unknown) {}
+  describe() { return this.tree; }
+}
+
+/** A loader-named class with a `signal` getter and no login roles in its description. */
+class SpinnerLoader {
+  get signal() { return new AbortController().signal; }
+  render() { return ""; }
+  handleInput() { return undefined; }
+  describe() { return OTHER_TREE; }
+}
+
+const LOGIN_LINK_TREE = {
+  k: "col",
+  p: { role: "omp.overlay.login" },
+  c: [
+    { k: "text", p: { role: "omp.login.lead", text: "Sign in to DeepSeek in your browser." } },
+    {
+      k: "row",
+      p: { role: "omp.login.link" },
+      c: [{ k: "text", p: { role: "omp.login.url", text: [{ t: "https://example.test/device" }] } }],
+    },
+  ],
+};
+
+const LOGIN_INPUT_TREE = {
+  k: "col",
+  p: { role: "omp.overlay.login" },
+  c: [
+    { k: "text", p: { role: "omp.login.lead", text: "Sign in to DeepSeek in your browser." } },
+    { k: "text", p: { role: "omp.login.url", text: [{ t: "https://example.test/device" }] } },
+    { k: "col", p: { role: "omp.login.prompt" }, c: [{ k: "label", p: { t: "Paste your API key" } }, { k: "input", p: { placeholder: "paste code" } }] },
+  ],
+};
+
+describe("an OMP login sheet is a dialog, whether it waits for an answer or for the browser", () => {
+  it("classifies a login sheet with an input as a dialog", () => {
+    const { ui, kinds } = fakeHost("omp");
+    ui.setFocus(new OmpLoginSheetLike(LOGIN_INPUT_TREE));
+    expect(kinds.at(-1)).toBe("dialog");
+  });
+
+  it("classifies a link-only login sheet (no input node) as a dialog", () => {
+    const { ui, kinds } = fakeHost("omp");
+    ui.setFocus(new OmpLoginSheetLike(LOGIN_LINK_TREE));
+    expect(kinds.at(-1)).toBe("dialog");
+  });
+
+  it("keeps a loader-named signal component with no login roles on progress", () => {
+    const { ui, kinds } = fakeHost("omp");
+    ui.setFocus(new SpinnerLoader());
+    expect(kinds.at(-1)).toBe("progress");
+  });
+
+  it("on the pi host a login-shaped description still means progress", () => {
+    const { ui, kinds } = fakeHost("pi");
+    ui.setFocus(new OmpLoginSheetLike(LOGIN_LINK_TREE));
+    expect(kinds.at(-1)).toBe("progress");
+  });
+});
+
+describe("describesLoginSheet", () => {
+  it("finds a login role in a nested component's own description", () => {
+    const inner = new OmpLoginSheetLike(LOGIN_LINK_TREE);
+    expect(describesLoginSheet({ describe: () => ({ k: "box", p: {}, c: [inner] }) })).toBe(true);
+  });
+
+  it("is false for a description with no login role", () => {
+    expect(describesLoginSheet(new OmpLoginSheetLike(OTHER_TREE))).toBe(false);
+  });
+
+  it("is false for a describe that throws or a component that has none", () => {
+    expect(describesLoginSheet({ describe: () => { throw new Error("no tree"); } })).toBe(false);
+    expect(describesLoginSheet({ render: () => "", handleInput: () => undefined })).toBe(false);
   });
 });

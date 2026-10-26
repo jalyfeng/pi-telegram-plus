@@ -16,7 +16,7 @@ import { onHostState, hookMethod, isHostObject, type HostState } from "./host.ts
 import { hookEntryMethods, insideEntryCall, PI_ENTRY_SPECS, UI_CONTEXT_SPECS, OMP_ENTRY_SPECS, type EntrySink } from "./entry.ts";
 import { installRace, takePendingRace } from "./race.ts";
 import { isEditorShape, isFilteredList, isInputShape, isReadOnlyPanel, isSelectList, isSettingsList } from "./find-shape.ts";
-import { describesDialog } from "./adapters/tsp.ts";
+import { describesDialog, describesLoginSheet } from "./adapters/tsp.ts";
 import type { EntryInfo } from "./model.ts";
 import { log } from "../logger.ts";
 
@@ -542,9 +542,10 @@ export class FocusTracker {
     // OMP's pickers, settings pages and login prompts carry `signal`/`abortController`
     // like a loader does, so the rule below would file them under "progress" and the
     // broker would never open a session. A component that describes itself as a
-    // picker, a prefs page, or a text prompt is a dialog the TSP adapters can drive
-    // (§4.11.3). OMP only: pi has no `describe`, and its loaders keep matching below.
-    if (this.lastState?.host === "omp" && describesDialog(component)) return "dialog";
+    // picker, a prefs page, a text prompt, or a login sheet (including the link-only form
+    // that has no input) is a dialog the TSP adapters can drive (§4.11.3). OMP only: pi has
+    // no `describe`, and its loaders keep matching below.
+    if (this.lastState?.host === "omp" && (describesDialog(component) || describesLoginSheet(component))) return "dialog";
     if (name.endsWith("Loader") || component.signal !== undefined || component.abortController !== undefined) {
       return "progress";
     }

@@ -224,6 +224,48 @@ export function describesDialog(component: object): boolean {
   return describesTextInput(component);
 }
 
+/**
+ * True when `component`'s own description, or one of the components it nests,
+ * holds an OMP login-dialog node (`omp.login.*`) or the login overlay root
+ * (`omp.overlay.login`). The "only a link, waiting for the browser" form has no
+ * `input` node, so {@link describesDialog} misses it. A `describe` that throws
+ * describes nothing, so this is false.
+ */
+export function describesLoginSheet(component: object): boolean {
+  return loginSheetIn(component, 0, new Set<object>());
+}
+
+function loginSheetIn(component: object, depth: number, visited: Set<object>): boolean {
+  if (depth > MAX_COMPONENT_DEPTH || visited.has(component)) return false;
+  visited.add(component);
+  const root = describeTree(component);
+  if (!root) return false;
+  visited.add(root);
+  return loginSheetNode(root, depth, visited);
+}
+
+function loginSheetNode(node: NativeNodeLike, depth: number, visited: Set<object>): boolean {
+  if (isObject(node.p) && isLoginRole(node.p.role)) return true;
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
+  if (!children) return false;
+  for (const child of children) {
+    if (!isObject(child)) continue;
+    const component = asComponent(child);
+    if (component) {
+      if (loginSheetIn(component, depth + 1, visited)) return true;
+      continue;
+    }
+    if (visited.has(child)) continue;
+    visited.add(child);
+    if (loginSheetNode(child as NativeNodeLike, depth, visited)) return true;
+  }
+  return false;
+}
+
+function isLoginRole(role: unknown): boolean {
+  return typeof role === "string" && (role.startsWith("omp.login.") || role === "omp.overlay.login");
+}
+
 /** The catalogue id list, honouring `order` (string entries that exist) when present. */
 function visibleItems(props: PickerProps): PickerItemLike[] {
   const items = Array.isArray(props.items) ? (props.items as readonly PickerItemLike[]) : [];
