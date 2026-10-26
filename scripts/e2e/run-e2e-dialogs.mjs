@@ -844,9 +844,44 @@ async function runHost(host, servers) {
           .then(() => true).catch(() => false);
         const detailTwo = `/tg menu ${menu ? "sent" : "missing"} · plain message ${newRequest ? "reached the model" : "never reached the model"} · reply ${replied ? "sent" : "missing"}`;
 
+        // ③ /tg in the TUI still opens a dialog: after the editor is focused, typing /tg
+        // must make the host focus a component that is not the editor. The editor's class
+        // name is taken from the last focus event recorded while the host was idle.
+        await clearDialog();
+        await sleep(1500);
+        const focusBefore = probeDoc(probePath)?.focusEvents;
+        let tuiDialog = "";
+        let detailThree;
+        if (!Array.isArray(focusBefore) || focusBefore.length === 0) {
+          detailThree = " · TUI /tg opened no dialog (no focus events to use as a baseline)";
+        } else {
+          const editorCtor = String(focusBefore.at(-1)?.data?.focus?.ctor ?? "");
+          const typedAt = Date.now();
+          tmux("send-keys", "-t", session, "-l", "/tg");
+          tmux("send-keys", "-t", session, "Enter");
+          const tuiDeadline = Date.now() + 8_000;
+          while (Date.now() < tuiDeadline && !tuiDialog) {
+            const events = probeDoc(probePath)?.focusEvents;
+            const hit = (Array.isArray(events) ? events : []).find((event) =>
+              Number(event?.at ?? 0) >= typedAt && String(event?.data?.focus?.ctor ?? "") !== editorCtor);
+            if (hit) tuiDialog = String(hit.data.focus.ctor);
+            else await sleep(250);
+          }
+          if (tuiDialog) {
+            detailThree = ` · TUI /tg opened a dialog (${tuiDialog})`;
+          } else {
+            const seen = [...new Set((Array.isArray(probeDoc(probePath)?.focusEvents) ? probeDoc(probePath).focusEvents : [])
+              .filter((event) => Number(event?.at ?? 0) >= typedAt)
+              .map((event) => String(event?.data?.focus?.ctor ?? ""))
+              .filter(Boolean))];
+            detailThree = ` · TUI /tg opened no dialog (host focused: ${seen.join("/") || "nothing"})`;
+          }
+        }
+        await clearDialog();
+
         record("sub-agent run leaves the Telegram runtime intact",
-          standalone.length === 0 && menu && Boolean(newRequest) && replied,
-          `task approval answered from Telegram: ${approvalText} · ${detailOne} · ${detailTwo}`);
+          standalone.length === 0 && menu && Boolean(newRequest) && replied && Boolean(tuiDialog),
+          `task approval answered from Telegram: ${approvalText} · ${detailOne} · ${detailTwo}${detailThree}`);
       } catch (error) {
         record("sub-agent run leaves the Telegram runtime intact", false, String(error.message).slice(0, 200));
       }
