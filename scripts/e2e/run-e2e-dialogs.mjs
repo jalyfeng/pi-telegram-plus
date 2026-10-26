@@ -243,9 +243,9 @@ function seed(host, runDir, probePath) {
 
 function hostArgs(host, pluginArgs) {
   return host === "omp"
-    ? [OMP_CLI, ...pluginArgs, "--model", "mock/mock-model", "--no-skills", "--no-rules",
+    ? [OMP_CLI, ...pluginArgs, "--model", "mock/mock-model", "--no-extensions", "--no-skills", "--no-rules",
        "--no-lsp", "--approval-mode", "write", "--no-title"]
-    : [PI_CLI, "--no-skills", ...pluginArgs, "--provider", "mock", "--model", "mock-model"];
+    : [PI_CLI, "--no-skills", "--no-extensions", ...pluginArgs, "--provider", "mock", "--model", "mock-model"];
 }
 
 async function runHost(host, servers) {

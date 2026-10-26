@@ -295,6 +295,7 @@ async function runE2e() {
   const isolationArgs = [
     ...(flags.noMcp ? ["--no-mcp"] : []),
     ...(flags.noSkills ? ["--no-skills"] : []),
+    "--no-extensions",
   ];
   const envArgs = Object.entries(env)
     .map(([k, v]) => ["-e", `${k}=${v}`])

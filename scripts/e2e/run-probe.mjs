@@ -264,6 +264,7 @@ async function main() {
     ? [
         piCli,
         "--no-skills",
+        "--no-extensions",
         ...extensionArgs,
         "--provider", "mock",
         "--model", "mock-model",
