@@ -40,7 +40,7 @@ const MAX_COMPONENT_DEPTH = 4;
 type HostRecord = Record<string, unknown>;
 
 /** A described node, matched by shape only (the host may load its own copy). */
-type NativeNodeLike = HostRecord & { k?: unknown; p?: unknown; c?: unknown; key?: unknown };
+export type NativeNodeLike = HostRecord & { k?: unknown; p?: unknown; c?: unknown; key?: unknown };
 
 /** The picker props this adapter reads (`TspPickerProps` in pi-wire). */
 type PickerProps = {
@@ -124,16 +124,16 @@ function asComponent(value: unknown): Describable | undefined {
 /** A child slot to descend into when reading: only its own describe is needed.
  * OMP's form fields (`TextFormField`) describe themselves but take no events
  * of their own; the dialog root takes them. */
-type DescribableChild = Pick<Describable, "describe"> & object;
+export type DescribableChild = Pick<Describable, "describe"> & object;
 
-function describableChild(value: unknown): DescribableChild | undefined {
+export function describableChild(value: unknown): DescribableChild | undefined {
   if (!isObject(value)) return undefined;
   if (typeof (value as Partial<Describable>).describe !== "function") return undefined;
   return value as DescribableChild;
 }
 
 /** `TspText`: a plain string, or spans whose `t` pieces concatenate. */
-function tspText(value: unknown): string {
+export function tspText(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
     return value.map((span) => (isObject(span) && typeof span.t === "string" ? span.t : "")).join("");
@@ -149,7 +149,7 @@ function nodeText(node: NativeNodeLike): string {
   return tspText(node.p.text) || tspText(node.p.spans);
 }
 
-function describeTree(component: object): NativeNodeLike | undefined {
+export function describeTree(component: object): NativeNodeLike | undefined {
   const describe = (component as Partial<Describable>).describe;
   if (typeof describe !== "function") return undefined;
   try {
@@ -165,6 +165,16 @@ function describeTree(component: object): NativeNodeLike | undefined {
 function nodeProps<K extends NodeKind>(node: NativeNodeLike, kind: K): NodePropsByKind[K] | undefined {
   if (node.k !== kind || !isObject(node.p)) return undefined;
   return node.p as NodePropsByKind[K];
+}
+
+/**
+ * The keypath of a plain (non-component) child inside its parent's keypath
+ * (reconcile.ts rules): its `key` when keyed, else its index in `children`.
+ * The root's keypath is `""`, so its first segment has no leading `/`.
+ */
+export function childKeypath(parent: string, child: NativeNodeLike, index: number): string {
+  const segment = child.key === undefined ? String(index) : String(child.key);
+  return parent === "" ? segment : `${parent}/${segment}`;
 }
 
 function walkNode<K extends NodeKind>(node: NativeNodeLike, keypath: string, owner: object, kind: K, depth: number, visited: Set<object>): NodeFound<K> | undefined {
@@ -184,8 +194,7 @@ function walkNode<K extends NodeKind>(node: NativeNodeLike, keypath: string, own
     const childNode = child as NativeNodeLike;
     if (visited.has(childNode)) continue;
     visited.add(childNode);
-    const segment = childNode.key === undefined ? String(i) : String(childNode.key);
-    const found = walkNode(childNode, keypath === "" ? segment : `${keypath}/${segment}`, owner, kind, depth, visited);
+    const found = walkNode(childNode, childKeypath(keypath, childNode, i), owner, kind, depth, visited);
     if (found) return found;
   }
   return undefined;

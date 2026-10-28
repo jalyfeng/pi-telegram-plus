@@ -325,11 +325,17 @@ function renderProgress(model: Extract<DialogModel, { kind: "progress" }>, ctx: 
 
 /** Read-only panel: the text plus one way out (§4.6.5 #12). */
 function renderInfo(model: Extract<DialogModel, { kind: "info" }>, ctx: RenderContext): RenderedDialog {
-  const body = `<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>\n`;
+  const body = model.html === true ? `${model.text}\n` : `<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>\n`;
+  const actions = model.actions ?? [];
+  const buttons = actions.map((action) => button(action.label, ctx, "c", action.key)).filter((built): built is TelegramButton => built !== undefined);
+  const keyMap = new Map<string, string>();
+  actions.forEach((action) => keyMap.set(action.key, action.key));
+  const rows = chunk(buttons);
+  if (model.closable) rows.push(cancelRow(ctx, "Close"));
   return {
     text: header(model.title ?? "Terminal", undefined, [body]),
-    rows: [cancelRow(ctx, "Close")],
-    keyMap: new Map(),
+    rows: fitRows(rows),
+    keyMap,
     page: 0,
     pages: 1,
   };

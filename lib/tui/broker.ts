@@ -121,6 +121,9 @@ function activeItems(model: DialogModel): DialogItem[] {
       return activeQuestion(model)?.items ?? [];
     case "approval":
       return model.options.map((option) => ({ key: option.key, label: option.label }));
+    case "info":
+      // A panel's own buttons (describe() action nodes) answer like list rows.
+      return (model.actions ?? []).map((action) => ({ key: action.key, label: action.label }));
     default:
       return [];
   }

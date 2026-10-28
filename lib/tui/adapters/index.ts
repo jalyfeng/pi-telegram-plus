@@ -13,7 +13,7 @@ import { askDialogAdapter } from "./ask.ts";
 import { approvalAdapter } from "./approval.ts";
 import { customGoalAdapter } from "./goal.ts";
 import { extensionEditorAdapter, extensionInputAdapter, extensionSelectAdapter } from "./extension.ts";
-import { infoPanelAdapter, unsupportedAdapter } from "./panel.ts";
+import { describedPanelAdapter, infoPanelAdapter, unsupportedAdapter } from "./panel.ts";
 import { piListAdapter, piSessionAdapter, piTreeAdapter } from "./pi-lists.ts";
 import { piLoginAdapter } from "./pi-login.ts";
 import { piSettingsAdapter } from "./pi-settings.ts";
@@ -38,6 +38,8 @@ export const DIALOG_ADAPTERS: DialogAdapter[] = [
   piSettingsAdapter,
   piTreeAdapter,
   extensionSelectAdapter,
+  // OMP text panels described as text + buttons; before the frame-less info fallback.
+  describedPanelAdapter,
   infoPanelAdapter,
   unsupportedAdapter,
 ];
@@ -57,6 +59,7 @@ export {
   approvalAdapter,
   askDialogAdapter,
   customGoalAdapter,
+  describedPanelAdapter,
   extensionEditorAdapter,
   extensionInputAdapter,
   extensionSelectAdapter,

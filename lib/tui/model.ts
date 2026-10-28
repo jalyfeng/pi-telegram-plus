@@ -65,7 +65,13 @@ export type DialogModel =
   | { kind: "input"; title: string; detail?: string; placeholder?: string; secret: boolean; prefill?: string }
   | { kind: "editor"; title: string; prefill?: string }
   | { kind: "progress"; text: string; cancellable: boolean }
-  | { kind: "info"; title?: string; text: string; closable: boolean }
+  /**
+   * Read-only panel. `text` is plain text unless `html` is set, in which case it is
+   * Telegram HTML already escaped by its producer. `actions` become one button each;
+   * `closable` adds the renderer's own Close button (an adapter whose actions already
+   * include a close sets it false).
+   */
+  | { kind: "info"; title?: string; text: string; closable: boolean; html?: boolean; actions?: { label: string; key: string }[] }
   /** §4.6.5 #13: nothing can model this dialog; the chat gets a plain notice, never a frame. */
   | { kind: "unsupported"; title?: string; what: string };
 

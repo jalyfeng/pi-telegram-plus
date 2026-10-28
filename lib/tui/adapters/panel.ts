@@ -11,9 +11,22 @@
  * arrow keys over an unparsed frame guess at what the dialog meant (§4.6.5 #13,
  * decision 47).
  */
-import type { DialogAdapter, DialogModel } from "../model.ts";
+import type { AdapterContext, DialogAdapter, DialogModel } from "../model.ts";
 import { isReadOnlyPanel } from "../find-shape.ts";
+import { describedText, type DescribedAction, type DescribedText } from "../describe-text.ts";
+import { describesDialog, describesLoginSheet, describeTree } from "./tsp.ts";
 import { constructorName, renderText } from "./utils.ts";
+
+const identity = (text: string): string => text;
+
+type Describable = object & { handleNativeEvent(event: unknown): unknown };
+
+/** The panel's actions as they are described right now (live tree, not a snapshot). */
+function liveActions(component: object): DescribedText | undefined {
+  const root = describeTree(component);
+  if (!root) return undefined;
+  return describedText(root, identity, component);
+}
 
 /**
  * Whether Escape does more than close the view. pi's `BorderedLoader` keeps no
@@ -45,6 +58,70 @@ export const infoPanelAdapter: DialogAdapter = {
     return action.type === "cancel" ? ctx.sendKey("esc") : false;
   },
 };
+
+/**
+ * OMP text panels (reports, `/session`, `/usage`, `/jobs`, `/btw`): their
+ * `describe()` tree becomes Telegram text, and the panel's own buttons become
+ * Telegram buttons. Trees that hold a picker, a settings page or a text prompt
+ * belong to the tsp adapters, which run before this one.
+ */
+export const describedPanelAdapter: DialogAdapter = {
+  id: "described-panel",
+
+  detect(component, ctx) {
+    if (ctx.host !== "omp" || ctx.entry?.race) return false;
+    if (typeof (component as Partial<Describable>).handleNativeEvent !== "function") return false;
+    if (cancellable(component)) return false;
+    if (describesDialog(component) || describesLoginSheet(component)) return false;
+    return describeTree(component) !== undefined;
+  },
+
+  read(component, ctx): DialogModel {
+    const described = liveActions(component);
+    const actions = described?.actions ?? [];
+    // A close button of the panel is the way out; no second Close is added.
+    const hasClose = actions.some((action) => action.act === "close");
+    return {
+      kind: "info",
+      title: ctx.entry?.title ?? described?.title,
+      text: described?.html ?? "",
+      html: true,
+      closable: !hasClose,
+      actions: actions.map((action, index) => ({ label: action.label, key: String(index) })),
+    };
+  },
+
+  act(component, action, ctx) {
+    const live = liveActions(component);
+    if (action.type === "cancel") {
+      const close = live?.actions.find((entry) => entry.act === "close");
+      if (!close) return ctx.sendKey("esc");
+      return fire(close, ctx);
+    }
+    if (action.type !== "choose" || !live) return false;
+    const index = /^\d+$/.test(action.key) ? Number(action.key) : Number.NaN;
+    const target = Number.isInteger(index) ? live.actions[index] : undefined;
+    return target ? fire(target, ctx) : false;
+  },
+};
+
+/** Replays a described button through its owner's `handleNativeEvent`, then asks for a redraw. */
+function fire(target: DescribedAction, ctx: AdapterContext): boolean {
+  const handle = (target.owner as Partial<Describable>).handleNativeEvent;
+  if (typeof handle !== "function") return false;
+  const event = { type: "action", key: target.keypath, act: target.act, ...(target.value !== undefined ? { value: target.value } : {}), mods: [] };
+  try {
+    handle.call(target.owner, event);
+  } catch {
+    return false;
+  }
+  try {
+    ctx.requestRender();
+  } catch {
+    // A host without a live renderer has nothing to redraw; the act landed.
+  }
+  return true;
+}
 
 export const unsupportedAdapter: DialogAdapter = {
   id: "unsupported",
