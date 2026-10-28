@@ -14,7 +14,7 @@
  * attach it to the entry the very same call pushes.
  */
 
-import { hasStickyMark, isFunctionRaced, mark, markFunction, markFunctionRaced } from "./install-marks.ts";
+import { installHook } from "./hooks.ts";
 
 export type RaceHandle = {
   /** Answer from Telegram: the first call settles the race with `value`, aborts the host dialog and returns true; later calls return false. */
@@ -48,21 +48,17 @@ export function takePendingRace(): RaceHandle | undefined {
 }
 
 /**
- * Wrap `target[method]` in the race. Skips an object/method pair that already
- * has a race wrapper (keyed by the object, not the function: hosts hand out a
- * new wrapper on every read), so the per-tick `attachEntryHooks` stays
- * idempotent. Returns whether a new wrapper was installed.
+ * Put the race on `target[method]` as one stage of the object's plugin wrapper
+ * (priority 30, outside the entry stage). Installing it again replaces the
+ * stage, so the per-tick `attachEntryHooks` never adds a second layer. Returns
+ * whether the stage is in place (false for a missing method or a frozen object).
  */
 export function installRace(
   target: Record<string, unknown>,
   method: RaceMethod,
   scope?: object,
 ): boolean {
-  const current = target[method];
-  if (typeof current !== "function") return false;
-  if (hasStickyMark(target, method, `race:${method}`) || isFunctionRaced(current)) return false;
-  const call = current as (...args: unknown[]) => unknown;
-  const wrapped = function ptpRace(this: unknown, ...args: unknown[]): unknown {
+  return installHook(target, method, `race:${method}`, (next, args) => {
     const controller = new AbortController();
     const index = OPTS_INDEX[method];
     const argsCopy = [...args];
@@ -91,7 +87,7 @@ export function installRace(
     try {
       // Every argument past the options object (editor's `editorOptions` at
       // index 3) goes through untouched.
-      result = call.apply(this, [...argsCopy.slice(0, index), { ...(opts ?? {}), signal }, ...argsCopy.slice(index + 1)]);
+      result = next([...argsCopy.slice(0, index), { ...(opts ?? {}), signal }, ...argsCopy.slice(index + 1)]);
     } finally {
       pendingRace = undefined;
     }
@@ -103,17 +99,5 @@ export function installRace(
     // answer (or rejection) wins when the user was faster - errors keep
     // propagating to the extension exactly as they would without the race.
     return Promise.race([plugin.promise, host]);
-  };
-  Object.defineProperty(wrapped, "name", { value: `ptp-race:${method}` });
-  try {
-    target[method] = wrapped;
-  } catch {
-    // Frozen host object: this dialog stays keystroke-driven.
-    return false;
-  }
-  mark(target, `race:${method}`);
-  markFunctionRaced(wrapped);
-  markFunction(current, scope);
-  markFunction(wrapped, scope);
-  return true;
+  }, { priority: 30, owner: scope });
 }

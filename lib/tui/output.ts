@@ -11,6 +11,7 @@ import { stripAnsi } from "../ansi.ts";
 import { log, type LogFields } from "../logger.ts";
 import type { TelegramTransport } from "../types.ts";
 import { hookMethod, isHostObject, onHostState, type HostState } from "./host.ts";
+import { removeOwnerHooks } from "./hooks.ts";
 import type { CommandScope, OriginTracker } from "./origin.ts";
 import type { SecretStore } from "./secrets.ts";
 
@@ -110,6 +111,7 @@ export class OutputCapture {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     this.finish();
+    removeOwnerHooks(this);
   }
 
   bind(scope: CommandScope, telegram: OutputTelegram): void {
@@ -177,7 +179,7 @@ export class OutputCapture {
       this.origin.touch(binding.scope);
       const timer = setTimeout(() => this.emitBashOutput(child, binding, false), BASH_SETTLE_MS);
       timer.unref?.();
-    });
+    }, this);
   }
 
   private emitBashOutput(child: Record<string, unknown>, binding: Binding, final: boolean): void {
@@ -233,7 +235,7 @@ export class OutputCapture {
           if (typeof message !== "string" || message.trim().length === 0) return;
           const prefix = name === "showError" ? "❌ " : name === "showWarning" ? "⚠️ " : "";
           this.push(`${prefix}${escapeHtml(this.redact(stripAnsi(message)))}`);
-        });
+        }, this);
       }
     }
     // OMP reports (`/mcp` and friends) draw a titled block on the main screen
@@ -250,7 +252,7 @@ export class OutputCapture {
           : undefined;
         if (!title && !body) return;
         this.push(title ? `<b>${escapeHtml(this.redact(title))}</b>\n${body ?? ""}` : body!);
-      });
+      }, this);
     }
 
     const chat = state.chat;
@@ -260,7 +262,7 @@ export class OutputCapture {
         this.rebuilding.add(chat);
         const timer = setTimeout(() => { this.rebuilding.delete(chat); }, 0);
         timer.unref?.();
-      });
+      }, undefined, this);
       hookMethod(chat, "addChild", "output-add-child", undefined, (args) => {
         if (this.statusDepth > 0) return;
         // REBUILD_OUTPUT_LABELS commands clear the transcript and append
@@ -290,7 +292,7 @@ export class OutputCapture {
         this.logCaptured(child, html);
         if (!html) return;
         this.push(html);
-      });
+      }, this);
     }
     // H34: a `!` command run while the agent streams is parked in the host's
     // pending area (pi interactive-mode.js 5866, OMP command-controller.ts
@@ -305,7 +307,7 @@ export class OutputCapture {
         if (!isHostObject(child)) return;
         if (this.binding?.scope.label !== "!" || !isBashExecutor(child)) return;
         this.trackBashComponent(child);
-      });
+      }, this);
     }
     // T4.4: `/export` ends with a file on disk; the terminal prints its path,
     // the Telegram user gets the file itself (decision 20). The wrapper goes on
@@ -329,7 +331,7 @@ export class OutputCapture {
           const target = Object.prototype.hasOwnProperty.call(session, name) ? session : proto;
           hookMethod(target, name, `output-${name}`, undefined, (_args, result) => {
             this.captureExport(result);
-          });
+          }, this);
         }
       }
     }

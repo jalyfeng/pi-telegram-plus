@@ -16,7 +16,7 @@
  * nested call merges into the pending entry, so double layers stay one entry.
  */
 import type { EntryInfo } from "./model.ts";
-import { hasStickyMark, isFunctionMarked, mark, markFunction } from "./install-marks.ts";
+import { installHook, type HookStage } from "./hooks.ts";
 
 /** A recorded entry, returned so the hook that pushed it retires its own record. */
 export type EntryToken = object;
@@ -204,10 +204,11 @@ const isThenable = (value: unknown): value is PromiseLike<unknown> =>
   !!value && typeof value === "object" && typeof (value as PromiseLike<unknown>).then === "function";
 
 /**
- * Wrap every listed entry method of one object. An object/method pair that is
- * already wrapped is skipped (keyed by the object, not the function: hosts hand
- * out a new wrapper on every read), which matters because both hosts expose the
- * same dialog through a tool context *and* a mode method.
+ * Put every listed entry method of one object on the object's plugin wrapper
+ * (priority 20, as a stage: see `hooks.ts`). Installing again replaces the
+ * stage with the one for this sink and scope, so a rebuilt FocusTracker takes
+ * over the entries and a per-tick attach never adds a layer. Returns the
+ * methods this call put in place.
  */
 export function hookEntryMethods(
   target: Record<string, unknown> | undefined,
@@ -219,22 +220,13 @@ export function hookEntryMethods(
   if (!target) return [];
   const hooked: string[] = [];
   for (const spec of specs) {
-    const original = target[spec.method];
-    if (typeof original !== "function") continue;
-    if (hasStickyMark(target, spec.method, `entry:${spec.method}`, scope)) continue;
-    // Pi hands the same dialog function to two objects as their own property:
-    // the function already wrapped through one of them must not be wrapped
-    // again (H24). An inherited method is shared by every instance of the class
-    // by design, so it says nothing about the other object.
-    const ownMethod = Object.prototype.hasOwnProperty.call(target, spec.method);
-    if (ownMethod && isFunctionMarked(original, scope)) continue;
-    const call = original as (...args: unknown[]) => unknown;
-    const wrapped = spec.factory
-      ? function patchedCustom(this: unknown, ...args: unknown[]): unknown {
+    const stage: HookStage = spec.factory
+      ? (next, args) => {
           const info = entryFromCall(spec, args, source);
-          if (!info) return call.apply(this, args);
+          if (!info) return next(args);
           const factory = args[0];
-          args[0] = (...factoryArgs: unknown[]) => {
+          const wrappedArgs = [...args];
+          wrappedArgs[0] = (...factoryArgs: unknown[]) => {
             const bind = (component: unknown): unknown => {
               if (component && typeof component === "object") sink.bind(component as object, info);
               return component;
@@ -245,9 +237,9 @@ export function hookEntryMethods(
             }
             return bind(produced);
           };
-          return call.apply(this, args);
+          return next(wrappedArgs);
         }
-      : function patchedEntry(this: unknown, ...args: unknown[]): unknown {
+      : (next, args) => {
           let token: EntryToken | undefined;
           let info: EntryInfo | undefined;
           try {
@@ -259,7 +251,7 @@ export function hookEntryMethods(
           let result: unknown;
           entryCallDepth += 1;
           try {
-            result = call.apply(this, args);
+            result = next(args);
           } finally {
             entryCallDepth -= 1;
           }
@@ -271,15 +263,8 @@ export function hookEntryMethods(
           else retire();
           return result;
         };
-    Object.defineProperty(wrapped, "name", { value: `ptp:${spec.method}` });
-    try {
-      target[spec.method] = wrapped;
-      mark(target, `entry:${spec.method}`, scope);
-      markFunction(original, scope);
-      markFunction(wrapped, scope);
+    if (installHook(target, spec.method, `entry:${spec.method}`, stage, { priority: 20, owner: scope })) {
       hooked.push(spec.method);
-    } catch {
-      // Frozen host object: the SnapshotAdapter still covers this dialog.
     }
   }
   return hooked;

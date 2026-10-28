@@ -13,6 +13,7 @@
  *   keystroke in the terminal is distinguishable from anything the plugin does.
  */
 import { onHostState, hookMethod, isHostObject, type HostState } from "./host.ts";
+import { removeOwnerHooks } from "./hooks.ts";
 import { hookEntryMethods, insideEntryCall, PI_ENTRY_SPECS, UI_CONTEXT_SPECS, OMP_ENTRY_SPECS, type EntrySink } from "./entry.ts";
 import { installRace, takePendingRace } from "./race.ts";
 import { isEditorShape, isFilteredList, isInputShape, isReadOnlyPanel, isSelectList, isSettingsList } from "./find-shape.ts";
@@ -102,7 +103,6 @@ export class FocusTracker {
   private verifyCount = 0;
   private timer?: NodeJS.Timeout;
   private unsubscribe?: () => void;
-  private readonly tagged = new WeakSet<object>();
 
   start(): void {
     if (this.unsubscribe) return;
@@ -117,6 +117,7 @@ export class FocusTracker {
     clearInterval(this.timer);
     this.timer = undefined;
     this.cancelGrace();
+    removeOwnerHooks(this);
   }
 
   current(): FocusInfo {
@@ -259,21 +260,7 @@ export class FocusTracker {
   }
 
   private watchEditor(component: Record<string, unknown>): void {
-    if (this.tagged.has(component)) return;
-    const original = component.handleInput;
-    if (typeof original !== "function") return;
-    this.tagged.add(component);
-    const tracker = this;
-    const wrapped = function patchedHandleInput(this: unknown, ...args: unknown[]): unknown {
-      // The plugin never calls the editor's handleInput, so this is local.
-      tracker.markLocalInput(component);
-      return (original as (...inputArgs: unknown[]) => unknown).apply(this, args);
-    };
-    try {
-      component.handleInput = wrapped;
-    } catch {
-      // Read-only host object; draft protection degrades to "keep".
-    }
+    hookMethod(component, "handleInput", "focus-local-input", () => this.markLocalInput(component), undefined, this);
   }
 
   // --- observation -----------------------------------------------------------
