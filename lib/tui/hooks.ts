@@ -60,6 +60,27 @@ function registry(): Registry {
   return table;
 }
 
+/**
+ * The object that really holds `name`: `obj` itself when it has the method as
+ * an own property, otherwise the first prototype in the chain that does.
+ * Undefined when nothing in the chain has it.
+ *
+ * Reference proxies need this. pi's `mode.ui` is a Proxy over an empty target
+ * whose `get`/`set`/`getPrototypeOf` forward to the real TUI and which has no
+ * `getOwnPropertyDescriptor` trap, so an own-property check on the proxy never
+ * sees a method. Hooking the owning prototype instead puts one wrapper on the
+ * shared class method; the wrapper receives the real instance as `self`.
+ */
+export function methodOwner(obj: object, name: string): object | undefined {
+  if (Object.getOwnPropertyDescriptor(obj, name)) return obj;
+  let current: object | null = Object.getPrototypeOf(obj) as object | null;
+  for (let depth = 0; current && depth < 64; depth += 1) {
+    if (Object.getOwnPropertyDescriptor(current, name)) return current;
+    current = Object.getPrototypeOf(current) as object | null;
+  }
+  return undefined;
+}
+
 /** Whether `fn` is a wrapper this module created. */
 export function isPluginWrapper(fn: unknown): boolean {
   return typeof fn === "function" && registry().wrappers.has(fn);

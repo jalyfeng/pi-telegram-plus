@@ -9,7 +9,7 @@
  */
 import { getTuiHostState, installTuiBridge, onTuiCaptured, type TuiHost, type TuiHostState } from "../tui-bridge.ts";
 import { log } from "../logger.ts";
-import { installHook } from "./hooks.ts";
+import { installHook, methodOwner } from "./hooks.ts";
 
 const hostLog = log.child("tui-host");
 
@@ -80,6 +80,31 @@ export function hookMethod(
     if (failed) throw failure;
     return result;
   }, { priority: 10, owner: scope });
+}
+
+/**
+ * `hookMethod` on the object that owns `name` (see `methodOwner` in `hooks.ts`).
+ * Use it for host references that forward reads to another object, such as
+ * pi's `mode.ui`, where an install on the reference itself never takes effect.
+ * Logs at debug when the method has no owner or the install returns false.
+ */
+export function hookOwnedMethod(
+  target: unknown,
+  name: string,
+  kind: string,
+  before?: (args: unknown[], self: unknown) => void,
+  after?: (args: unknown[], result: unknown, self: unknown) => void,
+  scope?: object,
+): boolean {
+  if (!isHostObject(target)) return false;
+  const owner = methodOwner(target, name);
+  if (!owner) {
+    hostLog.debug("hook target has no owner for method", { kind, name });
+    return false;
+  }
+  const installed = hookMethod(owner, name, kind, before, after, scope);
+  if (!installed) hostLog.debug("hook install returned false", { kind, name });
+  return installed;
 }
 
 /** Candidate objects that expose status/error/warning on pi and OMP. */

@@ -12,7 +12,7 @@
  * - local input marking: the editor's own `handleInput` is wrapped once so a
  *   keystroke in the terminal is distinguishable from anything the plugin does.
  */
-import { onHostState, hookMethod, isHostObject, type HostState } from "./host.ts";
+import { onHostState, hookMethod, hookOwnedMethod, isHostObject, type HostState } from "./host.ts";
 import { removeOwnerHooks } from "./hooks.ts";
 import { hookEntryMethods, insideEntryCall, PI_ENTRY_SPECS, UI_CONTEXT_SPECS, OMP_ENTRY_SPECS, type EntrySink } from "./entry.ts";
 import { installRace, takePendingRace } from "./race.ts";
@@ -307,16 +307,18 @@ export class FocusTracker {
     const alreadyAttached = this.attached.has(ui);
     if (!alreadyAttached) {
       this.attached.add(ui);
+      // `ui` may be pi's reference proxy: the hooks go on the prototype that
+      // owns each method, and receive the real TUI as `self`.
       for (const name of ["setFocus", "setFocusInternal"]) {
-        hookMethod(ui, name, "focus-tracker", (args) => {
+        hookOwnedMethod(ui, name, "focus-tracker", (args) => {
           const component = unwrapFocus(args[0]);
           if (component) this.update(component, "event", currentCommandScope());
         }, undefined, this);
       }
       // Overlay swaps that never reach `setFocus` are caught by the tick.
       for (const name of ["showOverlay", "hideOverlay"]) {
-        hookMethod(ui, name, "focus-tracker-overlay", undefined, () => {
-          const current = this.readCurrent(ui);
+        hookOwnedMethod(ui, name, "focus-tracker-overlay", undefined, (_args, _result, self) => {
+          const current = isHostObject(self) ? this.readCurrent(self) : undefined;
           if (current) this.update(current, "getter");
         }, this);
       }

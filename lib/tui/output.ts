@@ -13,7 +13,7 @@ import { splitTelegramHtml } from "../text-split.ts";
 import { stripAnsi } from "../ansi.ts";
 import { log, type LogFields } from "../logger.ts";
 import type { TelegramTransport } from "../types.ts";
-import { hookMethod, isHostObject, onHostState, type HostState } from "./host.ts";
+import { hookMethod, hookOwnedMethod, isHostObject, onHostState, type HostState } from "./host.ts";
 import { installHook, removeOwnerHooks } from "./hooks.ts";
 import { currentCommandScope, runAsHistory, runOutsideCommand } from "./command-context.ts";
 import { describedText } from "./describe-text.ts";
@@ -282,8 +282,10 @@ export class OutputCapture {
     for (const target of [state.mode, state.ui]) {
       if (!isHostObject(target) || this.attached.has(target)) continue;
       this.attached.add(target);
+      // `state.ui` may be pi's reference proxy, which needs the owner hook.
+      const install = target === state.ui ? hookOwnedMethod : hookMethod;
       for (const name of ["showStatus", "showError", "showWarning"]) {
-        hookMethod(target, name, `output-${name}`, () => { this.statusDepth += 1; }, (args) => {
+        install(target, name, `output-${name}`, () => { this.statusDepth += 1; }, (args) => {
           this.statusDepth = Math.max(0, this.statusDepth - 1);
           const message = args[0];
           if (typeof message !== "string" || message.trim().length === 0) return;
