@@ -363,7 +363,8 @@ export class DialogBroker {
    */
   private retire(session: DialogSession | undefined, next: FocusInfo): DialogSession["closedBy"] | undefined {
     if (!session || session.state === "closed") return undefined;
-    const byTelegram = session.state === "resolving";
+    const telegramAction = session.telegramAction;
+    const byTelegram = session.state === "resolving" || telegramAction !== undefined;
     session.state = "closed";
     this.forgetPending(session);
     const telegram = session.telegram;
@@ -393,7 +394,9 @@ export class DialogBroker {
 
     session.closedBy = byTelegram ? "telegram" : "terminal";
     const summary = byTelegram
-      ? `✅ ${isSecretSession(session) ? "Submitted (hidden)" : session.lastAction ?? "Done"}`
+      ? telegramAction?.cancelled
+        ? "✖ Cancelled"
+        : `✅ ${isSecretSession(session) ? "Submitted (hidden)" : session.lastAction ?? "Done"}`
       : "Answered in the terminal";
     this.publish(session, summary);
     return session.closedBy;
@@ -552,11 +555,20 @@ export class DialogBroker {
       this.redraw(session);
       return refuse("act-refused", "This button does nothing here", false);
     }
+    // The host may close the dialog after this tap returns (the Esc it received is handled
+    // asynchronously), so the close is attributed to Telegram by this marker, not by state.
+    const cancelled = resolved.action.type === "cancel";
+    session.telegramAction = { cancelled };
     // Rule 3.5: the component may already be gone (selectors resolve inline),
     // or it may stay open (multi-select, settings rows).
     if (this.session === session && session.state === "resolving") {
       if (this.canDrive(session)) {
         session.state = "open";
+        // A toggle or a settings row keeps the same dialog open on purpose: its later close
+        // is not this tap's, so forget the tap.
+        if (resolved.action.type === "toggle" || resolved.action.type === "cycle" || resolved.action.type === "submenu") {
+          session.telegramAction = undefined;
+        }
         this.redraw(session);
       } else {
         this.retire(session, this.deps.focus.current());

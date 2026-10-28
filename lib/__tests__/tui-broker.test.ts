@@ -475,6 +475,29 @@ describe("dialog broker", () => {
     expect(result).toEqual({ handled: true, toast: "Answered in the terminal", clear: true });
   });
 
+  it("attributes a Telegram Cancel to Telegram when the host closes the dialog after the tap", async () => {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    const keys: string[] = [];
+    const component: Record<string, unknown> = {
+      render: () => "weird frame",
+      handleInput: (input: string) => {
+        keys.push(input);
+        // The host handles Esc later, so the close is observed after the tap has returned.
+        if (input === "\x1b") queueMicrotask(() => focus.closeToEditor());
+      },
+    };
+    focus.openDialog(component);
+    await settle();
+
+    const session = broker.current();
+    broker.handleCallback(42, undefined, { sessionId: session?.id ?? "", generation: 0, op: "x" });
+    await settle();
+
+    expect(keys).toEqual(["\x1b"]);
+    expect(transport.edits.at(-1)?.text).toContain("✖ Cancelled");
+    expect(transport.edits.at(-1)?.text).not.toContain("Answered in the terminal");
+  });
+
   it("mirrors a dialog onto the chat whose command scope is running", async () => {
     // No Telegram turn is active: only the running command scope can tie this
     // dialog to a chat, and it draws on the ack message the scope carries.

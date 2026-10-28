@@ -201,4 +201,10 @@ export type DialogSession = {
   state: "open" | "resolving" | "closed";
   closedBy?: "telegram" | "terminal" | "replaced";
   lastAction?: string;
+  /**
+   * Set when the broker itself sent a Telegram tap to the host and the host has not closed the
+   * dialog yet. The close that follows belongs to Telegram, even when it is observed after the
+   * session already left `resolving`. `cancelled` tells a Cancel button from an answer.
+   */
+  telegramAction?: { cancelled: boolean };
 };
