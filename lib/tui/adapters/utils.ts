@@ -26,19 +26,6 @@ export function plain(value: unknown): string {
   return "";
 }
 
-/** Render a component's own text; theme colours removed, width 80 by default. */
-export function renderText(component: unknown, width = 80): string {
-  const render = (component as Record<string, unknown> | undefined)?.render;
-  if (typeof render !== "function") return "";
-  try {
-    return plain((render as (renderWidth: number) => unknown).call(component, width));
-  } catch {
-    // A component that cannot draw itself (no theme, missing context) can still
-    // own focus: mirror nothing rather than throw into the Broker.
-    return "";
-  }
-}
-
 /**
  * Row identity: "index + label" (§4.6.2). The index makes a repeated label
  * addressable; the label lets the reverse lookup notice that the terminal list

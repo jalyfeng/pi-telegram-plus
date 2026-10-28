@@ -198,7 +198,7 @@ describe("dialog broker", () => {
       turns: [turn(42)],
       entry: { kind: "panel", source: "omp", title: "Status" },
     });
-    const component: Record<string, unknown> = { render: () => "session report text" };
+    const component: Record<string, unknown> = { children: [{ text: "session report text" }] };
     focus.openDialog(component);
     await settle();
 

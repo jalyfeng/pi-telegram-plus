@@ -14,8 +14,9 @@
 import type { AdapterContext, DialogAdapter, DialogModel } from "../model.ts";
 import { isReadOnlyPanel } from "../find-shape.ts";
 import { actionKeys, describedText, type DescribedAction, type DescribedText } from "../describe-text.ts";
-import { describesDialog, describesLoginSheet, describeTree } from "./tsp.ts";
-import { constructorName, renderText } from "./utils.ts";
+import { contentHtml } from "../output.ts";
+import { describesDialog, describesLoginSheet, describeTree, tspText, type NativeNodeLike } from "./tsp.ts";
+import { constructorName } from "./utils.ts";
 
 type Describable = object & { handleNativeEvent(event: unknown): unknown };
 
@@ -37,6 +38,32 @@ const cancellable = (component: object): boolean => {
   return record.cancellable === true && "signal" in record;
 };
 
+/** The text a pi loader keeps: `Loader.message`, or a BorderedLoader's `loader.message`. */
+function loaderMessage(component: object): string | undefined {
+  const record = component as Record<string, unknown>;
+  if (typeof record.message === "string") return record.message;
+  const inner = record.loader;
+  if (inner && typeof inner === "object" && typeof (inner as Record<string, unknown>).message === "string") {
+    return (inner as Record<string, unknown>).message as string;
+  }
+  return undefined;
+}
+
+/** The first spinner or progress label of a described tree, plain text (never a render). */
+function describedLabel(node: NativeNodeLike, depth = 0): string | undefined {
+  if (depth > 12 || typeof node !== "object" || node === null) return undefined;
+  if (node.k === "spinner" || node.k === "progress") {
+    const label = tspText((node.p as Record<string, unknown> | undefined)?.label);
+    if (label.trim() !== "") return label.trim();
+  }
+  const children = Array.isArray(node.c) ? (node.c as NativeNodeLike[]) : [];
+  for (const child of children) {
+    const label = describedLabel(child, depth + 1);
+    if (label !== undefined) return label;
+  }
+  return undefined;
+}
+
 export const infoPanelAdapter: DialogAdapter = {
   id: "info-panel",
 
@@ -46,9 +73,26 @@ export const infoPanelAdapter: DialogAdapter = {
   },
 
   read(component, ctx): DialogModel {
-    const text = renderText(component).trim();
-    if (cancellable(component)) return { kind: "progress", text, cancellable: true };
-    return { kind: "info", title: ctx.entry?.title, text, closable: true };
+    const redact = ctx.redact ?? ((text: string) => text);
+    const root = describeTree(component);
+    if (cancellable(component)) {
+      // A spinner's label, else the loader's own message; never the screen.
+      const label = (root ? describedLabel(root) : undefined) ?? loaderMessage(component) ?? "";
+      return { kind: "progress", text: redact(label).trim(), cancellable: true };
+    }
+    if (root) {
+      const described = describedText(root, redact, component);
+      if (described.html) return { kind: "info", title: ctx.entry?.title, text: described.html, html: true, closable: true };
+    }
+    const message = loaderMessage(component);
+    if (message !== undefined && message.trim() !== "") {
+      return { kind: "info", title: ctx.entry?.title, text: redact(message).trim(), closable: true };
+    }
+    const html = contentHtml(component as Record<string, unknown>, redact);
+    if (html) return { kind: "info", title: ctx.entry?.title, text: html, html: true, closable: true };
+    // Nothing readable: name the panel, never mirror a frame (plan v8 §0.0).
+    const what = ctx.entry?.method ?? (constructorName(component) || "unknown");
+    return { kind: "unsupported", title: ctx.entry?.title, what };
   },
 
   act(_component, action, ctx) {

@@ -11,7 +11,6 @@
 import type { AdapterContext, DialogAdapter } from "../model.ts";
 import { askDialogAdapter } from "./ask.ts";
 import { approvalAdapter } from "./approval.ts";
-import { customGoalAdapter } from "./goal.ts";
 import { extensionEditorAdapter, extensionInputAdapter, extensionSelectAdapter } from "./extension.ts";
 import { describedPanelAdapter, infoPanelAdapter, unsupportedAdapter } from "./panel.ts";
 import { piListAdapter, piSessionAdapter, piTreeAdapter } from "./pi-lists.ts";
@@ -28,7 +27,6 @@ export const DIALOG_ADAPTERS: DialogAdapter[] = [
   tspInputAdapter,
   askDialogAdapter,
   approvalAdapter,
-  customGoalAdapter,
   piLoginAdapter,
   extensionInputAdapter,
   extensionEditorAdapter,
@@ -58,7 +56,6 @@ export function pickAdapter(component: object, ctx: AdapterContext): DialogAdapt
 export {
   approvalAdapter,
   askDialogAdapter,
-  customGoalAdapter,
   describedPanelAdapter,
   extensionEditorAdapter,
   extensionInputAdapter,
