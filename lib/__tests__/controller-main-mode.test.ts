@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTelegramController } from "../controller.ts";
 import type * as tuiBridgeModule from "../tui-bridge.ts";
+import type { TelegramConfig } from "../types.ts";
 
 // v6: the host bridge is the only path for host commands - run these with the bridge up.
 vi.mock("../tui-bridge.ts", async (importOriginal) => {
@@ -51,9 +52,10 @@ function createSession(streamingRef: { value: boolean }, idleRef: { value: boole
   return session;
 }
 
-function createController(session: any, sent: Array<{ text: string }>) {
+function createController(session: any, sent: Array<{ text: string }>, config: TelegramConfig = {}) {
   return createTelegramController({
     getSession: () => session,
+    getConfig: () => config,
     transport: {
       removeInlineKeyboard: vi.fn(async () => undefined),
       sendText: vi.fn(async (_chatId: number, text: string) => {
@@ -94,6 +96,68 @@ async function sendMessage(controller: ReturnType<typeof createTelegramControlle
     text,
   });
 }
+
+describe("messageMode while the main loop is busy", () => {
+  it("queues a follow-up when messageMode is queue", async () => {
+    const streamingRef = { value: true };
+    const idleRef = { value: false };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent, { messageMode: "queue" });
+
+    await sendMessage(controller, "queued follow-up");
+    await waitFor(() => prompts.length === 1);
+
+    expect(prompts[0].opts?.streamingBehavior).toBe("followUp");
+    expect(prompts[0].text).toBe("queued follow-up");
+  });
+
+  it("steers when messageMode is steer set explicitly", async () => {
+    const streamingRef = { value: true };
+    const idleRef = { value: false };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent, { messageMode: "steer" });
+
+    await sendMessage(controller, "explicit steer");
+    await waitFor(() => prompts.length === 1);
+
+    expect(prompts[0].opts?.streamingBehavior).toBe("steer");
+  });
+
+  it("reads messageMode per message, so a switch applies to the next message", async () => {
+    const streamingRef = { value: true };
+    const idleRef = { value: false };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const config: TelegramConfig = { messageMode: "steer" };
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent, config);
+
+    await sendMessage(controller, "first in steer", 1);
+    await waitFor(() => prompts.length === 1);
+    expect(prompts[0].opts?.streamingBehavior).toBe("steer");
+
+    config.messageMode = "queue";
+    await sendMessage(controller, "second in queue", 2);
+    await waitFor(() => prompts.length === 2);
+    expect(prompts[1].opts?.streamingBehavior).toBe("followUp");
+  });
+
+  it("sends no streamingBehavior when the main loop is idle, in either mode", async () => {
+    for (const messageMode of ["queue", "steer"] as const) {
+      const streamingRef = { value: false };
+      const idleRef = { value: true };
+      const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+      const sent: Array<{ text: string }> = [];
+      const controller = createController(createSession(streamingRef, idleRef, prompts), sent, { messageMode });
+
+      await sendMessage(controller, `idle ${messageMode}`);
+      await waitFor(() => prompts.length === 1);
+
+      expect(prompts[0].opts).toEqual({ source: "interactive" });
+    }
+  });
+});
 
 describe("TUI-parity message delivery", () => {
   it("steers into the main turn while the main loop is busy (like typing in the TUI)", async () => {

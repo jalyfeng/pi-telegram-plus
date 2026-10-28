@@ -1056,7 +1056,7 @@ export function createTelegramController(deps: {
         // A main turn (e.g. a goal continuation) started while we waited —
         // behave like the terminal and steer into it instead of holding.
         if (idleFn && !idleFn.call(ctx)) {
-          await session.prompt(text, { source: "interactive", streamingBehavior: "steer" as const });
+          await session.prompt(text, { source: "interactive", streamingBehavior: busyStreamingBehavior() });
           return;
         }
         continue;
@@ -1101,6 +1101,11 @@ export function createTelegramController(deps: {
     }
   };
 
+  // Delivery while the main loop is busy: "steer" injects into the running
+  // turn, "queue" (messageMode) sends a follow-up after it ends. Read per call
+  // so a switch in the Config menu applies to the next message.
+  const busyStreamingBehavior = (): "steer" | "followUp" => (deps.getConfig?.().messageMode ?? "steer") === "queue" ? "followUp" : "steer";
+
   const runPrompt = async (text: string, chatId: number, replaceMessageId?: number, messageThreadId?: number, sourceMessageId?: number) => {
     const session = deps.getSession();
     if (!session) {
@@ -1133,9 +1138,9 @@ export function createTelegramController(deps: {
       return;
     }
 
-    // In steer mode, reuse the existing active turn for this chat/thread.
-    // Steer messages inject into a running stream — they must not acquire a
-    // new turn (which would fail since the target is already busy).
+    // Main loop busy: reuse the existing active turn for this chat/thread, in
+    // both steer and queue mode. Messages go into the running stream and must
+    // not acquire a new turn (which would fail since the target is already busy).
     if (isSteer) {
       const existingTurn = deps.getActiveTurn(chatId, messageThreadId);
       if (!existingTurn) {
@@ -1155,8 +1160,8 @@ export function createTelegramController(deps: {
             run: async () => {
               // Goal auto-continuations can be streaming without owning an
               // active TelegramTurn. Keep the delivery behavior tied to the
-              // configured mode rather than to our renderer bookkeeping.
-              await session.prompt(text, { source: "interactive", streamingBehavior: "steer" });
+              // configured messageMode rather than to our renderer bookkeeping.
+              await session.prompt(text, { source: "interactive", streamingBehavior: busyStreamingBehavior() });
             },
           }));
         } finally {
@@ -1170,7 +1175,7 @@ export function createTelegramController(deps: {
         ui: telegramUi,
         turn: existingTurn,
         uiMode: promptUiMode(),
-        run: () => session.prompt(text, { source: "interactive", streamingBehavior: "steer" as const }),
+        run: () => session.prompt(text, { source: "interactive", streamingBehavior: busyStreamingBehavior() }),
       }));
       return;
     }
