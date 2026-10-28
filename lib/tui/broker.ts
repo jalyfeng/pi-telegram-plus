@@ -58,7 +58,7 @@ export type TextPurpose = "input" | "editor" | "search";
  * The slice of the focus view the broker reads (§4.4). The real FocusTracker
  * satisfies this; naming it here keeps the broker's dependency explicit.
  */
-export type FocusSource = Pick<FocusTracker, "onChange" | "current" | "entryFor">;
+export type FocusSource = Pick<FocusTracker, "onChange" | "current" | "entryFor" | "validate">;
 
 export type BrokerDeps = {
   transport: Pick<
@@ -473,6 +473,8 @@ export class DialogBroker {
    */
   handleCallback(chatId: number, messageThreadId: number | undefined, callback: DialogCallback):
     { handled: boolean; toast?: string; clear?: boolean } {
+    // The host may have moved focus since the last read (§4.1.3): settle it before judging the tap.
+    this.deps.focus.validate();
     const session = this.session;
     if (!session || session.state === "closed") return { handled: true, toast: "Answered in the terminal", clear: true };
     // Every way a tap can be refused is a user-visible dead button, so say which one
@@ -555,6 +557,9 @@ export class DialogBroker {
       this.redraw(session);
       return refuse("act-refused", "This button does nothing here", false);
     }
+    // The host call may have moved focus already (a selector opens its next list inside Enter):
+    // read it now, so the message follows the dialog that is open, not the one the tap closed.
+    this.deps.focus.validate();
     // The host may close the dialog after this tap returns (the Esc it received is handled
     // asynchronously), so the close is attributed to Telegram by this marker, not by state.
     const cancelled = resolved.action.type === "cancel";

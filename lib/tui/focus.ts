@@ -16,7 +16,7 @@ import { onHostState, hookMethod, isHostObject, type HostState } from "./host.ts
 import { removeOwnerHooks } from "./hooks.ts";
 import { hookEntryMethods, insideEntryCall, PI_ENTRY_SPECS, UI_CONTEXT_SPECS, OMP_ENTRY_SPECS, type EntrySink } from "./entry.ts";
 import { installRace, takePendingRace } from "./race.ts";
-import { isEditorShape, isFilteredList, isInputShape, isReadOnlyPanel, isSelectList, isSettingsList } from "./find-shape.ts";
+import { findShape, isControlShape, isEditorShape, isFilteredList, isInputShape, isReadOnlyPanel, isSelectList, isSettingsList } from "./find-shape.ts";
 import { describesDialog, describesLoginSheet } from "./adapters/tsp.ts";
 import type { EntryInfo } from "./model.ts";
 import { log } from "../logger.ts";
@@ -131,6 +131,22 @@ export class FocusTracker {
 
   current(): FocusInfo {
     return this.info;
+  }
+
+  /**
+   * One live read of the focused object, compared with the recorded focus (§4.1.3). The Broker
+   * calls this before it judges a Telegram tap and right after the host call that tap made: a
+   * selector hands focus to the next list inside its own Enter, and the two-sample tick would
+   * still report the old dialog for seconds. A mismatch is a focus change now.
+   */
+  validate(): void {
+    const ui = this.lastState?.ui;
+    if (!ui) return;
+    const read = this.readCurrent(ui);
+    if (!read || read === this.info.component) return;
+    this.verifyTarget = undefined;
+    this.verifyCount = 0;
+    this.update(read, "getter");
   }
 
   isEditor(): boolean {
@@ -410,6 +426,12 @@ export class FocusTracker {
   private verify(): void {
     const ui = this.lastState?.ui;
     if (!ui) return;
+    // A progress panel can gain its input after it was classified (pi's login sheet mounts the key
+    // prompt after the sign-in step): re-classify the same object each tick and report the change.
+    const held = this.info.component;
+    if (this.info.kind === "progress" && held && this.classify(held) === "dialog") {
+      this.update(held, "getter");
+    }
     // The runner's UI context is a moving target: a Telegram swap can be what is
     // installed when the hooks first run. Re-check every tick that the host context
     // underneath it is hooked - `hookEntryMethods` skips what it already wrapped.
@@ -548,7 +570,12 @@ export class FocusTracker {
     // that has no input) is a dialog the TSP adapters can drive (§4.11.3). OMP only: pi has
     // no `describe`, and its loaders keep matching below.
     if (this.lastState?.host === "omp" && (describesDialog(component) || describesLoginSheet(component))) return "dialog";
-    if (name.endsWith("Loader") || component.signal !== undefined || component.abortController !== undefined) {
+    // A loader is progress. A component that carries a signal but still holds a live list or input
+    // field is a prompt the user answers (pi's login sheet): the plan's progress rule is "no list or
+    // input field at all" (§4.1.3), so only the field-less case is progress.
+    const carriesSignal = component.signal !== undefined || component.abortController !== undefined;
+    const holdsControl = findShape(component, isControlShape, 2) !== undefined;
+    if (name.endsWith("Loader") || (carriesSignal && !holdsControl)) {
       return "progress";
     }
     // The host asked the user something and this component receives the keys, so it is a
@@ -561,6 +588,8 @@ export class FocusTracker {
     if (DIALOG_NAME.test(name)) return "dialog";
     if (typeof component.options === "string" || Array.isArray(component.options)) return "dialog";
     if (typeof component.selectedIndex === "number") return "dialog";
+    // A list or input somewhere inside: the user answers it, so it is a dialog.
+    if (holdsControl) return "dialog";
     // Keys but no list, no input: a status/progress widget, not a dialog.
     return "progress";
   }

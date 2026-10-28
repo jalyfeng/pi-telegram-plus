@@ -65,6 +65,7 @@ function fakeFocus(entry?: EntryInfo) {
     current: () => info,
     isEditor: () => info.kind === "editor",
     entryFor: () => entry,
+    validate: () => undefined,
     onChange: (listener: (info: FocusInfo) => void) => {
       listeners.add(listener);
       return () => {

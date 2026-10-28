@@ -230,6 +230,7 @@ describe("a Telegram press on a described panel", () => {
     const focusInfo = { kind: "dialog", component, source: "event" };
     const focus = {
       current: () => focusInfo,
+      validate: () => undefined,
       entryFor: (): EntryInfo => ({ kind: "panel", source: "omp", title: "Hotkeys", method: "showReport" }),
       onChange: (listener: (info: unknown) => void) => {
         listeners.add(listener);
@@ -319,6 +320,7 @@ describe("long described panels", () => {
     const focusInfo = { kind: "dialog", component, source: "event" };
     const focus = {
       current: () => focusInfo,
+      validate: () => undefined,
       entryFor: (): EntryInfo => ({ kind: "panel", source: "omp", title: "Hotkeys", method: "showReport" }),
       onChange: (listener: (info: unknown) => void) => {
         listeners.add(listener);
