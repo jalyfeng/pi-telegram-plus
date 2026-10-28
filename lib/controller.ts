@@ -1366,16 +1366,18 @@ export function createTelegramController(deps: {
     // any dialog it raises.
     const candidates = new Set([name, name.replace(/_/g, "-"), name.replace(/-/g, "_")]);
     const catalog = await bridge.getCommands().catch(() => []);
-    const known = catalog.some((command) => candidates.has(command.name)
+    const served = catalog.find((command) => candidates.has(command.name)
       || (command.aliases ?? []).some((alias) => candidates.has(alias)));
-    if (known) {
+    if (served) {
       // §4.5 rule 6: same as the /new gateway path above.
       if (settleOpenDialog(chatId, messageThreadId, sourceMessageId) === "blocked") {
         ctrlLog.debug("command route", { name, route: "blocked-by-dialog" });
         return true;
       }
+      // Telegram cannot spell `-` in a command name, so `scoped-models` is advertised as
+      // `scoped_models`. The host only knows its own spelling: submit that one.
       const handled = await commandGateway.run({
-        name,
+        name: served.name,
         args,
         origin: { chatId, messageThreadId, sourceMessageId },
         transport: deps.transport,

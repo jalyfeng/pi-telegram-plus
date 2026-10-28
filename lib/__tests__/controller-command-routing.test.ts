@@ -125,6 +125,20 @@ describe("Command routing after the mirror removal (D2)", () => {
     run.mockRestore();
   });
 
+  it("submits the host's own spelling of a command Telegram advertises with an underscore", async () => {
+    const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
+    const harness = createHarness({
+      bridge: createBridge({
+        getCommands: async () => [{ name: "scoped-models", description: "Enable/disable models", source: "builtin" as const }],
+      }),
+    });
+
+    await send(harness.controller, "/scoped_models");
+
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ name: "scoped-models" }));
+    run.mockRestore();
+  });
+
   it("routes /debug to the host gateway, not a plugin handler", async () => {
     // The plugin's /debug was given back to the host: even if a stale plugin
     // handler is still in the map, a host-served /debug must reach the gateway.
