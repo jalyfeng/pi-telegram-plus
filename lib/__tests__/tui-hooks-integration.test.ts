@@ -12,6 +12,7 @@ import { hookMethod } from "../tui/host.ts";
 import { installRace, takePendingRace, type RaceHandle } from "../tui/race.ts";
 import { hookEntryMethods, PI_ENTRY_SPECS, UI_CONTEXT_SPECS, type EntrySink } from "../tui/entry.ts";
 import { isPluginWrapper, pluginWrapperDepth, removeOwnerHooks } from "../tui/hooks.ts";
+import { FocusTracker } from "../tui/focus.ts";
 
 type Host = Record<string, unknown>;
 type Dialog = (...args: unknown[]) => Promise<unknown>;
@@ -341,5 +342,77 @@ describe("OMP-shaped host after 1000 full attaches", () => {
     handles[0]?.answer(answer);
     await expect(pending).resolves.toBe(answer);
     expect(pushes()).toBe(1);
+  });
+});
+
+/**
+ * H-3: the FocusTracker tick re-installs the entry hooks only when a host object
+ * (the host UI, the runner's tool UI, or the mode) changed identity. Every
+ * `installHook` call looks at the target's own `select` descriptor first, so a
+ * Proxy counts those probes: an unchanged tick probes nothing.
+ */
+describe("FocusTracker tick re-installs hooks only when a host object changes (H-3)", () => {
+  function countedHost(): { host: Host; probes: () => number } {
+    let probes = 0;
+    const raw: Host = {
+      select: async () => "host",
+      confirm: async () => "host",
+      input: async () => "host",
+    };
+    const host = new Proxy(raw, {
+      getOwnPropertyDescriptor(target, key) {
+        if (key === "select") probes += 1;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    return { host, probes: () => probes };
+  }
+
+  /** Attach one tick the way `FocusTracker.verify` does, without starting its timer. */
+  function tick(tracker: FocusTracker, ui: Host, toolUi: Host, mode: Host): void {
+    const state = { host: "pi", ui, mode, session: { extensionRunner: { getUIContext: () => toolUi } } };
+    (tracker as unknown as { lastState: unknown }).lastState = state;
+    (tracker as unknown as { verify: () => void }).verify();
+  }
+
+  it("does not install again on ticks with the same host objects", () => {
+    const tracker = new FocusTracker();
+    const mode: Host = {};
+    const ui = countedHost();
+    const toolA = countedHost();
+
+    tick(tracker, ui.host, toolA.host, mode);
+    expect(toolA.probes()).toBeGreaterThan(0);
+    expect(pluginWrapperDepth(toolA.host, "select")).toBe(1);
+    const probesAfterFirst = ui.probes() + toolA.probes();
+
+    for (let i = 0; i < 100; i += 1) tick(tracker, ui.host, toolA.host, mode);
+    expect(ui.probes() + toolA.probes()).toBe(probesAfterFirst);
+    expect(pluginWrapperDepth(toolA.host, "select")).toBe(1);
+  });
+
+  it("installs on a new runner UI context object, then back on the old one without stacking", async () => {
+    const tracker = new FocusTracker();
+    const push = vi.spyOn(tracker, "pushEntry");
+    const mode: Host = {};
+    const ui = countedHost();
+    const toolA = countedHost();
+    const toolB = countedHost();
+
+    tick(tracker, ui.host, toolA.host, mode);
+    tick(tracker, ui.host, toolB.host, mode);
+    expect(toolB.probes()).toBeGreaterThan(0);
+    expect(pluginWrapperDepth(toolB.host, "select")).toBe(1);
+
+    push.mockClear();
+    await (toolB.host.select as Dialog)(...PI_ARGS());
+    expect(push).toHaveBeenCalledTimes(1);
+
+    tick(tracker, ui.host, toolA.host, mode);
+    expect(pluginWrapperDepth(toolA.host, "select")).toBe(1);
+
+    push.mockClear();
+    await (toolA.host.select as Dialog)(...PI_ARGS());
+    expect(push).toHaveBeenCalledTimes(1);
   });
 });

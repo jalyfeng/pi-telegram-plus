@@ -101,6 +101,9 @@ export class FocusTracker {
   private readonly localInput = new Map<object, number>();
   private verifyTarget?: Record<string, unknown>;
   private verifyCount = 0;
+  /** The host objects the entry hooks were last installed on (H-3, §0.2 #19). A tick
+   *  re-installs only when one of them has changed identity. */
+  private hookedTargets?: { ui: unknown; toolUi: unknown; mode: unknown };
   private timer?: NodeJS.Timeout;
   private unsubscribe?: () => void;
 
@@ -118,6 +121,7 @@ export class FocusTracker {
     this.timer = undefined;
     this.cancelGrace();
     removeOwnerHooks(this);
+    this.hookedTargets = undefined;
   }
 
   current(): FocusInfo {
@@ -300,17 +304,23 @@ export class FocusTracker {
 
   /** Install the entry-method hooks for this host (§4.1.2). */
   private attachEntryHooks(state: HostState): void {
+    const ui = state.ui;
+    const runner = (state.session as Record<string, unknown> | undefined)?.extensionRunner as
+      | { getUIContext?: () => unknown }
+      | undefined;
+    const toolUi = this.readUiContext(runner);
+    const mode = state.mode;
+    // H-3: the tick only compares host object identities. Unchanged objects mean
+    // every hook below is already installed on them, so there is nothing to do.
+    const hooked = this.hookedTargets;
+    if (hooked && hooked.ui === ui && hooked.toolUi === toolUi && hooked.mode === mode) return;
+    this.hookedTargets = { ui, toolUi, mode };
     const sink: EntrySink = {
       push: (info, nested) => this.pushEntry(info, nested),
       pop: (token) => this.popEntry(token),
       bind: (component, info) => this.bindEntry(component, info),
     };
-    const ui = state.ui;
     if (ui) hookEntryMethods(ui, UI_CONTEXT_SPECS, sink, state.host === "omp" ? "omp" : "pi", this);
-    const runner = (state.session as Record<string, unknown> | undefined)?.extensionRunner as
-      | { getUIContext?: () => unknown }
-      | undefined;
-    const toolUi = this.readUiContext(runner);
     if (toolUi && toolUi !== ui) hookEntryMethods(toolUi, UI_CONTEXT_SPECS, sink, state.host === "omp" ? "omp" : "pi", this);
     // The race wrapper goes on outside the entry wrapper: it registers its
     // handle before that wrapper pushes, so the entry above can take it (§4.12).
