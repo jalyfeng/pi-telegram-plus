@@ -102,6 +102,9 @@ export class OutputCapture {
   /** Components whose `setComplete` has fired; only these may owe a final
    * render at scope end (F2: an unfinished one never pushes its running frame). */
   private readonly bashCompleted = new WeakSet<object>();
+  /** The arguments each claimed bash component's `setComplete` received
+   * (exit code, cancelled flag), read by the final render (X-1). */
+  private readonly bashStatus = new WeakMap<object, BashStatus>();
   /** Components claimed at call time by `presentCommandOutput` inside a command
    * chain. A later mount of the same component (inside that chain, from
    * `addChild`) is not pushed a second time. */
@@ -193,8 +196,9 @@ export class OutputCapture {
     if (!binding.bashComponents.includes(child)) binding.bashComponents.push(child);
     if (this.bashTracked.has(child)) return;
     this.bashTracked.add(child);
-    hookMethod(child, "setComplete", "output-bash-complete", undefined, () => {
+    hookMethod(child, "setComplete", "output-bash-complete", undefined, (args) => {
       this.bashCompleted.add(child);
+      this.bashStatus.set(child, { exitCode: args[0], cancelled: args[1] === true });
       // Postpone the idle end past the settle delay so `finish` cannot beat
       // the timer and render before the host's async output flush landed.
       this.origin.touch(binding.scope);
@@ -223,7 +227,7 @@ export class OutputCapture {
   private emitBashOutput(child: Record<string, unknown>, binding: Binding, final: boolean): void {
     if (this.bashPushed.has(child)) return;
     this.bashPushed.add(child);
-    const html = bashOutputHtml(child, (raw) => this.redact(raw));
+    const html = bashOutputHtml(child, (raw) => this.redact(raw), this.bashStatus.get(child));
     this.logCaptured(child, html);
     if (!html || this.binding !== binding || binding.finished) return;
     // At scope end `push` refuses (the scope no longer owns output), so the
@@ -541,9 +545,28 @@ function isBashExecutor(child: Record<string, unknown>): boolean {
   return BASH_EXECUTOR_METHODS.every((name) => typeof child[name] === "function");
 }
 
+/** Arguments of a finished host bash run: `setComplete(exitCode, cancelled, ...)`
+ * (pi 1.4.0 bash-execution.ts 101; OMP 18.12.5 tui/src/chat/bash-execution.ts 342). */
+type BashStatus = { exitCode: unknown; cancelled: boolean };
+
 /** Text of a host bash executor, read through its `getOutput()` (v8 §0.2:
- * `render()` is never called). Redacted and ANSI-free before it is wrapped. */
-function bashOutputHtml(child: Record<string, unknown>, redact: (text: string) => string): string | undefined {
+ * `render()` is never called). Redacted and ANSI-free before it is wrapped.
+ * A status line follows the output only when the run was not a plain success:
+ * `cancelled`, or `exit N` for a non-zero exit code (X-1). */
+function bashOutputHtml(
+  child: Record<string, unknown>,
+  redact: (text: string) => string,
+  status: BashStatus | undefined,
+): string | undefined {
+  const parts: string[] = [];
+  const output = bashOutputText(child, redact);
+  if (output) parts.push(`<pre>${escapeHtml(output)}</pre>`);
+  const statusLine = bashStatusLine(status);
+  if (statusLine) parts.push(`<i>${statusLine}</i>`);
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+function bashOutputText(child: Record<string, unknown>, redact: (text: string) => string): string | undefined {
   const getOutput = child.getOutput;
   if (typeof getOutput !== "function") return undefined;
   let raw: unknown;
@@ -554,7 +577,16 @@ function bashOutputHtml(child: Record<string, unknown>, redact: (text: string) =
   }
   if (typeof raw !== "string") return undefined;
   const clean = redact(stripAnsi(raw)).trimEnd();
-  return clean.trim() ? `<pre>${escapeHtml(clean)}</pre>` : undefined;
+  return clean.trim() ? clean : undefined;
+}
+
+/** `undefined` for a plain success (or no status yet): nothing extra is shown. */
+function bashStatusLine(status: BashStatus | undefined): string | undefined {
+  if (!status) return undefined;
+  if (status.cancelled) return "cancelled";
+  const code = status.exitCode;
+  if (typeof code === "number" && code !== 0) return `exit ${code}`;
+  return undefined;
 }
 
 /** `html` pieces are already Telegram HTML and redacted by `describedText`. */

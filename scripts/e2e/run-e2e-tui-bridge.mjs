@@ -474,15 +474,16 @@ async function runHost(host, piCli, label) {
   // ── Telegram !bash ─────────────────────────────────────────────────────
   try {
     await injectMessage("!printf PTP_BASH_OK", 7210);
-    // D3b: the host runs the command; the receipt is the bash component's
-    // finished frame - command line plus a separate output line. The output
-    // must survive removing the command line, and a "Running…" streaming
-    // frame never counts as done.
+    // X-1: the command message is the ack header (`▶️ !printf PTP_BASH_OK`)
+    // plus the body the host's structured output produced. The body must hold
+    // the output itself; the header is dropped before checking. A "Running…"
+    // streaming frame never counts as done.
     await waitFor("!bash receipt shows the output", (state) => messages(state)
       .some((call) => {
         const text = String(call.body?.text ?? "");
-        if (!text.includes("$ printf PTP_BASH_OK") || /Running…|Running\.\.\./.test(text)) return false;
-        return text.split("\n").filter((line) => !line.includes("$ printf PTP_BASH_OK")).join("\n").includes("PTP_BASH_OK");
+        if (/Running…|Running\.\.\./.test(text)) return false;
+        const body = text.split("\n").filter((line) => !line.includes("▶️ !printf PTP_BASH_OK")).join("\n");
+        return body.includes("PTP_BASH_OK");
       }));
     record("Telegram !bash runs and reports exit 0", true);
   } catch (error) {
@@ -491,13 +492,10 @@ async function runHost(host, piCli, label) {
 
   try {
     await injectMessage("!!false", 7211);
-    // The host frame marks a failed command as `(exit 1)`; the removed
-    // plugin format said `exit: 1` - either spelling counts.
+    // X-1: a failed command's message carries the status line `exit 1`
+    // (the host's exit code, read from setComplete's arguments).
     await waitFor("!!bash reports nonzero exit", (state) => messages(state)
-      .some((call) => {
-        const text = String(call.body?.text ?? "");
-        return text.includes("$ false") && /\(exit 1\)|exit: 1/.test(text);
-      }));
+      .some((call) => String(call.body?.text ?? "").includes("exit 1")));
     record("Telegram !!bash reports exit 1", true);
   } catch (error) {
     record("Telegram !!bash reports exit 1", false, String(error.message).slice(0, 400));

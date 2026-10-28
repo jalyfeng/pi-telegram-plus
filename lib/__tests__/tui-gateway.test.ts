@@ -476,6 +476,62 @@ describe("OutputCapture shell scope", () => {
     origin.end(scope, "idle");
   });
 
+  it("shows only the output for a successful bash run with output", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "!", "!printf ok", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !printf ok</b>" });
+    const component = new BashExecutionComponent(["bash-ok"]);
+    addInScope(chat, scope, component);
+    component.setComplete(0, false);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(transport.edits.at(-1)?.text).toBe("<b>▶️ !printf ok</b>\n\n<pre>bash-ok</pre>");
+    output.finish();
+    origin.end(scope, "idle");
+  });
+
+  it("shows exit N for a failed bash run without output", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "!", "!!false", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !!false</b>" });
+    const component = new BashExecutionComponent([]);
+    addInScope(chat, scope, component);
+    component.setComplete(1, false);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(transport.edits.at(-1)?.text).toBe("<b>▶️ !!false</b>\n\n<i>exit 1</i>");
+    output.finish();
+    origin.end(scope, "idle");
+  });
+
+  it("shows cancelled for a cancelled bash run", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "!", "!sleep 9", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !sleep 9</b>" });
+    const component = new BashExecutionComponent([]);
+    addInScope(chat, scope, component);
+    component.setComplete(130, true);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(transport.edits.at(-1)?.text).toBe("<b>▶️ !sleep 9</b>\n\n<i>cancelled</i>");
+    output.finish();
+    origin.end(scope, "idle");
+  });
+
+  it("shows Done for a successful bash run without output", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "!", "!true", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !true</b>" });
+    const component = new BashExecutionComponent([]);
+    addInScope(chat, scope, component);
+    component.setComplete(0, false);
+    output.finish();
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(transport.edits.at(-1)?.text).toBe("<b>▶️ !true</b>\n\n<i>✓ Done</i>");
+    origin.end(scope, "idle");
+  });
+
   it("tracks a minified bash component by its methods, pushing only after setComplete", async () => {
     vi.useFakeTimers();
     const { transport, origin, output, chat } = attachedChat();
