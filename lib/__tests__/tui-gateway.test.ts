@@ -302,13 +302,26 @@ describe("OutputCapture command reports", () => {
     const { transport, origin, output } = attached(mode);
     const scope = origin.begin({ chatId: 1 }, "mcp", "/mcp", "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ /mcp</b>" });
-    mode.showCommandReport(report);
+    runInCommand(scope, () => mode.showCommandReport(report));
     expect(hostCalls).toBe(1);
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
     const text = transport.edits.at(-1)?.text ?? "";
     expect(text).toContain("MCP Server Management");
     expect(text).toContain("/mcp add");
+    origin.end(scope, "idle");
+  });
+
+  it("does not claim a report shown outside the command chain while a scope is open", async () => {
+    vi.useFakeTimers();
+    const mode: ReportMode = { showCommandReport() {} };
+    const { transport, origin, output } = attached(mode);
+    const scope = origin.begin({ chatId: 1 }, "mcp", "/mcp", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ /mcp</b>" });
+    mode.showCommandReport(report);
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(transport.edits.every((edit) => !edit.text.includes("MCP Server Management"))).toBe(true);
     origin.end(scope, "idle");
   });
 
@@ -722,6 +735,61 @@ describe("OutputCapture command-chain attribution (v8 §0.2)", () => {
     await vi.advanceTimersByTimeAsync(20);
     expect(render).not.toHaveBeenCalled();
     expect(transport.edits.every((edit) => !edit.text.includes("rendered picture"))).toBe(true);
+    origin.end(scope, "idle");
+  });
+
+  it("claims a deferred presentCommandOutput component at call time, once, and ignores its later mount", async () => {
+    vi.useFakeTimers();
+    const queued: unknown[] = [];
+    const component = { text: "deferred output" };
+    const mode = {
+      presentCommandOutput(child: unknown): void {
+        queued.push(child);
+      },
+    };
+    const { transport, origin, output, chat } = attachedChat({ mode });
+    const scope = beginCommand(origin, output, "usage");
+    runInCommand(scope, () => mode.presentCommandOutput(component));
+    // The host mounts the queued component later, from agent_end, outside the command chain.
+    chat.addChild(queued[0]);
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    const text = transport.edits.at(-1)?.text ?? "";
+    expect(text.split("deferred output").length - 1).toBe(1);
+    origin.end(scope, "idle");
+  });
+
+  it("pushes a presentCommandOutput component exactly once when the host mounts it synchronously", async () => {
+    vi.useFakeTimers();
+    const mode = {
+      presentCommandOutput(child: unknown): void {
+        chatRef?.addChild(child);
+      },
+    };
+    let chatRef: { addChild(child: unknown): unknown } | undefined;
+    const { transport, origin, output, chat } = attachedChat({ mode });
+    chatRef = chat;
+    const scope = beginCommand(origin, output, "usage");
+    runInCommand(scope, () => mode.presentCommandOutput({ text: "sync output" }));
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    const text = transport.edits.at(-1)?.text ?? "";
+    expect(text.split("sync output").length - 1).toBe(1);
+    origin.end(scope, "idle");
+  });
+
+  it("reads a describe-only component through its tree and never calls render()", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = beginCommand(origin, output, "jobs");
+    const render = vi.fn(() => ["rendered picture"]);
+    const describe = vi.fn(() => ({ k: "text", p: { text: "Described line" } }));
+    runInCommand(scope, () => chat.addChild({ render, describe }));
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(describe).toHaveBeenCalled();
+    expect(render).not.toHaveBeenCalled();
+    expect(transport.edits.at(-1)?.text).toContain("Described line");
     origin.end(scope, "idle");
   });
 });

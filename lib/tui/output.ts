@@ -16,6 +16,8 @@ import type { TelegramTransport } from "../types.ts";
 import { hookMethod, isHostObject, onHostState, type HostState } from "./host.ts";
 import { installHook, removeOwnerHooks } from "./hooks.ts";
 import { currentCommandScope, runAsHistory, runOutsideCommand } from "./command-context.ts";
+import { describedText } from "./describe-text.ts";
+import { describeTree } from "./adapters/tsp.ts";
 import type { CommandScope, OriginTracker } from "./origin.ts";
 import type { SecretStore } from "./secrets.ts";
 
@@ -96,6 +98,12 @@ export class OutputCapture {
   /** Components whose `setComplete` has fired; only these may owe a final
    * render at scope end (F2: an unfinished one never pushes its running frame). */
   private readonly bashCompleted = new WeakSet<object>();
+  /** Components claimed at call time by `presentCommandOutput` inside a command
+   * chain. A later mount of the same component (inside that chain, from
+   * `addChild`) is not pushed a second time. */
+  private readonly presentClaimed = new WeakSet<object>();
+  /** Mode objects that already carry the `presentCommandOutput` stage. */
+  private readonly presentHooked = new WeakSet<object>();
 
   constructor(
     private readonly transport: OutputTransport,
@@ -183,6 +191,23 @@ export class OutputCapture {
     }, this);
   }
 
+  /** Claim the component(s) a host `presentCommandOutput` call is given. Runs
+   * before the host call, so an `addChild` the host makes synchronously inside
+   * it finds the component already claimed. Only a call made inside this
+   * binding's command chain is output (v8 §0.2). */
+  private claimPresented(presented: unknown): void {
+    const binding = this.binding;
+    if (!binding || binding.finished || currentCommandScope() !== binding.scope) return;
+    const list = Array.isArray(presented) ? presented : [presented];
+    for (const child of list) {
+      if (!isHostObject(child) || this.presentClaimed.has(child)) continue;
+      this.presentClaimed.add(child);
+      const html = contentHtml(child, (raw) => this.redact(raw));
+      this.logCaptured(child, html);
+      if (html) this.push(html);
+    }
+  }
+
   private emitBashOutput(child: Record<string, unknown>, binding: Binding, final: boolean): void {
     if (this.bashPushed.has(child)) return;
     this.bashPushed.add(child);
@@ -246,6 +271,10 @@ export class OutputCapture {
     if (isHostObject(mode) && !this.reportHooked.has(mode)) {
       this.reportHooked.add(mode);
       hookMethod(mode, "showCommandReport", "output-command-report", undefined, (args) => {
+        // Only a report shown inside this binding's command chain is its output;
+        // an agent-triggered report during an open scope is not (v8 §0.2).
+        const binding = this.binding;
+        if (!binding || currentCommandScope() !== binding.scope) return;
         const report = args[0] as { title?: unknown; body?: unknown } | undefined;
         const title = typeof report?.title === "string" ? report.title.trim() : "";
         const body = isHostObject(report?.body)
@@ -254,6 +283,20 @@ export class OutputCapture {
         if (!title && !body) return;
         this.push(title ? `<b>${escapeHtml(this.redact(title))}</b>\n${body ?? ""}` : body!);
       }, this);
+    }
+    // OMP `presentCommandOutput` (oh-my-pi@v18.12.5 interactive-mode.ts
+    // presentCommandOutput ~7633) defers command output while the agent streams.
+    // The components are claimed here, at call time, inside the command chain.
+    if (isHostObject(mode) && !this.presentHooked.has(mode)
+      && installHook(mode, "presentCommandOutput", "output-present-command", (next, args) => {
+        try {
+          this.claimPresented(args[0]);
+        } catch (err) {
+          outputLog.debug("presentCommandOutput claim failed", { err });
+        }
+        return next(args);
+      }, { priority: 10, owner: this })) {
+      this.presentHooked.add(mode);
     }
 
     const chat = state.chat;
@@ -268,6 +311,8 @@ export class OutputCapture {
         if (!binding || currentCommandScope() !== binding.scope) return;
         const child = args[0];
         if (!isHostObject(child)) return;
+        // Already claimed by presentCommandOutput at call time: not pushed twice.
+        if (this.presentClaimed.has(child)) return;
         // A bash component claimed from the pending area (H34) moves into the
         // chat on the next user submit; it is already owned, so it is neither
         // tracked nor pushed a second time from here.
@@ -504,12 +549,14 @@ function bashOutputHtml(child: Record<string, unknown>, redact: (text: string) =
   return clean.trim() ? `<pre>${escapeHtml(clean)}</pre>` : undefined;
 }
 
-type ContentPiece = { kind: "markdown" | "text"; value: string };
+/** `html` pieces are already Telegram HTML and redacted by `describedText`. */
+type ContentPiece = { kind: "markdown" | "text" | "html"; value: string };
 
 /** Text of a command's output component, from its data only (v8 §0.2, never `render()`):
  * - `markdown` string field, or a pi `Markdown` (its own `theme` field) `text` field: markdown source;
  * - a pi `ThemedText` (`build` function, which returns the themed string): plain text;
  * - a pi `Text` (`text` string): plain text;
+ * - an OMP semantic tree (`describe(cx)`), read through `describedText`;
  * - a container's `children`, read in order up to CONTENT_MAX_DEPTH levels;
  * - anything else (Spacer, DynamicBorder, ...) has no content and is skipped.
  * The result is Telegram HTML, redacted; undefined when there is no content. */
@@ -518,18 +565,15 @@ export function contentHtml(
   redact: (text: string) => string = (text) => text,
 ): string | undefined {
   const pieces: ContentPiece[] = [];
-  collectContent(component, 0, pieces);
-  if (pieces.length === 0) {
-    if (typeof component.describe === "function") {
-      // OMP semantic trees are converted by N-1; until then they are skipped.
-      outputLog.debug("component has describe() only; skipped until semantic output is supported", { ctor: ctorName(component) });
-    }
-    return undefined;
-  }
+  collectContent(component, 0, pieces, redact);
+  if (pieces.length === 0) return undefined;
   const html = pieces
-    .map((piece) => piece.kind === "markdown"
-      ? markdownToTelegramHtml(redact(piece.value))
-      : plainHtml(redact(stripAnsi(piece.value))))
+    .map((piece) => {
+      if (piece.kind === "html") return piece.value;
+      return piece.kind === "markdown"
+        ? markdownToTelegramHtml(redact(piece.value))
+        : plainHtml(redact(stripAnsi(piece.value)));
+    })
     .filter((part) => part.length > 0);
   return html.length > 0 ? html.join("\n\n") : undefined;
 }
@@ -539,7 +583,12 @@ function plainHtml(clean: string): string {
   return clean.includes("\n") ? `<pre>${escapeHtml(clean)}</pre>` : escapeHtml(clean);
 }
 
-function collectContent(node: Record<string, unknown>, depth: number, out: ContentPiece[]): void {
+function collectContent(
+  node: Record<string, unknown>,
+  depth: number,
+  out: ContentPiece[],
+  redact: (text: string) => string,
+): void {
   const markdown = node.markdown;
   if (typeof markdown === "string" && markdown.trim()) {
     out.push({ kind: "markdown", value: markdown });
@@ -565,10 +614,20 @@ function collectContent(node: Record<string, unknown>, depth: number, out: Conte
     out.push({ kind: isMarkdown ? "markdown" : "text", value: text });
     return;
   }
+  // OMP semantic tree (`describe(cx)`): read through describedText, never render().
+  // Its own html is already Telegram HTML; the buttons are not output here.
+  const tree = describeTree(node);
+  if (tree) {
+    const html = describedText(tree, redact, node).html;
+    if (html) {
+      out.push({ kind: "html", value: html });
+      return;
+    }
+  }
   const children = node.children;
   if (Array.isArray(children) && depth < CONTENT_MAX_DEPTH) {
     for (const child of children) {
-      if (isHostObject(child)) collectContent(child, depth + 1, out);
+      if (isHostObject(child)) collectContent(child, depth + 1, out, redact);
     }
   }
 }
