@@ -646,6 +646,72 @@ describe("OutputCapture transcript-reset scopes", () => {
   });
 });
 
+describe("OutputCapture agent tool-call components", () => {
+  // OMP's ToolExecutionComponent is minified and keeps toolCallId private, so
+  // only its method shape (updateArgs/updateResult/setArgsComplete) marks it.
+  class Zx {
+    render() { return ["$ sed -n '1,2p' a.py"]; }
+    updateArgs(_args: unknown): void {}
+    updateResult(_result: unknown): void {}
+    setArgsComplete(): void {}
+  }
+  class ReportBlock {
+    render() { return ["Logging in to deepseek…"]; }
+  }
+  // Only two of the three tool-call methods: not an agent component.
+  class PartialToolBlock {
+    render() { return ["partial block output"]; }
+    updateArgs(_args: unknown): void {}
+    updateResult(_result: unknown): void {}
+  }
+
+  function attachedChat() {
+    const transport = fakeTransport();
+    const origin = new OriginTracker({ isEditorFocused: () => true, readDraft: () => "", writeDraft: () => true });
+    const output = new OutputCapture(transport, origin);
+    const chat = { addChild: (_child: unknown) => undefined };
+    (output as unknown as { attach(state: unknown): void }).attach({ host: "pi", mode: {}, chat });
+    return { transport, origin, output, chat };
+  }
+
+  it("does not capture a minified tool-call component running inside a command scope", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "login", "/login", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ /login</b>" });
+    chat.addChild(new Zx());
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(transport.edits.every((edit) => !edit.text.includes("sed -n"))).toBe(true);
+    origin.end(scope, "idle");
+  });
+
+  it("still captures ordinary command output in the same scope", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "login", "/login", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ /login</b>" });
+    chat.addChild(new Zx());
+    chat.addChild(new ReportBlock());
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(transport.edits.at(-1)?.text).toContain("Logging in to deepseek…");
+    origin.end(scope, "idle");
+  });
+
+  it("treats a component with only two of the tool-call methods as command output", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "login", "/login", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ /login</b>" });
+    chat.addChild(new PartialToolBlock());
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(transport.edits.at(-1)?.text).toContain("partial block output");
+    origin.end(scope, "idle");
+  });
+});
+
 describe("command gateway /new across a runtime replacement", () => {
   function newSessionGateway(newSession: NonNullable<GatewayDeps["newSession"]>) {
     const transport = fakeTransport();

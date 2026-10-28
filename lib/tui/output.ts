@@ -40,6 +40,12 @@ const REBUILD_OUTPUT_LABELS = new Set(["compact", "clear", "delete", "new"]);
 const BASH_EXECUTOR_CTORS = /^BashExecutionComponent$/;
 const BASH_EXECUTOR_METHODS = ["setExpanded", "appendOutput", "setComplete", "getOutput"] as const;
 
+/** The host's agent tool-call component. pi's and OMP's ToolExecutionComponent
+ * both expose these three prototype methods, while OMP keeps toolCallId in a
+ * private field and minifies the class name, so AGENT_CTORS/AGENT_FIELDS miss
+ * it. The method shape is the rename-proof identity for these components. */
+const TOOL_EXECUTION_METHODS = ["updateArgs", "updateResult", "setArgsComplete"] as const;
+
 export type OutputTelegram = {
   chatId: number;
   messageThreadId?: number;
@@ -469,6 +475,7 @@ function isAgentComponent(child: Record<string, unknown>, mode: Record<string, u
       // ignore
     }
   }
+  if (TOOL_EXECUTION_METHODS.every((name) => typeof child[name] === "function")) return true;
   return false;
 }
 
