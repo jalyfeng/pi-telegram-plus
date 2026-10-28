@@ -15,7 +15,7 @@ import { log, type LogFields } from "../logger.ts";
 import type { TelegramTransport } from "../types.ts";
 import { hookMethod, hookOwnedMethod, isHostObject, onHostState, type HostState } from "./host.ts";
 import { installHook, removeOwnerHooks } from "./hooks.ts";
-import { currentCommandScope, runAsHistory, runOutsideCommand } from "./command-context.ts";
+import { clearCommandMessageRoute, currentCommandScope, runAsHistory, runOutsideCommand, setCommandMessageRoute, type CommandMessageRoute } from "./command-context.ts";
 import { describedText } from "./describe-text.ts";
 import { describeTree } from "./adapters/tsp.ts";
 import type { CommandScope, OriginTracker } from "./origin.ts";
@@ -115,6 +115,15 @@ export class OutputCapture {
   /** Mode objects that already carry the `presentCommandOutput` stage. */
   private readonly presentHooked = new WeakSet<object>();
   private pager?: OutputPager;
+  /** Registered while this capture runs: a command's own lines (notices) and its message. */
+  private readonly route: CommandMessageRoute = {
+    notice: (scope, html) => {
+      const binding = this.binding;
+      if (!binding || binding.finished || binding.scope !== scope) return false;
+      this.push(html);
+      return true;
+    },
+  };
 
   constructor(
     private readonly transport: OutputTransport,
@@ -129,12 +138,14 @@ export class OutputCapture {
 
   start(): void {
     if (this.unsubscribe) return;
+    setCommandMessageRoute(this.route);
     this.unsubscribe = onHostState((state) => this.attach(state));
   }
 
   stop(): void {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    clearCommandMessageRoute(this.route);
     this.finish();
     removeOwnerHooks(this);
   }
@@ -293,6 +304,23 @@ export class OutputCapture {
           this.push(`${prefix}${escapeHtml(this.redact(stripAnsi(message)))}`);
         }, this);
       }
+    }
+    // A short OMP report (`showCommandReport` with the inline ReportPanel) is
+    // added to the report container by the controller, not through the mode.
+    // Inside a command's chain it is that command's output (v8 §0.2).
+    const reports = isHostObject(state.mode) ? (state.mode as Record<string, unknown>).reportContainer : undefined;
+    if (isHostObject(reports) && !this.attached.has(reports)) {
+      this.attached.add(reports);
+      hookMethod(reports, "addChild", "output-report-add-child", undefined, (args) => {
+        const binding = this.binding;
+        if (!binding || binding.finished || currentCommandScope() !== binding.scope) return;
+        const child = args[0];
+        if (!isHostObject(child) || this.presentClaimed.has(child)) return;
+        this.presentClaimed.add(child);
+        const html = describedHtml(child, (raw) => this.redact(raw));
+        this.logCaptured(child, html);
+        if (html) this.push(html);
+      }, this);
     }
     // OMP reports (`/mcp` and friends) draw a titled block on the main screen
     // instead of opening a dialog: `showCommandReport({ title, body })`. It is
@@ -605,6 +633,17 @@ function bashStatusLine(status: BashStatus | undefined): string | undefined {
 
 /** `html` pieces are already Telegram HTML and redacted by `describedText`. */
 type ContentPiece = { kind: "markdown" | "text" | "html"; value: string };
+
+/** Telegram HTML of a described component (OMP `describe()`), falling back to the data
+ * fields; `render()` is never called. */
+function describedHtml(child: Record<string, unknown>, redact: (text: string) => string): string | undefined {
+  const root = describeTree(child);
+  if (root) {
+    const html = describedText(root, redact, child).html;
+    if (html) return html;
+  }
+  return contentHtml(child, redact);
+}
 
 /** Text of a command's output component, from its data only (v8 §0.2, never `render()`):
  * - `markdown` string field, or a pi `Markdown` (its own `theme` field) `text` field: markdown source;

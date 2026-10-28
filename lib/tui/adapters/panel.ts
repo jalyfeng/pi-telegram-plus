@@ -107,15 +107,25 @@ export const infoPanelAdapter: DialogAdapter = {
  * Telegram buttons. Trees that hold a picker, a settings page or a text prompt
  * belong to the tsp adapters, which run before this one.
  */
+/**
+ * Whether a host component is an OMP text panel the described-panel adapter
+ * owns: it describes itself, takes native events, is not a spinner (Escape
+ * cancels it), and is not a picker, prefs page or login sheet. Focus uses the
+ * same rule, so a focused panel is a dialog before any adapter reads it.
+ */
+export function isDescribedPanel(component: object): boolean {
+  if (typeof (component as Partial<Describable>).handleNativeEvent !== "function") return false;
+  if (cancellable(component)) return false;
+  if (describesDialog(component) || describesLoginSheet(component)) return false;
+  return describeTree(component) !== undefined;
+}
+
 export const describedPanelAdapter: DialogAdapter = {
   id: "described-panel",
 
   detect(component, ctx) {
     if (ctx.host !== "omp" || ctx.entry?.race) return false;
-    if (typeof (component as Partial<Describable>).handleNativeEvent !== "function") return false;
-    if (cancellable(component)) return false;
-    if (describesDialog(component) || describesLoginSheet(component)) return false;
-    return describeTree(component) !== undefined;
+    return isDescribedPanel(component);
   },
 
   read(component, ctx): DialogModel {

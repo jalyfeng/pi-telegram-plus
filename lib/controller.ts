@@ -23,10 +23,11 @@ import { log } from "./logger.ts";
 import { commandErrorMessage, getRunnerMode, restoreRunnerUiContext, setRunnerUiContext, TELEGRAM_EXTENSION_MODE } from "./pi-compat.ts";
 import { isOmpHost } from "./session-capture.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "./turn-context.ts";
-import { OriginTracker } from "./tui/origin.ts";
+import { OriginTracker, type CommandScope } from "./tui/origin.ts";
 import { FocusTracker } from "./tui/focus.ts";
 import { OutputCapture } from "./tui/output.ts";
 import { CommandGateway } from "./tui/gateway.ts";
+import { runInCommand } from "./tui/command-context.ts";
 import { DialogBroker } from "./tui/broker.ts";
 import { SecretStore } from "./tui/secrets.ts";
 import { readEditorText as readHostEditorText, writeEditorText as writeHostEditorText } from "./tui/host.ts";
@@ -1152,7 +1153,18 @@ export function createTelegramController(deps: {
     return "proceed";
   };
 
-  const runCommandHandler = (handler: TelegramCommandHandler, args: string, session: CapturedAgentSession, chatId: number, messageThreadId?: number, sourceMessageId?: number, label = "command") => {
+  /** Sends a command's ack message and binds the command's output to it (the gateway's ack, for extension commands). */
+  const bindCommandAck = async (scope: CommandScope, text: string, chatId: number, messageThreadId?: number, sourceMessageId?: number): Promise<void> => {
+    const ackHtml = `<b>▶️ ${escapeHtml(text)}</b>`;
+    const sent = await deps.transport.sendText(chatId, ackHtml, messageThreadId, sourceMessageId)
+      .catch(ctrlLog.swallow("debug", "sendText command ack failed", { chatId }));
+    const messageId = sent?.[0]?.message_id;
+    if (messageId === undefined) return;
+    scope.telegramMessageId = messageId;
+    outputCapture.bind(scope, { chatId, messageThreadId, messageId, ackHtml });
+  };
+
+  const runCommandHandler = (handler: TelegramCommandHandler, args: string, session: CapturedAgentSession, chatId: number, messageThreadId?: number, sourceMessageId?: number, label = "command", ackMessage = false) => {
     // Commands run immediately — they do not acquire a turn and are never
     // blocked by an active agent prompt.  Fast config / status commands
     // briefly borrow the UI context; the rendering pipeline still finds the
@@ -1206,6 +1218,9 @@ export function createTelegramController(deps: {
     // user's TUI (modals would route to Telegram, editor would no-op).
     const wasIdle = typeof (ctx as any).isIdle === "function" ? (ctx as any).isIdle.call(ctx) : false;
     const commandTurn = deps.getActiveTurn(chatId, messageThreadId) ?? { chatId, messageThreadId, sourceMessageId, queuedAttachments: [] };
+    // An extension command with a scope gets one message of its own, its ack, as the gateway
+    // gives host commands: its notices and dialogs land there (one command, one message).
+    const ackSent = ackMessage && scope ? bindCommandAck(scope, `/${label}${args ? ` ${args}` : ""}`, chatId, messageThreadId, sourceMessageId) : undefined;
     void runWithTelegramTurn(commandTurn, () => runWithTelegramUi({
       session,
       ui: telegramUi,
@@ -1219,7 +1234,8 @@ export function createTelegramController(deps: {
       uiMode: promptUiMode(),
       run: async () => {
         try {
-          await handler(args, commandCtx);
+          await ackSent;
+          await (ackSent && scope ? runInCommand(scope, () => handler(args, commandCtx)) : handler(args, commandCtx));
           await holdThroughEnqueuedTurns(ctx, wasIdle);
         } finally {
           // The scope deliberately outlives the handler: a dialog answered a
@@ -1357,7 +1373,7 @@ export function createTelegramController(deps: {
     if (externalCommand) {
       ctrlLog.debug("command route", { name, route: "extension-command" });
       recordCommandUsage(name);
-      await runCommandHandler(externalCommand.handler, args, session, chatId, messageThreadId, sourceMessageId, name);
+      await runCommandHandler(externalCommand.handler, args, session, chatId, messageThreadId, sourceMessageId, name, true);
       return true;
     }
 

@@ -18,6 +18,7 @@ import { hookEntryMethods, insideEntryCall, PI_ENTRY_SPECS, UI_CONTEXT_SPECS, OM
 import { installRace, takePendingRace } from "./race.ts";
 import { findShape, isControlShape, isEditorShape, isFilteredList, isInputShape, isReadOnlyPanel, isSelectList, isSettingsList } from "./find-shape.ts";
 import { describesDialog, describesLoginSheet } from "./adapters/tsp.ts";
+import { isDescribedPanel } from "./adapters/panel.ts";
 import type { EntryInfo } from "./model.ts";
 import { log } from "../logger.ts";
 import { currentCommandScope } from "./command-context.ts";
@@ -471,6 +472,16 @@ export class FocusTracker {
         this.entryByComponent.set(component, recent.info);
         this.recentPanel = undefined;
       }
+    }
+
+    // A described OMP text panel that a command's own call chain focused (`/session`, a long
+    // `/changelog`) is that command's question: it takes the keys, so it is recorded as a panel
+    // entry and classifies as a dialog. The described-panel adapter then draws its text and
+    // buttons on the command message. A spinner (a signal) or a picker never qualifies.
+    if (commandScope && this.lastState?.host === "omp" && !this.entryByComponent.has(component)
+      && !this.isEditorComponent(component) && isDescribedPanel(component)
+      && component.signal === undefined && component.abortController === undefined) {
+      this.entryByComponent.set(component, { kind: "panel", source: "omp", method: "command-panel" });
     }
 
     const kind = this.classify(component);

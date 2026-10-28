@@ -34,7 +34,7 @@ function makeSession(overrides: Partial<{
   };
   return {
     sessionManager: {
-      getCwd: () => overrides.cwd ?? "/Users/me/proj",
+      getCwd: () => overrides.cwd ?? "/tmp/proj",
       getSessionId: () => stats.sessionId,
       getSessionFile: () => stats.sessionFile,
       getSessionName: () => overrides.sessionName,
@@ -115,7 +115,7 @@ describe("buildStatusSnapshot", () => {
 
   it("keeps total size well under the 4096-byte Telegram limit", () => {
     const html = buildStatusSnapshot(makeSession({
-      cwd: "/Users/me/very/very/long/path/that/should/stay/comfortably/small",
+      cwd: "/tmp/very/very/long/path/that/should/stay/comfortably/small",
       sessionName: "a very long session name that should also be safe",
       tokens: { input: 1_234_567, output: 987_654, cacheRead: 555_555, cacheWrite: 222_222, total: 2_999_998 },
       cost: 1234.5678,

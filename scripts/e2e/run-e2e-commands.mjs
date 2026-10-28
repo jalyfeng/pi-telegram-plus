@@ -284,7 +284,10 @@ async function runHost(host, label, phase = "main") {
     return current && predicate(current) ? current : false;
   }, timeoutMs);
   const isNav = (button) => /^tgplus:dlg:[^:]+:\d+:p(?::|$)/.test(String(button.callback_data ?? ""));
-  const isCancel = (button) => DIALOG_CANCEL.test(String(button.callback_data ?? ""));
+  // A text panel's own Close button (described-panel adapter, `c:close`) is the way out of it.
+  const PANEL_CLOSE = /^tgplus:dlg:[^:]+:\d+:c:close$/;
+  const isCancel = (button) => DIALOG_CANCEL.test(String(button.callback_data ?? ""))
+    || (PANEL_CLOSE.test(String(button.callback_data ?? "")) && /^Close$/.test(String(button.text ?? "")));
   /** Buttons that choose something: no paging, no cancel, no `n/m` marker. */
   const choicesOf = (call) => buttonsOf(call).filter((b) => !isNav(b) && !isCancel(b) && !/^\d+\/\d+$/.test(String(b.text ?? "")));
   /** Visible text of a command message without its `▶️ /cmd` header and `✓ Done` marker. */
@@ -1003,8 +1006,14 @@ async function runHost(host, label, phase = "main") {
         const picked = foldState((await controlGet()).calls, dialogMessageId);
         const pickedButtons = picked ? buttonsOf(picked).length : -1;
         const named = Boolean(picked) && panelBody(picked.body.text).includes(modelName);
-        record("goal: /model is a paged button list", paged && models.length > 0 && named && pickedButtons === 0,
-          `${pagedDetail} · tap "${modelLabel}" → ${pickedButtons === 0 ? "keyboard removed" : `keyboard still has ${pickedButtons} buttons`} · ${named ? "names the model" : "no model name"} · text: "${panelBody(picked?.body.text).slice(0, 100)}"`);
+        // OMP's own next step (the purpose picker "Assign <model> to …") may
+        // replace the picker on the same message; the TUI shows that step too,
+        // so it counts as the host's next dialog step, not a failed tap.
+        const hostNextStep = Boolean(picked) && (/Assign .* to/i.test(String(picked.body?.text ?? ""))
+          || buttonsOf(picked).some((b) => /^default\b/i.test(String(b.text ?? ""))));
+        const settled = pickedButtons === 0 || hostNextStep;
+        record("goal: /model is a paged button list", paged && models.length > 0 && named && settled,
+          `${pagedDetail} · tap "${modelLabel}" → ${pickedButtons === 0 ? "keyboard removed" : hostNextStep ? "host's next dialog step on the same message" : `keyboard still has ${pickedButtons} buttons`} · ${named ? "names the model" : "no model name"} · text: "${panelBody(picked?.body.text).slice(0, 100)}"`);
         // F5: OMP asks for a purpose after the model — the model click opens
         // a second dialog ("Assign <model> to", first item `default`) and
         // nothing applies until that is answered too (3E).

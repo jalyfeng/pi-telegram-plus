@@ -55,3 +55,35 @@ export function currentCommandScope(): CommandScope | undefined {
   const context = storage().getStore();
   return context?.kind === "command" ? context.scope : undefined;
 }
+
+/** Where a command's own lines go: OutputCapture registers itself while it runs. */
+export type CommandMessageRoute = {
+  /** Adds one line to the message of `scope`; false when that scope owns no live message. */
+  notice(scope: CommandScope, html: string): boolean;
+};
+
+const ROUTE_KEY = Symbol.for("pi-telegram-plus.command-message-route");
+
+function holder(): { route?: CommandMessageRoute } {
+  const g = globalThis as unknown as Record<symbol, { route?: CommandMessageRoute } | undefined>;
+  g[ROUTE_KEY] ??= {};
+  return g[ROUTE_KEY] as { route?: CommandMessageRoute };
+}
+
+/** Install `route` as the active one; it stays until `clearCommandMessageRoute` removes it. */
+export function setCommandMessageRoute(route: CommandMessageRoute): void {
+  holder().route = route;
+}
+
+/** Clears the route only if `route` is still the installed one (a replaced runtime must not clear its successor). */
+export function clearCommandMessageRoute(route: CommandMessageRoute): void {
+  const current = holder();
+  if (current.route === route) current.route = undefined;
+}
+
+/** Adds `html` to the message of the running command; false when no live command message owns it. */
+export function routeCommandNotice(html: string): boolean {
+  const scope = currentCommandScope();
+  const route = holder().route;
+  return scope !== undefined && route !== undefined && route.notice(scope, html);
+}
