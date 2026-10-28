@@ -1070,6 +1070,9 @@ async function runHost(host, label, phase = "main") {
       const dialog = await awaitMessage("scoped-models dialog after ack", ack.message_id, hasDialog, 15_000).catch(() => undefined);
       record("menu /scoped-models opens", Boolean(dialog) && buttonsOf(dialog).length > 0,
         dialog ? `dialog · ${buttonsOf(dialog).slice(0, 3).map((b) => b.text).join(" / ").slice(0, 60)}` : "no dialog after ack");
+      // Close the picker: an open dialog would block every later command in the run.
+      const close = dialog ? buttonsOf(dialog).find(isCancel) : undefined;
+      if (close) await cancelQuietly(close, dialog.body?.message_id ?? dialog.message_id);
       await settle();
     } catch (error) {
       record("menu /scoped-models opens", false, String(error.message).slice(0, 200));
