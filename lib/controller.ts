@@ -646,8 +646,6 @@ async function holdThroughEnqueuedTurns(ctx: unknown, wasIdle: boolean): Promise
   }
 }
 
-const TUI_SCREEN_WIDTH = 100;
-
 // Host-control and terminal-only mappings (§9 decisions 21/22, §4.8): these run the
 // plugin's native handler instead of submitting to the host editor - editor
 // submission reloads the extension runtime outside pi's withSession sequencing.
@@ -698,54 +696,6 @@ function isBashRunning(session: CapturedAgentSession): boolean {
 
 function isDangerousBash(command: string): boolean {
   return DANGEROUS_BASH_PATTERNS.some((pattern) => pattern.test(command));
-}
-
-function preformatted(text: string): string {
-  return `<pre>${escapeHtml(text)}</pre>`;
-}
-
-// editText/editButtons only deliver the first split chunk, so a full-screen
-// snapshot must fit in one chunk (3600 bytes). Keep the bottom of the screen:
-// dialogs, prompts, and the latest output render there.
-const TUI_SNAPSHOT_MAX_BYTES = 3000;
-
-/**
- * Fit a rendered screen into a Telegram message without losing the parts a
- * user needs to interact: the host pads dialogs to the terminal height with
- * blank rows, which used to eat the budget and push the dialog's own header
- * (instructions, OAuth URL) out of the mirror. Collapse that padding first,
- * then keep both ends when the rest still overflows.
- */
-export function clipScreen(text: string, maxBytes: number): string {
-  const collapsed: string[] = [];
-  for (const line of text.split("\n")) {
-    if (line.trim() === "" && collapsed.length > 0 && collapsed[collapsed.length - 1].trim() === "") continue;
-    collapsed.push(line);
-  }
-  while (collapsed.length > 0 && collapsed[collapsed.length - 1].trim() === "") collapsed.pop();
-  const trimmed = collapsed.join("\n");
-  if (Buffer.byteLength(trimmed, "utf8") <= maxBytes) return trimmed;
-  const budget = maxBytes - 4; // "\n…\n"
-  const headLimit = Math.floor(budget * 0.45);
-  const head: string[] = [];
-  let headBytes = 0;
-  let index = 0;
-  for (; index < collapsed.length; index += 1) {
-    const size = Buffer.byteLength(collapsed[index], "utf8") + 1;
-    if (head.length > 0 && headBytes + size > headLimit) break;
-    head.push(collapsed[index]);
-    headBytes += size;
-  }
-  const tail: string[] = [];
-  let tailBytes = 0;
-  for (let i = collapsed.length - 1; i > index; i -= 1) {
-    const size = Buffer.byteLength(collapsed[i], "utf8") + 1;
-    if (tail.length > 0 && tailBytes + size > budget - headBytes) break;
-    tail.push(collapsed[i]);
-    tailBytes += size;
-  }
-  tail.reverse();
-  return [...head, "…", ...tail].join("\n");
 }
 
 /** Text that must not be swallowed by a dialog: shell input and slash commands. */
@@ -957,24 +907,6 @@ export function createTelegramController(deps: {
       excludeFromContext,
     });
   };
-
-  const unsubscribeLocalTui = bridge.onLocalSubmit((text) => {
-    if (deps.isTelegramActive?.() === false) return;
-    const command = text.trim();
-    if (!command.startsWith("/") && !command.startsWith("!")) return;
-    if (/^\/?tg(?:-|$)/.test(command)) return;
-    const chatId = deps.getConfig?.().activeChatId;
-    if (chatId === undefined) return;
-    void (async () => {
-      await deps.transport.sendText(chatId, `<b>⌨️ TUI command</b>\n${preformatted(command)}`)
-        .catch(ctrlLog.swallow("warn", "sendText local TUI command failed", { chatId }));
-      await sleep(450);
-      const snapshot = bridge.snapshot(TUI_SCREEN_WIDTH);
-      if (!snapshot) return;
-      await deps.transport.sendText(chatId, preformatted(clipScreen(snapshot.text ?? "(empty screen)", TUI_SNAPSHOT_MAX_BYTES)))
-        .catch(ctrlLog.swallow("warn", "sendText local TUI snapshot failed", { chatId }));
-    })();
-  });
 
   // Per chat/thread prompt queues: each Telegram topic chains independently.
   const promptTails = new Map<string, Promise<void>>();
@@ -1757,7 +1689,6 @@ export function createTelegramController(deps: {
 
     dispose() {
       dialogBroker.stop();
-      unsubscribeLocalTui();
       commandGateway.dispose();
     },
   };

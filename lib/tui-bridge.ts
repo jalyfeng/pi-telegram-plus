@@ -1,4 +1,3 @@
-import { stripAnsi } from "./ansi.ts";
 import { log } from "./logger.ts";
 import { probeCapture } from "./tui/probe.ts";
 import { SUPPORTED_OMP_VERSIONS } from "./tui/adapters/utils.ts";
@@ -17,19 +16,9 @@ export type TuiCommand = {
   source: "builtin" | "autocomplete";
 };
 
-export type TuiSnapshot = {
-  /** ANSI-free rendered terminal text. */
-  text: string;
-  /** True when a selector/overlay owns focus instead of the editor. */
-  interactive: boolean;
-  host: TuiHost;
-  width: number;
-};
-
 type HostObject = Record<string, unknown>;
 type HostCallable = ((this: unknown, ...args: unknown[]) => unknown) & {
   __ptpBridgePatched?: boolean;
-  __ptpBridgeSubmit?: boolean;
 };
 
 export type TuiBridgeAdapter = {
@@ -43,12 +32,10 @@ export type TuiBridgeAdapter = {
   submitResult?(text: string): { ok: boolean; result?: unknown };
   readEditorText?(): string;
   writeEditorText?(text: string): boolean;
-  snapshot(width: number): TuiSnapshot | undefined;
   key(name: string): boolean;
   write(text: string): boolean;
   isEditorFocused(): boolean;
   isInteractiveFocus(): boolean;
-  onLocalSubmit(listener: (text: string) => void): () => void;
 };
 
 export type TuiHostState = {
@@ -63,8 +50,6 @@ export type TuiHostState = {
 
 type BridgeState = TuiHostState & {
   hostCommands: TuiCommand[];
-  suppressLocalSubmit: boolean;
-  localSubscribers: Set<(text: string) => void>;
   captureSubscribers: Set<(state: TuiHostState) => void>;
   /** Set when the host version is unsupported: the bridge installs no patches and stays unavailable (§0.1). */
   unsupportedReason?: string;
@@ -80,12 +65,8 @@ const sharedGlobal = globalThis as typeof globalThis & { [SHARED_STATE_KEY]?: Br
 const state: BridgeState = sharedGlobal[SHARED_STATE_KEY] ??= {
   host: "unknown",
   hostCommands: [],
-  suppressLocalSubmit: false,
-  localSubscribers: new Set(),
   captureSubscribers: new Set(),
 };
-
-const editorWrappers = new WeakMap<HostObject, { original: HostCallable; wrapped: HostCallable }>();
 
 let installPromise: Promise<void> | undefined;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -208,7 +189,6 @@ function captureMode(mode: unknown, host: TuiHost): void {
   state.defaultEditor = asHostObject(modeObject.defaultEditor);
   state.session = asHostObject(modeObject.session);
   state.chat = asHostObject(modeObject.chatContainer ?? modeObject.chat);
-  ensureWrappedEditor();
   probeCapture(modeObject, host);
   for (const listener of state.captureSubscribers) {
     try {
@@ -317,37 +297,6 @@ export function installTuiBridge(): Promise<void> {
   return installPromise;
 }
 
-function ensureWrappedEditor(): void {
-  const editor = state.editor;
-  if (!editor) return;
-  const current = asCallable(editor.onSubmit);
-  if (!current) return;
-
-  const existing = editorWrappers.get(editor);
-  if (existing?.wrapped === current) return;
-
-  // If the host replaced onSubmit after we wrapped it, wrap the replacement.
-  // Wrapper state is per editor so a new session never calls the previous
-  // session's submit closure.
-  const original = current;
-  const wrapped: HostCallable = function patchedSubmit(this: unknown, ...args: unknown[]) {
-    const text = typeof args[0] === "string" ? args[0] : "";
-    if (!state.suppressLocalSubmit) {
-      for (const listener of state.localSubscribers) {
-        try {
-          listener(text);
-        } catch (err) {
-          bridgeLog.debug("local submit listener failed", { err });
-        }
-      }
-    }
-    return original.apply(this, args);
-  };
-  wrapped.__ptpBridgeSubmit = true;
-  editorWrappers.set(editor, { original, wrapped });
-  editor.onSubmit = wrapped;
-}
-
 function focusedComponent(): HostObject | undefined {
   const ui = state.ui;
   if (!ui) return undefined;
@@ -382,7 +331,7 @@ function isInteractiveFocus(): boolean {
   const mode = state.mode;
   if (!mode) return false;
   // OMP mounts full-screen panels (/settings) on the TUI overlay stack; they
-  // hold focus and take keys, so the mirror must keep its controls.
+  // hold focus and take keys, so the bridge must treat them as interactive.
   const uiObject = state.ui as unknown as Record<string, unknown> | undefined;
   if (uiObject && visibleOverlays(uiObject).length > 0) return true;
   return [
@@ -394,16 +343,6 @@ function isInteractiveFocus(): boolean {
     "overlay",
   ].some((name) => asHostObject(mode[name]) !== undefined);
 }
-function overlayWidth(options: Record<string, unknown> | undefined, termWidth: number): number {
-  const width = options?.width;
-  if (typeof width === "number") return Math.max(1, Math.min(termWidth, width));
-  if (typeof width === "string" && width.endsWith("%")) {
-    const percent = Number.parseFloat(width);
-    if (Number.isFinite(percent)) return Math.max(1, Math.min(termWidth, Math.floor((termWidth * percent) / 100)));
-  }
-  return termWidth;
-}
-
 function visibleOverlays(uiObject: Record<string, unknown>): Array<Record<string, unknown>> {
   const stack = uiObject.overlayStack;
   if (!Array.isArray(stack)) return [];
@@ -412,71 +351,6 @@ function visibleOverlays(uiObject: Record<string, unknown>): Array<Record<string
     if (entry.hidden === true || entry.released === true) return false;
     return typeof entry.component === "object" && entry.component !== null;
   });
-}
-
-// Overlays (e.g. /settings) are composited by the host's frame renderer, which
-// render(width) does not include. Render the top overlay ourselves so the
-// mirror shows what the terminal shows.
-function overlayLines(entry: Record<string, unknown>, width: number): string[] | undefined {
-  const component = entry.component as Record<string, unknown>;
-  const render = asCallable(component.render);
-  if (!render) return undefined;
-  const options = (entry.options ?? {}) as Record<string, unknown>;
-  let lines: unknown;
-  try {
-    lines = render.call(component, overlayWidth(options, width));
-  } catch (err) {
-    bridgeLog.debug("TUI overlay render failed", { err });
-    return undefined;
-  }
-  if (!Array.isArray(lines)) return undefined;
-  const rendered = lines.map((line) => stripAnsi(String(line)));
-  // Percentage caps need the terminal height; the viewport slice in
-  // renderScreen already applies it.
-  const maxHeight = options.maxHeight;
-  return typeof maxHeight === "number" && maxHeight > 0 ? rendered.slice(0, maxHeight) : rendered;
-}
-
-function compositeOverlay(base: string[], overlay: string[], anchor: unknown): string[] {
-  const lines = [...base];
-  while (lines.length < overlay.length) lines.push("");
-  const start = anchor === "top" || anchor === "top-left" || anchor === "top-center" || anchor === "top-right"
-    ? 0
-    : anchor === "center" || anchor === "left-center" || anchor === "right-center"
-      ? Math.max(0, Math.floor((lines.length - overlay.length) / 2))
-      : lines.length - overlay.length;
-  lines.splice(start, overlay.length, ...overlay);
-  return lines;
-}
-
-function renderScreen(width: number): string | undefined {
-  const ui = state.ui;
-  if (!ui) return undefined;
-  const render = asCallable(ui.render);
-  if (!render) return undefined;
-  let lines: unknown;
-  try {
-    lines = render.call(ui, width);
-  } catch (err) {
-    bridgeLog.debug("TUI render failed", { err });
-    return undefined;
-  }
-  if (!Array.isArray(lines)) return undefined;
-  let screen = lines.map((line) => stripAnsi(String(line)));
-
-  const uiObject = ui as unknown as Record<string, unknown>;
-  const overlays = visibleOverlays(uiObject);
-  const top = overlays[overlays.length - 1];
-  if (top) {
-    const overlay = overlayLines(top, width);
-    if (overlay) {
-      const options = (top.options ?? {}) as Record<string, unknown>;
-      screen = options.fullscreen === true ? overlay : compositeOverlay(screen, overlay, options.anchor);
-    }
-  }
-  const rows = Number((uiObject.terminal as { rows?: number } | undefined)?.rows ?? 0);
-  if (rows > 0 && screen.length > rows) screen = screen.slice(screen.length - rows);
-  return screen.join("\n");
 }
 
 function commandList(value: unknown, source: TuiCommand["source"]): TuiCommand[] {
@@ -549,12 +423,11 @@ const KEY_SEQUENCES: Record<string, string> = {
   home: "\x1b[H",
   end: "\x1b[F",
   // The host's own key legends advertise ⌃C to leave a dialog; without it the
-  // mirror had no way to cancel a prompt that only exits on interrupt.
+  // bridge had no way to cancel a prompt that only exits on interrupt.
   "ctrl-c": "\x03",
 };
 
 function injectInput(sequence: string): boolean {
-  ensureWrappedEditor();
   const ui = state.ui;
   if (!ui) return false;
 
@@ -593,9 +466,6 @@ function injectKey(name: string): boolean {
 }
 
 function submitToHostResult(text: string): { ok: boolean; result?: unknown } {
-  // OMP assigns `editor.onSubmit` after the mode is captured; the tick hook
-  // installs it when it appears, so make sure that has run before submitting.
-  ensureWrappedEditor();
   const editor = state.editor ?? state.defaultEditor;
   if (!editor) return { ok: false };
   const setText = asCallable(editor.setText);
@@ -609,14 +479,11 @@ function submitToHostResult(text: string): { ok: boolean; result?: unknown } {
   }
   const submit = asCallable(editor.onSubmit);
   if (!submit) return { ok: false };
-  state.suppressLocalSubmit = true;
   try {
     return { ok: true, result: submit.call(editor, text) };
   } catch (err) {
     bridgeLog.debug("TUI submit failed", { err });
     return { ok: false };
-  } finally {
-    state.suppressLocalSubmit = false;
   }
 }
 
@@ -628,7 +495,6 @@ export const tuiBridge: TuiBridgeAdapter & { getUnsupportedReason(): string | un
   async ready(): Promise<void> {
     await installTuiBridge();
     for (let attempt = 0; attempt < 120; attempt += 1) {
-      ensureWrappedEditor();
       if (state.mode && state.editor && state.ui) return;
       await sleep(25);
     }
@@ -641,21 +507,10 @@ export const tuiBridge: TuiBridgeAdapter & { getUnsupportedReason(): string | un
   submitResult: (text: string) => submitToHostResult(text),
   readEditorText,
   writeEditorText,
-  snapshot(width: number): TuiSnapshot | undefined {
-    ensureWrappedEditor();
-    const text = renderScreen(width);
-    if (text === undefined) return undefined;
-    return { text, interactive: isInteractiveFocus(), host: state.host, width };
-  },
   key: (name: string) => injectKey(name),
   write: (text: string) => text.length > 0 && injectInput(text),
   isEditorFocused,
   isInteractiveFocus,
-  onLocalSubmit(listener: (text: string) => void): () => void {
-    state.localSubscribers.add(listener);
-    ensureWrappedEditor();
-    return () => { state.localSubscribers.delete(listener); };
-  },
 };
 
 /**

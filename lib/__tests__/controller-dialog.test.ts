@@ -59,12 +59,10 @@ function createBridge(overrides: Partial<TuiBridgeAdapter> = {}): TuiBridgeAdapt
     getHost: () => "pi",
     getCommands: async () => [{ name: "settings", description: "Open settings", source: "builtin" }],
     submit: vi.fn(() => true),
-    snapshot: vi.fn(() => ({ text: "Settings\n> Theme", interactive: false, host: "pi" as const, width: 100 })),
     key: vi.fn(() => true),
     write: vi.fn(() => true),
     isEditorFocused: () => true,
     isInteractiveFocus: () => false,
-    onLocalSubmit: () => () => undefined,
     ...overrides,
   };
 }

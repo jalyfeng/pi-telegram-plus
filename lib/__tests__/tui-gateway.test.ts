@@ -42,12 +42,10 @@ function fakeBridge(result: Promise<unknown>): TuiBridgeAdapter {
     submitResult: () => ({ ok: true, result }),
     readEditorText: () => "",
     writeEditorText: () => true,
-    snapshot: () => undefined,
     key: () => true,
     write: () => true,
     isEditorFocused: () => true,
     isInteractiveFocus: () => false,
-    onLocalSubmit: () => () => undefined,
   };
 }
 

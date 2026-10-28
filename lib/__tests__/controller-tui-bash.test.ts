@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { clipScreen, createTelegramController, type TelegramController } from "../controller.ts";
+import { createTelegramController, type TelegramController } from "../controller.ts";
 import { CommandGateway } from "../tui/gateway.ts";
 import type { CapturedAgentSession, TelegramTransport } from "../types.ts";
 import { hostOwnsPrompts, type TuiBridgeAdapter } from "../tui-bridge.ts";
@@ -57,12 +57,10 @@ function createBridge(overrides: Partial<TuiBridgeAdapter> = {}): TuiBridgeAdapt
     getHost: () => "pi",
     getCommands: async () => [{ name: "settings", description: "Open settings", source: "builtin" }],
     submit: vi.fn(() => true),
-    snapshot: vi.fn(() => ({ text: "Settings\n> Theme", interactive: false, host: "pi" as const, width: 100 })),
     key: vi.fn(() => true),
     write: vi.fn(() => true),
     isEditorFocused: () => true,
     isInteractiveFocus: () => false,
-    onLocalSubmit: () => () => undefined,
     ...overrides,
   };
 }
@@ -335,23 +333,6 @@ describe("Telegram shell commands", () => {
       runText.mockRestore();
     }
   });
-});
-
-describe("Mirror text fitting", () => {
-  it("collapses the host's blank padding before the byte budget", () => {
-    const screen = ["header https://auth.example/start", "", "", "", "", "footer legend"].join("\n");
-    expect(clipScreen(screen, 3000)).toBe("header https://auth.example/start\n\nfooter legend");
-  });
-
-  it("keeps both ends and elides the middle of a long screen", () => {
-    const screen = Array.from({ length: 80 }, (_, i) => `row ${i} ${"█".repeat(90)}`).join("\n");
-    const clipped = clipScreen(screen, 3000);
-    expect(Buffer.byteLength(clipped, "utf8")).toBeLessThanOrEqual(3000);
-    expect(clipped.split("\n")[0]).toContain("row 0 ");
-    expect(clipped.trimEnd().split("\n").at(-1)).toContain("row 79");
-    expect(clipped).toContain("\n…\n");
-  });
-
 });
 
 describe("Host capability routing", () => {

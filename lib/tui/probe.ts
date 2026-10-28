@@ -535,36 +535,18 @@ function installEntryMethods(mode: AnyRecord): void {
   }
 }
 
-/** Colours would make a captured frame unreadable in JSON, so drop them. */
-const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|[\x07\x08]/g;
-
-/** What a component draws at 80 columns without colours, or a note about why it could not. */
-function renderOf(component: unknown): string {
-  const render = safeGet(component, "render");
-  if (typeof render !== "function") return "";
-  try {
-    const value = (render as (width: number) => unknown).call(component, 80);
-    const text = Array.isArray(value) ? value.map((line) => String(line)).join("\n") : typeof value === "string" ? value : "";
-    return text.replace(ANSI_PATTERN, "");
-  } catch (error) {
-    return `[render failed: ${String(error)}]`;
-  }
-}
-
 function recordCustomComponent(component: unknown, entrySeq: number, source: string): void {
   if (!isRecord(component)) {
     push(document().entryCalls, "custom-no-component", { source, component: snapshot(component, 1) });
     return;
   }
   rememberEntryTarget(component, entrySeq);
-  const rendered = renderOf(component);
   push(document().customComponents, "custom-component", {
     source,
     entrySeq,
     ctor: ctorName(component),
     fields: snapshot(component, 4, undefined, 20000),
     shapes: focusShapes(component),
-    render: clipString(rendered, 20000),
   }, true);
 }
 
@@ -588,9 +570,6 @@ function installFocus(ui: AnyRecord): void {
         hookInput: snapshot(safeGet(liveMode, "hookInput"), 2, undefined, 5000),
         hookEditor: snapshot(safeGet(liveMode, "hookEditor"), 2, undefined, 5000),
         editorFocused: focused === safeGet(liveMode, "editor") || focused === safeGet(liveMode, "defaultEditor"),
-        // Some hosts keep a dialog's labels in private fields, so the frame it draws
-        // is the only label source T3.0's adapters can use; record it per focus.
-        rendered: clipString(renderOf(focused), 4000),
       };
       const recent = document().entryCalls.slice(-4).map((entry) => ({
         name: entry.data.name,

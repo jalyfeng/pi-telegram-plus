@@ -105,12 +105,10 @@ describe("bridge unavailable answers host traffic with the fixed notice", () => 
       getHost: () => "pi" as const,
       getCommands: async () => [],
       submit: vi.fn(() => false),
-      snapshot: () => undefined,
       key: () => false,
       write: () => false,
       isEditorFocused: () => false,
       isInteractiveFocus: () => false,
-      onLocalSubmit: () => () => undefined,
       ...overrides,
     } as unknown as TuiBridgeAdapter;
   }

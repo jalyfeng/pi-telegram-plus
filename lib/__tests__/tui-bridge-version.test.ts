@@ -121,12 +121,10 @@ describe("controller sends the version refusal instead of the generic outage not
       getHost: () => "pi" as const,
       getCommands: async () => [],
       submit: () => false,
-      snapshot: () => undefined,
       key: () => false,
       write: () => false,
       isEditorFocused: () => false,
       isInteractiveFocus: () => false,
-      onLocalSubmit: () => () => undefined,
       ...overrides,
     } as unknown as TuiBridgeAdapter;
   }
