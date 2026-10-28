@@ -8,6 +8,10 @@ export const RENDER_LEVELS: readonly TelegramRenderLevel[] = ["hidden", "brief",
 export type TelegramBashConfirm = "always" | "dangerous" | "never";
 export const BASH_CONFIRM_MODES: readonly TelegramBashConfirm[] = ["always", "dangerous", "never"] as const;
 
+/** How Telegram messages are delivered while the main turn is running. */
+export type TelegramMessageMode = "steer" | "queue";
+export const MESSAGE_MODES: readonly TelegramMessageMode[] = ["steer", "queue"] as const;
+
 /**
  * User-wide bot registry stored at `<agent dir>/tg.json` (version 3).
  * Holds ONLY bot identity + a defaultBotId. Runtime (polling/chat state)
@@ -48,6 +52,8 @@ export type ProjectTelegramBinding = {
   retryCount?: number;
   /** Confirmation policy for Telegram-originated shell commands. Defaults to "dangerous". */
   bashConfirm?: TelegramBashConfirm;
+  /** How Telegram messages are delivered while the main turn is running. "steer" injects into the running turn (default); "queue" waits for it to finish. */
+  messageMode?: TelegramMessageMode;
   /** Runtime state (per-project) — cold-start seed / best-effort backup. */
   lastUpdateId?: number;
   /** Runtime state (per-project). */
@@ -89,6 +95,8 @@ export type TelegramConfig = {
   retryCount?: number;
   /** Confirmation policy for Telegram-originated shell commands. Defaults to "dangerous". */
   bashConfirm?: TelegramBashConfirm;
+  /** How Telegram messages are delivered while the main turn is running. "steer" injects into the running turn (default); "queue" waits for it to finish. */
+  messageMode?: TelegramMessageMode;
   /** Override the Telegram Bot API base URL (e.g. a self-hosted local Bot API server or a test mock). Defaults to https://api.telegram.org. */
   apiBase?: string;
 };

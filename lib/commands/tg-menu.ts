@@ -9,7 +9,7 @@ import type { TgConfigDeps, SessionDeps } from "./register.ts";
 import type { BotRecord, BotRegistry, CapturedAgentSession, TelegramConfig } from "../types.ts";
 import { currentHostName } from "../tui/host.ts";
 import type { TuiHost } from "../tui-bridge.ts";
-import { configToolFlow, configThinkingFlow, configRetryFlow, configBashFlow } from "./tg-config.ts";
+import { configToolFlow, configThinkingFlow, configRetryFlow, configBashFlow, configModeFlow } from "./tg-config.ts";
 import { formatPairingInstructions } from "../pairing.ts";
 import { formatDebugReport } from "./info.ts";
 import {
@@ -433,6 +433,7 @@ export function buildConfigMenuOptions(
       ? [`🧠 Thinking level: ${session?.thinkingLevel ?? "off"}`]
       : []),
     `🔄 Retry: ${config.retryCount ?? 3}`,
+    `📨 Message mode: ${config.messageMode ?? "steer"}`,
     `🐚 Shell confirm: ${config.bashConfirm ?? "dangerous"}`,
     BACK_LABEL,
   ];
@@ -462,6 +463,8 @@ async function configMenu(ui: MenuUi, configDeps: TgConfigDeps, sessionDeps?: Se
       }
     } else if (choice.startsWith("🔄 Retry:")) {
       await configRetryFlow(ui, configDeps);
+    } else if (choice.startsWith("📨 Message mode:")) {
+      await configModeFlow(ui, configDeps);
     } else if (choice.startsWith("🐚 Shell confirm:")) {
       await configBashFlow(ui, configDeps);
     }
