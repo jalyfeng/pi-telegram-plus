@@ -84,6 +84,9 @@ type Binding = {
 
 export class OutputCapture {
   private binding?: Binding;
+  /** Bindings of scopes that have ended, kept so a dialog that opens after its command
+   * ended can redraw the message with its summary (§4.3 rule 1). */
+  private readonly finishedBindings = new WeakMap<CommandScope, Binding>();
   private readonly attached = new WeakSet<object>();
   /** Objects that already carry the command-context stages (prompt, history). */
   private readonly chainHooked = new WeakSet<object>();
@@ -163,6 +166,14 @@ export class OutputCapture {
     return binding.bashComponents.some((child) => !this.bashCompleted.has(child));
   }
 
+  /** A dialog closed on the message of a command whose scope had already ended: write the
+   * message again as header + dialog summaries + output (no "Done" once a summary exists). */
+  settleAfterDialog(scope: CommandScope): void {
+    const binding = this.finishedBindings.get(scope);
+    if (!binding) return;
+    void this.render(binding, true);
+  }
+
   /** Flush the active binding and stop claiming output for it. */
   finish(): void {
     const binding = this.binding;
@@ -175,6 +186,7 @@ export class OutputCapture {
       else outputLog.debug("bash component unfinished at scope end; running frame dropped", { scope: binding.scope.id });
     }
     binding.finished = true;
+    this.finishedBindings.set(binding.scope, binding);
     // The scope is over: whatever dialog stood on the message has no say in its final content.
     binding.scope.dialogOpen = false;
     if (binding.timer) {

@@ -803,6 +803,7 @@ export function createTelegramController(deps: {
     activeChatId: () => deps.getConfig?.().activeChatId,
     activeTurns: () => deps.getActiveTurns?.() ?? [],
     writeText: (text) => bridge.write(text),
+    settleScope: (scope) => outputCapture.settleAfterDialog(scope),
     // One switch for both (§9 decision 27): the broker may only track a host whose
     // dialogs it can actually read. A host without a usable bridge has no focus to
     // track anyway, and OMP's components render in an overlay without focus, so

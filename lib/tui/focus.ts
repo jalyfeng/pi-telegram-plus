@@ -20,6 +20,8 @@ import { isEditorShape, isFilteredList, isInputShape, isReadOnlyPanel, isSelectL
 import { describesDialog, describesLoginSheet } from "./adapters/tsp.ts";
 import type { EntryInfo } from "./model.ts";
 import { log } from "../logger.ts";
+import { currentCommandScope } from "./command-context.ts";
+import type { CommandScope } from "./origin.ts";
 
 const focusLog = log.child("tui-focus");
 
@@ -32,6 +34,9 @@ export type FocusInfo = {
   root?: Record<string, unknown>;
   /** How the value was obtained; useful in logs and tests. */
   source: "event" | "getter" | "field" | "none";
+  /** The command whose call chain made the host focus this component, when the focus
+   * came from the host's own `setFocus` call inside that chain (§4.3 rule 1). */
+  commandScope?: CommandScope;
 };
 
 type FocusListener = (info: FocusInfo) => void;
@@ -289,7 +294,7 @@ export class FocusTracker {
       for (const name of ["setFocus", "setFocusInternal"]) {
         hookMethod(ui, name, "focus-tracker", (args) => {
           const component = unwrapFocus(args[0]);
-          if (component) this.update(component, "event");
+          if (component) this.update(component, "event", currentCommandScope());
         }, undefined, this);
       }
       // Overlay swaps that never reach `setFocus` are caught by the tick.
@@ -430,7 +435,7 @@ export class FocusTracker {
 
   private lastState?: HostState;
 
-  private update(component: Record<string, unknown>, source: FocusInfo["source"]): void {
+  private update(component: Record<string, unknown>, source: FocusInfo["source"], commandScope?: CommandScope): void {
     const previous = this.info;
     // A read-only dashboard returns from its entry call before it takes focus (OMP
     // `showAgentsDashboard`): the next non-editor component to take focus within a
@@ -452,7 +457,7 @@ export class FocusTracker {
     // confirmed over a short window instead (§4.1.3).
     if (this.closeGrace?.component === component) this.cancelGrace();
     const root = this.findRoot(component);
-    this.info = { kind, component, root, source };
+    this.info = { kind, component, root, source, commandScope };
     focusLog.debug("focus changed", { kind, source, ctor: ctorName(component) });
     for (const listener of this.listeners) {
       try { listener(this.info); } catch (err) { focusLog.debug("focus listener failed", { err }); }

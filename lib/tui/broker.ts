@@ -76,6 +76,9 @@ export type BrokerDeps = {
   secrets?: SecretStore;
   /** True while the bridge runs in `full` mode; when off nothing is tracked. */
   enabled(): boolean;
+  /** A dialog on an already-ended command's message closed: the output side redraws the
+   * message as header + summaries (no "Done"). */
+  settleScope?(scope: CommandScope): void;
 };
 
 type Owner = {
@@ -402,7 +405,7 @@ export class DialogBroker {
     // One adapter for the life of the dialog: the one that read it owns the
     // actions on it (§4.6.1, a dialog is only ever handed to one adapter).
     const adapter = pickAdapterSafely(component, ctx) ?? unsupportedAdapter;
-    const owner = this.owner();
+    const owner = this.owner(info.commandScope);
     const session: DialogSession = {
       id: `${Date.now().toString(36)}.${(this.sequence++).toString(36)}`,
       generation: 0,
@@ -875,20 +878,12 @@ export class DialogBroker {
    * recent Telegram turn (preferring the chat the user last touched), else
    * nobody — a purely local dialog is tracked but never mirrored.
    */
-  private owner(): Owner {
+  private owner(captured?: CommandScope): Owner {
+    // The command whose call chain made the host open this dialog owns it, even when
+    // that command's scope has already ended (a dialog opened after the command's idle end).
+    if (captured) return this.scopeOwner(captured);
     const scope = this.deps.origin.active();
-    if (scope && !scope.ended) {
-      return {
-        origin: {
-          chatId: scope.origin.chatId,
-          messageThreadId: scope.origin.messageThreadId,
-          sourceMessageId: scope.origin.sourceMessageId,
-        },
-        fromScope: true,
-        reuseMessageId: scope.telegramMessageId,
-        scope,
-      };
-    }
+    if (scope && !scope.ended) return this.scopeOwner(scope);
     const turns = this.deps.activeTurns();
     if (turns.length === 0) return { fromScope: false };
     const chatId = this.deps.activeChatId();
@@ -898,6 +893,19 @@ export class DialogBroker {
     return {
       origin: { chatId: turn.chatId, messageThreadId: turn.messageThreadId, sourceMessageId: turn.sourceMessageId },
       fromScope: false,
+    };
+  }
+
+  private scopeOwner(scope: CommandScope): Owner {
+    return {
+      origin: {
+        chatId: scope.origin.chatId,
+        messageThreadId: scope.origin.messageThreadId,
+        sourceMessageId: scope.origin.sourceMessageId,
+      },
+      fromScope: true,
+      reuseMessageId: scope.telegramMessageId,
+      scope,
     };
   }
 
@@ -950,10 +958,11 @@ export class DialogBroker {
     const scope = this.scopes.get(session);
     if (scope) {
       // The command's own message: its text is the command's final content, which
-      // OutputCapture writes (header, summaries, output) when the scope ends. Here
-      // the summary is only recorded and the keyboard is removed.
+      // OutputCapture writes (header, summaries, output). While the scope runs the
+      // summary is only recorded; once it has ended, the message is redrawn now.
       scope.dialogOpen = false;
-      if (!scope.ended) scope.dialogSummaries.push(this.redact(session, summary));
+      scope.dialogSummaries.push(this.redact(session, summary));
+      if (scope.ended) this.deps.settleScope?.(scope);
       this.rate(telegram, () => {
         void this.deps.transport.removeInlineKeyboard(telegram.chatId, telegram.messageId).catch(() => undefined);
       });
@@ -972,21 +981,24 @@ export class DialogBroker {
   }
 
   /** One edit per chat per second; a newer model replaces a queued older one. */
-  private rate(target: { chatId: number; messageThreadId?: number }, edit: () => void): void {
-    const key = targetKey(target);
-    const last = this.lastEditAt.get(key) ?? 0;
+  private rate(target: { chatId: number; messageThreadId?: number; messageId?: number }, edit: () => void): void {
+    // The spacing is per chat; the queued edit is per message, so an edit for one message
+    // never replaces a queued edit for another message in the same chat.
+    const chat = targetKey(target);
+    const key = `${chat}#${target.messageId ?? ""}`;
+    const last = this.lastEditAt.get(chat) ?? 0;
     const wait = EDIT_THROTTLE_MS - (Date.now() - last);
     const pending = this.deferred.get(key);
     if (pending !== undefined) clearTimeout(pending);
     if (wait <= 0) {
       this.deferred.delete(key);
-      this.lastEditAt.set(key, Date.now());
+      this.lastEditAt.set(chat, Date.now());
       edit();
       return;
     }
     const timer = setTimeout(() => {
       this.deferred.delete(key);
-      this.lastEditAt.set(key, Date.now());
+      this.lastEditAt.set(chat, Date.now());
       edit();
     }, wait);
     timer.unref?.();
