@@ -1,7 +1,10 @@
 /**
  * OutputCapture (stage 1): sends the host's own command output back to
- * Telegram. It only claims output while a Telegram-issued command scope is
- * active; agent messages stay with the existing renderer.
+ * Telegram. It claims a chat component only while a Telegram-issued command
+ * scope is active AND the component is added inside that command's call chain
+ * (command-context.ts, v8 §0.2). Agent messages and tool calls run in the agent
+ * loop's own context and stay with the existing renderer. Content is read from
+ * the component's data fields only; `render()` is never called.
  */
 import { existsSync } from "node:fs";
 import { escapeHtml } from "../html.ts";
@@ -11,7 +14,8 @@ import { stripAnsi } from "../ansi.ts";
 import { log, type LogFields } from "../logger.ts";
 import type { TelegramTransport } from "../types.ts";
 import { hookMethod, isHostObject, onHostState, type HostState } from "./host.ts";
-import { removeOwnerHooks } from "./hooks.ts";
+import { installHook, removeOwnerHooks } from "./hooks.ts";
+import { currentCommandScope, runAsHistory, runOutsideCommand } from "./command-context.ts";
 import type { CommandScope, OriginTracker } from "./origin.ts";
 import type { SecretStore } from "./secrets.ts";
 
@@ -23,16 +27,18 @@ const MAX_COMPONENTS = 20;
 /** OMP keeps flushing PTY output asynchronously after `setComplete` returns;
  * render the final frame one beat later so that is what we push (3E). */
 const BASH_SETTLE_MS = 300;
-const AGENT_CTORS = /^(AssistantMessageComponent|UserMessageComponent|ToolExecutionComponent|BashExecutionComponent|qs|_Te|Aw)$/;
-const AGENT_FIELDS = ["lastMessage", "hasToolCalls", "toolCallId"];
-/** Commands that reset the transcript (`chat.clear()`) and then mount their
- * own result component in the same task: `/compact`'s summary, OMP's
- * `/clear` result (command-controller.ts 1349), `/delete` and the new-session
- * flow behind `/new` (command-controller.ts 1380). The `clear` hook marks the
- * chat as rebuilding until the next tick, so children added during that tick
- * are command output for these labels, not history; history components stay
- * excluded by identity (`isAgentComponent`) below. */
-const REBUILD_OUTPUT_LABELS = new Set(["compact", "clear", "delete", "new"]);
+/** Host methods that rebuild the transcript from session history (v8 §0.2):
+ * pi 1.4.0 interactive-mode.ts 3960/4060/4177/4229, OMP 18.12.5
+ * interactive-mode.ts 4049/8019/8030. Children they add are not command output. */
+const HISTORY_REBUILD_METHODS = [
+  "renderSessionItems",
+  "renderSessionEntries",
+  "renderInitialMessages",
+  "rebuildChatFromMessages",
+  "renderSessionContextIncrementally",
+] as const;
+/** Container depth read by `contentHtml`: the root plus this many nested levels. */
+const CONTENT_MAX_DEPTH = 3;
 
 /** The host's shell-execution component (D3b), claimed only by a "!" scope.
  * Minified host builds rename constructors, so the name match is only the
@@ -40,12 +46,6 @@ const REBUILD_OUTPUT_LABELS = new Set(["compact", "clear", "delete", "new"]);
  * these four methods, which is the rename-proof identity (3E). */
 const BASH_EXECUTOR_CTORS = /^BashExecutionComponent$/;
 const BASH_EXECUTOR_METHODS = ["setExpanded", "appendOutput", "setComplete", "getOutput"] as const;
-
-/** The host's agent tool-call component. pi's and OMP's ToolExecutionComponent
- * both expose these three prototype methods, while OMP keeps toolCallId in a
- * private field and minifies the class name, so AGENT_CTORS/AGENT_FIELDS miss
- * it. The method shape is the rename-proof identity for these components. */
-const TOOL_EXECUTION_METHODS = ["updateArgs", "updateResult", "setArgsComplete"] as const;
 
 export type OutputTelegram = {
   chatId: number;
@@ -78,8 +78,9 @@ type Binding = {
 
 export class OutputCapture {
   private binding?: Binding;
-  private readonly rebuilding = new WeakSet<object>();
   private readonly attached = new WeakSet<object>();
+  /** Objects that already carry the command-context stages (prompt, history). */
+  private readonly chainHooked = new WeakSet<object>();
   private statusDepth = 0;
   private unsubscribe?: () => void;
   /** Prototypes whose `exportToHtml`/`exportToJsonl` already carry the
@@ -185,7 +186,7 @@ export class OutputCapture {
   private emitBashOutput(child: Record<string, unknown>, binding: Binding, final: boolean): void {
     if (this.bashPushed.has(child)) return;
     this.bashPushed.add(child);
-    const html = renderComponent(child, (raw) => this.redact(raw));
+    const html = bashOutputHtml(child, (raw) => this.redact(raw));
     this.logCaptured(child, html);
     if (!html || this.binding !== binding || binding.finished) return;
     // At scope end `push` refuses (the scope no longer owns output), so the
@@ -248,7 +249,7 @@ export class OutputCapture {
         const report = args[0] as { title?: unknown; body?: unknown } | undefined;
         const title = typeof report?.title === "string" ? report.title.trim() : "";
         const body = isHostObject(report?.body)
-          ? renderComponent(report.body, (raw) => this.redact(raw))
+          ? contentHtml(report.body, (raw) => this.redact(raw))
           : undefined;
         if (!title && !body) return;
         this.push(title ? `<b>${escapeHtml(this.redact(title))}</b>\n${body ?? ""}` : body!);
@@ -258,18 +259,13 @@ export class OutputCapture {
     const chat = state.chat;
     if (isHostObject(chat) && !this.attached.has(chat)) {
       this.attached.add(chat);
-      hookMethod(chat, "clear", "output-clear", () => {
-        this.rebuilding.add(chat);
-        const timer = setTimeout(() => { this.rebuilding.delete(chat); }, 0);
-        timer.unref?.();
-      }, undefined, this);
       hookMethod(chat, "addChild", "output-add-child", undefined, (args) => {
         if (this.statusDepth > 0) return;
-        // REBUILD_OUTPUT_LABELS commands clear the transcript and append
-        // their result in the same task; keep claiming children for those
-        // labels. History components are excluded by identity below.
-        const rebuildScope = REBUILD_OUTPUT_LABELS.has(this.binding?.scope.label ?? "");
-        if (this.rebuilding.has(chat) && !rebuildScope) return;
+        // Only a child added inside the call chain of this binding's command is
+        // its output. Agent events, history rebuilds and the turn a command
+        // starts run in other contexts (command-context.ts), so they never match.
+        const binding = this.binding;
+        if (!binding || currentCommandScope() !== binding.scope) return;
         const child = args[0];
         if (!isHostObject(child)) return;
         // A bash component claimed from the pending area (H34) moves into the
@@ -277,23 +273,18 @@ export class OutputCapture {
         // tracked nor pushed a second time from here.
         if (this.bashTracked.has(child) || this.bashPushed.has(child)) return;
         // D3b: inside a "!" scope the host's bash executor is the command's
-        // own output, not agent history; everywhere else it stays excluded as
-        // before. The method-shape check runs before the agent gate: a
-        // minified OMP build renames the ctor out of AGENT_CTORS too, and the
-        // old name-only match let its running frame fall through to the
-        // plain-output push (3E).
-        if (this.binding?.scope.label === "!" && isBashExecutor(child)) {
+        // own output; its final text comes from getOutput().
+        if (binding.scope.label === "!" && isBashExecutor(child)) {
           this.trackBashComponent(child);
           return;
         }
-        const mode = state.mode;
-        if (isAgentComponent(child, mode)) return;
-        const html = renderComponent(child, (raw) => this.redact(raw));
+        const html = contentHtml(child, (raw) => this.redact(raw));
         this.logCaptured(child, html);
         if (!html) return;
         this.push(html);
       }, this);
     }
+    this.attachCommandChain(state);
     // H34: a `!` command run while the agent streams is parked in the host's
     // pending area (pi interactive-mode.js 5866, OMP command-controller.ts
     // #executeBashCommand) until the next submit moves it to the chat. Claim
@@ -333,6 +324,36 @@ export class OutputCapture {
             this.captureExport(result);
           }, this);
         }
+      }
+    }
+  }
+
+  /** v8 §0.2 cut-offs: the agent turn a command starts (`session.prompt`) and
+   * the host's history rebuilds leave the command call chain. Each target gets
+   * its stage once; installing the same kind again only replaces it. */
+  private attachCommandChain(state: HostState): void {
+    const session = state.session;
+    if (isHostObject(session)) {
+      const proto = Object.getPrototypeOf(session);
+      // Same own-property rule as the export wrapper below: a session that
+      // carries its own `prompt` (a probe shadow) takes the stage on itself.
+      const target = Object.prototype.hasOwnProperty.call(session, "prompt") ? session : proto;
+      if (isHostObject(target) && !this.chainHooked.has(target)) {
+        this.chainHooked.add(target);
+        installHook(target, "prompt", "output-prompt-outside", (next, args) => runOutsideCommand(() => next(args)), {
+          priority: 40,
+          owner: this,
+        });
+      }
+    }
+    const mode = state.mode;
+    if (isHostObject(mode) && !this.chainHooked.has(mode)) {
+      this.chainHooked.add(mode);
+      for (const name of HISTORY_REBUILD_METHODS) {
+        installHook(mode, name, "output-history", (next, args) => runAsHistory(() => next(args)), {
+          priority: 40,
+          owner: this,
+        });
       }
     }
   }
@@ -467,45 +488,87 @@ function isBashExecutor(child: Record<string, unknown>): boolean {
   return BASH_EXECUTOR_METHODS.every((name) => typeof child[name] === "function");
 }
 
-function isAgentComponent(child: Record<string, unknown>, mode: Record<string, unknown> | undefined): boolean {
-  if (mode && child === mode.streamingComponent) return true;
-  if (AGENT_CTORS.test(ctorName(child))) return true;
-  for (const field of AGENT_FIELDS) {
-    try {
-      if (Object.prototype.hasOwnProperty.call(child, field)) return true;
-    } catch {
-      // ignore
-    }
+/** Text of a host bash executor, read through its `getOutput()` (v8 §0.2:
+ * `render()` is never called). Redacted and ANSI-free before it is wrapped. */
+function bashOutputHtml(child: Record<string, unknown>, redact: (text: string) => string): string | undefined {
+  const getOutput = child.getOutput;
+  if (typeof getOutput !== "function") return undefined;
+  let raw: unknown;
+  try {
+    raw = (getOutput as () => unknown).call(child);
+  } catch {
+    return undefined;
   }
-  if (TOOL_EXECUTION_METHODS.every((name) => typeof child[name] === "function")) return true;
-  return false;
+  if (typeof raw !== "string") return undefined;
+  const clean = redact(stripAnsi(raw)).trimEnd();
+  return clean.trim() ? `<pre>${escapeHtml(clean)}</pre>` : undefined;
 }
 
-export function renderComponent(
+type ContentPiece = { kind: "markdown" | "text"; value: string };
+
+/** Text of a command's output component, from its data only (v8 §0.2, never `render()`):
+ * - `markdown` string field, or a pi `Markdown` (its own `theme` field) `text` field: markdown source;
+ * - a pi `ThemedText` (`build` function, which returns the themed string): plain text;
+ * - a pi `Text` (`text` string): plain text;
+ * - a container's `children`, read in order up to CONTENT_MAX_DEPTH levels;
+ * - anything else (Spacer, DynamicBorder, ...) has no content and is skipped.
+ * The result is Telegram HTML, redacted; undefined when there is no content. */
+export function contentHtml(
   component: Record<string, unknown>,
   redact: (text: string) => string = (text) => text,
 ): string | undefined {
-  const markdown = component.markdown;
-  if (typeof markdown === "string" && markdown.trim()) return markdownToTelegramHtml(redact(markdown));
-  const text = component.text;
-  if (typeof text === "string" && text.trim()) {
-    const clean = redact(stripAnsi(text));
-    return clean.includes("\n") ? `<pre>${escapeHtml(clean)}</pre>` : escapeHtml(clean);
+  const pieces: ContentPiece[] = [];
+  collectContent(component, 0, pieces);
+  if (pieces.length === 0) {
+    if (typeof component.describe === "function") {
+      // OMP semantic trees are converted by N-1; until then they are skipped.
+      outputLog.debug("component has describe() only; skipped until semantic output is supported", { ctor: ctorName(component) });
+    }
+    return undefined;
   }
-  const content = component.content;
-  if (typeof content === "string" && content.trim()) return `<pre>${escapeHtml(redact(stripAnsi(content)))}</pre>`;
-  const render = component.render;
-  if (typeof render === "function") {
+  const html = pieces
+    .map((piece) => piece.kind === "markdown"
+      ? markdownToTelegramHtml(redact(piece.value))
+      : plainHtml(redact(stripAnsi(piece.value))))
+    .filter((part) => part.length > 0);
+  return html.length > 0 ? html.join("\n\n") : undefined;
+}
+
+function plainHtml(clean: string): string {
+  if (!clean.trim()) return "";
+  return clean.includes("\n") ? `<pre>${escapeHtml(clean)}</pre>` : escapeHtml(clean);
+}
+
+function collectContent(node: Record<string, unknown>, depth: number, out: ContentPiece[]): void {
+  const markdown = node.markdown;
+  if (typeof markdown === "string" && markdown.trim()) {
+    out.push({ kind: "markdown", value: markdown });
+    return;
+  }
+  const build = node.build;
+  if (typeof build === "function") {
     try {
-      const value = (render as (width: number) => unknown).call(component, 80);
-      const textValue = Array.isArray(value)
-        ? value.map((line) => String(line)).join("\n")
-        : typeof value === "string" ? value : "";
-      const clean = redact(stripAnsi(textValue)).trim();
-      if (clean) return `<pre>${escapeHtml(clean)}</pre>`;
+      const value = (build as () => unknown).call(node);
+      if (typeof value === "string" && value.trim()) {
+        out.push({ kind: "text", value });
+        return;
+      }
     } catch {
-      return undefined;
+      // unreadable content: fall through to the other sources
     }
   }
-  return undefined;
+  const text = node.text;
+  if (typeof text === "string" && text.trim()) {
+    // pi's Markdown and Text both keep their string in `text`; only Markdown
+    // carries the `theme` field it renders with (markdown.ts 258-265).
+    const isMarkdown = Object.prototype.hasOwnProperty.call(node, "theme");
+    out.push({ kind: isMarkdown ? "markdown" : "text", value: text });
+    return;
+  }
+  const children = node.children;
+  if (Array.isArray(children) && depth < CONTENT_MAX_DEPTH) {
+    for (const child of children) {
+      if (isHostObject(child)) collectContent(child, depth + 1, out);
+    }
+  }
 }

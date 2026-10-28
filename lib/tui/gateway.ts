@@ -15,6 +15,7 @@ import type { Origin, OriginTracker } from "./origin.ts";
 import type { OutputCapture } from "./output.ts";
 import type { FocusTracker } from "./focus.ts";
 import { currentHostName, currentHostState, installHostCapture, readEditorText, type HostState } from "./host.ts";
+import { runInCommand } from "./command-context.ts";
 import type { TuiHost } from "../tui-bridge.ts";
 
 const gatewayLog = log.child("tui-gateway");
@@ -158,7 +159,7 @@ export class CommandGateway {
     const submit = this.deps.bridge.submitResult ?? ((text: string) => ({ ok: this.deps.bridge.submit(text) }));
     let result: { ok: boolean; result?: unknown };
     try {
-      result = submit.call(this.deps.bridge, commandText);
+      result = runInCommand(scope, () => submit.call(this.deps.bridge, commandText));
     } catch (err) {
       result = { ok: false };
       gatewayLog.debug("gateway submit threw", { err, name: label });
