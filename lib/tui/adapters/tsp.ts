@@ -227,6 +227,49 @@ function findNodeVisited<K extends NodeKind>(component: object, kind: K, depth: 
   return walkNode(root, "", component, kind, depth, visited);
 }
 
+/** A described node found by {@link findDescribedNode}: `owner` is the component whose `handleNativeEvent` takes its events, `keypath` its path inside that owner. */
+export type DescribedNode = { owner: object; keypath: string; node: NativeNodeLike };
+
+/**
+ * The first node in `component`'s own description, or in a nested component it
+ * describes (up to {@link MAX_COMPONENT_DEPTH} boundaries deep), that `match`
+ * accepts. Matching is by shape only (`k`, `p.role`, `p.actions`, child keys);
+ * nothing here reads rendered text.
+ */
+export function findDescribedNode(component: object, match: (node: NativeNodeLike) => boolean): DescribedNode | undefined {
+  return findMatchVisited(component, match, 0, new Set<object>());
+}
+
+function findMatchVisited(component: object, match: (node: NativeNodeLike) => boolean, depth: number, visited: Set<object>): DescribedNode | undefined {
+  if (depth > MAX_COMPONENT_DEPTH || visited.has(component)) return undefined;
+  visited.add(component);
+  const root = describeTree(component);
+  if (!root) return undefined;
+  return walkMatch(root, "", component, match, depth, visited);
+}
+
+function walkMatch(node: NativeNodeLike, keypath: string, owner: object, match: (node: NativeNodeLike) => boolean, depth: number, visited: Set<object>): DescribedNode | undefined {
+  if (match(node)) return { owner, keypath, node };
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
+  if (!children) return undefined;
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
+    if (!isObject(child)) continue;
+    const component = describableChild(child);
+    if (component) {
+      const found = findMatchVisited(component, match, depth + 1, visited);
+      if (found) return found;
+      continue;
+    }
+    const childNode = child as NativeNodeLike;
+    if (visited.has(childNode)) continue;
+    visited.add(childNode);
+    const found = walkMatch(childNode, childKeypath(keypath, childNode, i), owner, match, depth, visited);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 /**
  * True when `component` is an OMP text prompt (login API keys): the root
  * routes keystrokes through its own `handleNativeEvent` and its description
