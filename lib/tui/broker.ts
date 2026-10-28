@@ -790,6 +790,7 @@ export class DialogBroker {
       host: state.host === "omp" ? "omp" : "pi",
       root: info.root,
       entry,
+      redact: (text: string) => this.redactForTarget(text),
       sendKey: (name: string) => sendKeyTo(component, name),
       requestRender: () => {
         const render = state.ui?.requestRender;
@@ -801,6 +802,13 @@ export class DialogBroker {
         }
       },
     };
+  }
+
+  /** Redacts with the secrets of the chat this dialog is (or will be) shown in. */
+  private redactForTarget(text: string): string {
+    if (!this.deps.secrets) return text;
+    const target = this.session?.telegram ?? this.owner().origin;
+    return target ? this.deps.secrets.redact(targetKey(target), text) : text;
   }
 
   /**

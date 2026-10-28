@@ -174,3 +174,21 @@ describe("renderDialog info model", () => {
     expect(rendered.rows.flat().map((button) => button.text)).toEqual(["Prev", "Close"]);
   });
 });
+
+describe("describedText redaction of raw text", () => {
+  it("masks a secret containing & and < before escaping, in text, markdown and code", () => {
+    const secret = "a&b<c";
+    const redact = (value: string) => value.split(secret).join("***");
+    const tree: N = {
+      k: "col",
+      c: [text(`token ${secret} here`), { k: "md", p: { text: `markdown ${secret} here` } }, { k: "code", p: { text: `x=${secret}` } }],
+    };
+    const html = describedText(tree as never, redact, owner).html;
+
+    expect(html).not.toContain("a&amp;b");
+    expect(html).not.toContain("&lt;c");
+    expect(html).toContain("token *** here");
+    expect(html).toContain("markdown *** here");
+    expect(html).toContain("<pre>x=***</pre>");
+  });
+});

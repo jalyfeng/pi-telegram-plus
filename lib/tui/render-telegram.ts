@@ -11,6 +11,7 @@
  * `i` free text, `k` terminal key, `x` cancel.
  */
 import { encodeDialogCallback } from "../callback-protocol.ts";
+import { splitTelegramHtml } from "../text-split.ts";
 import type { TelegramButton } from "../types.ts";
 import type { DialogItem, DialogModel } from "./model.ts";
 
@@ -107,7 +108,11 @@ function itemButtons(items: DialogItem[], page: number, ctx: RenderContext, op: 
 }
 
 function pageButtons(total: number, page: number, ctx: RenderContext): TelegramButton[] {
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  return pageNav(Math.max(1, Math.ceil(total / PAGE_SIZE)), page, ctx);
+}
+
+/** ◀ / ▶ and the position, for a list of `pages` pages; empty when there is one page. */
+function pageNav(pages: number, page: number, ctx: RenderContext): TelegramButton[] {
   if (pages <= 1) return [];
   const previous = page > 0 ? button("◀ Prev", ctx, "p", String(page - 1)) : undefined;
   const next = page < pages - 1 ? button("Next ▶", ctx, "p", String(page + 1)) : undefined;
@@ -324,20 +329,33 @@ function renderProgress(model: Extract<DialogModel, { kind: "progress" }>, ctx: 
 }
 
 /** Read-only panel: the text plus one way out (§4.6.5 #12). */
+/** Bytes of HTML one info message carries; the rest of the message is buttons and header. */
+const INFO_PAGE_BYTES = 3400;
+
+/**
+ * A read-only panel: the text (one page of it for HTML, split at block
+ * boundaries so no tag is cut), the panel's own action buttons, paging, and
+ * the renderer's Close when the panel has none of its own.
+ */
 function renderInfo(model: Extract<DialogModel, { kind: "info" }>, ctx: RenderContext): RenderedDialog {
-  const body = model.html === true ? `${model.text}\n` : `<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>\n`;
+  const pages = model.html === true ? splitTelegramHtml(model.text, INFO_PAGE_BYTES) : [`<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>`];
+  const count = Math.max(1, pages.length);
+  const page = Math.min(Math.max(0, ctx.page ?? 0), count - 1);
+  const body = `${pages[page] ?? ""}\n`;
   const actions = model.actions ?? [];
   const buttons = actions.map((action) => button(action.label, ctx, "c", action.key)).filter((built): built is TelegramButton => built !== undefined);
   const keyMap = new Map<string, string>();
   actions.forEach((action) => keyMap.set(action.key, action.key));
   const rows = chunk(buttons);
+  const nav = pageNav(count, page, ctx);
+  if (nav.length > 0) rows.push(nav);
   if (model.closable) rows.push(cancelRow(ctx, "Close"));
   return {
-    text: header(model.title ?? "Terminal", undefined, [body]),
+    text: header(model.title ?? "Terminal", count > 1 ? `Page ${page + 1}/${count}` : undefined, [body]),
     rows: fitRows(rows),
     keyMap,
-    page: 0,
-    pages: 1,
+    page,
+    pages: count,
   };
 }
 

@@ -26,6 +26,18 @@ export type DescribedAction = {
   owner: object;
 };
 
+/**
+ * Stable keys for the actions of one described tree: the `act` name, or
+ * `keypath|act` when that act name occurs more than once. Keys depend on what
+ * the button is, not on its position in the list, so a press can be matched
+ * against the live tree later.
+ */
+export function actionKeys(actions: readonly DescribedAction[]): string[] {
+  const counts = new Map<string, number>();
+  for (const action of actions) counts.set(action.act, (counts.get(action.act) ?? 0) + 1);
+  return actions.map((action) => ((counts.get(action.act) ?? 0) > 1 ? `${action.keypath}|${action.act}` : action.act));
+}
+
 export type DescribedText = {
   /** Telegram HTML: every text run escaped, markdown converted, code kept in `<pre>`. */
   html: string;

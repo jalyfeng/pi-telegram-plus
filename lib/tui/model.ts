@@ -129,6 +129,12 @@ export type AdapterContext = {
   /** Root component; only used to find titles/entry info, never for identity. */
   root?: object;
   entry?: EntryInfo;
+  /**
+   * Secret redaction for the dialog's chat (§4.7.4): adapters that build text from raw
+   * host data apply it to each text run before converting or escaping it. Absent when
+   * no secret store is wired; identity then.
+   */
+  redact?: (text: string) => string;
   /** Send one named key to the focused component's handleInput. */
   sendKey(name: string): boolean;
   requestRender(): void;

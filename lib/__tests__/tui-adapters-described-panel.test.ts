@@ -105,7 +105,7 @@ describe("describedPanelAdapter read", () => {
       text: "<b>Hotkeys</b>: Ctrl+C quits",
       html: true,
       closable: false,
-      actions: [{ label: "Close", key: "0" }],
+      actions: [{ label: "Close", key: "close" }],
     });
     expect(render).not.toHaveBeenCalled();
   });
@@ -123,7 +123,7 @@ describe("describedPanelAdapter act", () => {
     const { component, events, render } = panel(reportTree());
     const { ctx, renders } = ctxFor();
 
-    expect(describedPanelAdapter.act(component, { type: "choose", key: "0" }, ctx)).toBe(true);
+    expect(describedPanelAdapter.act(component, { type: "choose", key: "close" }, ctx)).toBe(true);
     expect(events).toEqual([{ type: "action", key: "1/0", act: "close", mods: [] }]);
     expect(renders()).toBe(1);
     expect(render).not.toHaveBeenCalled();
@@ -147,10 +147,53 @@ describe("describedPanelAdapter act", () => {
     expect(events).toEqual([]);
   });
 
-  it("refuses a choose whose index is no longer a described button", () => {
+  it("refuses a choose whose key names no button in the live tree", () => {
     const { component, events } = panel(reportTree());
     expect(describedPanelAdapter.act(component, { type: "choose", key: "5" }, ctxFor().ctx)).toBe(false);
     expect(events).toEqual([]);
+  });
+
+  it("keeps a key on its button when the tree changes between read and press", () => {
+    const tree = reportTree();
+    const { component, events } = panel(tree);
+    const { ctx } = ctxFor();
+    const model = describedPanelAdapter.read(component, ctx);
+    const closeKey = (model as { actions: { key: string }[] }).actions[0]!.key;
+
+    // The panel gains a page row above the close button: Close moves to keypath "2/0".
+    tree.c = [
+      { k: "row", p: { role: "omp.actions" }, c: [button("Prev", "page")] },
+      ...(tree.c as unknown[]),
+    ];
+    expect(describedPanelAdapter.act(component, { type: "choose", key: closeKey }, ctx)).toBe(true);
+    expect(events).toEqual([{ type: "action", key: "2/0", act: "close", mods: [] }]);
+  });
+
+  it("refuses a stale key rather than firing a different button", () => {
+    const tree: N = {
+      k: "col",
+      c: [button("Prev", "page"), button("Close", "close")],
+    };
+    const { component, events } = panel(tree);
+    const { ctx } = ctxFor();
+    const keys = (describedPanelAdapter.read(component, ctx) as { actions: { key: string }[] }).actions.map((action) => action.key);
+    expect(keys).toEqual(["page", "close"]);
+
+    // Close is gone; the page button is still there. A press on the old Close key must not fire Prev.
+    tree.c = [button("Prev", "page")];
+    expect(describedPanelAdapter.act(component, { type: "choose", key: "close" }, ctx)).toBe(false);
+    expect(events).toEqual([]);
+  });
+
+  it("keys two buttons with the same act by their keypath", () => {
+    const tree: N = { k: "col", c: [button("Prev", "page"), button("Next", "page")] };
+    const { component, events } = panel(tree);
+    const { ctx } = ctxFor();
+    const model = describedPanelAdapter.read(component, ctx) as { actions: { key: string }[] };
+    expect(model.actions.map((action) => action.key)).toEqual(["0|page", "1|page"]);
+
+    expect(describedPanelAdapter.act(component, { type: "choose", key: "1|page" }, ctx)).toBe(true);
+    expect(events).toEqual([{ type: "action", key: "1", act: "page", mods: [] }]);
   });
 
   it("replays a button of a nested component through the nested owner", () => {
@@ -165,7 +208,7 @@ describe("describedPanelAdapter act", () => {
     };
     const { ctx } = ctxFor();
 
-    expect(describedPanelAdapter.act(outer, { type: "choose", key: "0" }, ctx)).toBe(true);
+    expect(describedPanelAdapter.act(outer, { type: "choose", key: "close" }, ctx)).toBe(true);
     expect(inner.handleNativeEvent).toHaveBeenCalledWith({ type: "action", key: "0", act: "close", mods: [] });
     expect(outer.handleNativeEvent).not.toHaveBeenCalled();
     expect(outer.render).not.toHaveBeenCalled();
@@ -215,11 +258,93 @@ describe("a Telegram press on a described panel", () => {
       sessionId: session!.id,
       generation: session!.generation,
       op: "c",
-      arg: "0",
+      arg: "close",
     });
     for (let step = 0; step < 8; step += 1) await Promise.resolve();
 
     expect(result.handled).toBe(true);
     expect(events).toEqual([{ type: "action", key: "1/0", act: "close", mods: [] }]);
+  });
+});
+
+describe("describedPanelAdapter redaction", () => {
+  it("masks a registered secret with & and < in the text it reads", () => {
+    const secret = "a&b<c";
+    const { component } = panel({ k: "col", c: [{ k: "md", p: { text: `key is ${secret} ok` } }] });
+    const { ctx } = ctxFor();
+    ctx.redact = (value: string) => value.split(secret).join("***");
+
+    const model = describedPanelAdapter.read(component, ctx) as { text: string };
+    expect(model.text).toContain("key is *** ok");
+    expect(model.text).not.toContain("&amp;b");
+  });
+});
+
+describe("long described panels", () => {
+  const long = (): N => ({
+    k: "col",
+    c: [{ k: "md", p: { text: Array.from({ length: 200 }, (_, index) => `Paragraph ${index}: ${"lorem ipsum dolor sit amet ".repeat(2)}`).join("\n\n") } }],
+  });
+
+  it("splits a 10k-character report into pages, each within the budget, with the actions on every page", async () => {
+    const { renderDialog } = await import("../tui/render-telegram.ts");
+    const { component } = panel({ k: "col", c: [(long().c as unknown[])[0], button("Close", "close")] });
+    const model = describedPanelAdapter.read(component, ctxFor().ctx) as Parameters<typeof renderDialog>[0];
+    expect(model.kind).toBe("info");
+    if (model.kind !== "info") return;
+    expect(model.text.length).toBeGreaterThan(9000);
+
+    const first = renderDialog(model, { sessionId: "s1", generation: 1, page: 0 });
+    expect(first.pages).toBeGreaterThan(2);
+    const last = renderDialog(model, { sessionId: "s1", generation: 1, page: first.pages - 1 });
+    for (const shown of [first, last]) {
+      expect(Buffer.byteLength(shown.text, "utf8")).toBeLessThanOrEqual(4096);
+      expect(shown.rows.flat().map((entry) => entry.text)).toContain("Close");
+    }
+    expect(first.rows.flat().map((entry) => entry.text)).toContain("Next ▶");
+    expect(first.text).toContain(`Page 1/${first.pages}`);
+  });
+
+  it("turns pages in place through the broker's page callback", async () => {
+    const { DialogBroker } = await import("../tui/broker.ts");
+    const { component } = panel({ k: "col", c: [(long().c as unknown[])[0], button("Close", "close")] });
+    const transport = {
+      sendButtons: vi.fn(async () => ({ message_id: 101 })),
+      editButtons: vi.fn(async () => undefined),
+      sendText: vi.fn(async () => [{ message_id: 301 }]),
+      removeInlineKeyboard: vi.fn(async () => undefined),
+      deleteMessage: vi.fn(async () => undefined),
+    };
+    const listeners = new Set<(info: unknown) => void>();
+    const focusInfo = { kind: "dialog", component, source: "event" };
+    const focus = {
+      current: () => focusInfo,
+      entryFor: (): EntryInfo => ({ kind: "panel", source: "omp", title: "Hotkeys", method: "showReport" }),
+      onChange: (listener: (info: unknown) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    };
+    const broker = new DialogBroker({
+      transport: transport as never,
+      focus: focus as never,
+      origin: { active: () => undefined } as never,
+      activeChatId: () => 42,
+      activeTurns: () => [{ chatId: 42, sourceMessageId: 7, queuedAttachments: [] }],
+      writeText: () => true,
+      enabled: () => true,
+    } as never);
+    broker.start();
+    for (const listener of listeners) listener(focusInfo);
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+
+    const session = broker.current()!;
+    const result = broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "p", arg: "1" });
+    for (let step = 0; step < 8; step += 1) await Promise.resolve();
+
+    expect(result.handled).toBe(true);
+    const [, , text] = transport.editButtons.mock.calls.at(-1) as unknown as [number, number, string, unknown[]];
+    expect(text).toContain("Page 2/");
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
   });
 });

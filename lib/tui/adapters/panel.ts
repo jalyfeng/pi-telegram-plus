@@ -13,19 +13,17 @@
  */
 import type { AdapterContext, DialogAdapter, DialogModel } from "../model.ts";
 import { isReadOnlyPanel } from "../find-shape.ts";
-import { describedText, type DescribedAction, type DescribedText } from "../describe-text.ts";
+import { actionKeys, describedText, type DescribedAction, type DescribedText } from "../describe-text.ts";
 import { describesDialog, describesLoginSheet, describeTree } from "./tsp.ts";
 import { constructorName, renderText } from "./utils.ts";
 
-const identity = (text: string): string => text;
-
 type Describable = object & { handleNativeEvent(event: unknown): unknown };
 
-/** The panel's actions as they are described right now (live tree, not a snapshot). */
-function liveActions(component: object): DescribedText | undefined {
+/** The panel as it is described right now (live tree, not a snapshot), redacted per run. */
+function liveText(component: object, redact: (text: string) => string): DescribedText | undefined {
   const root = describeTree(component);
   if (!root) return undefined;
-  return describedText(root, identity, component);
+  return describedText(root, redact, component);
 }
 
 /**
@@ -77,8 +75,9 @@ export const describedPanelAdapter: DialogAdapter = {
   },
 
   read(component, ctx): DialogModel {
-    const described = liveActions(component);
+    const described = liveText(component, ctx.redact ?? ((text) => text));
     const actions = described?.actions ?? [];
+    const keys = actionKeys(actions);
     // A close button of the panel is the way out; no second Close is added.
     const hasClose = actions.some((action) => action.act === "close");
     return {
@@ -87,20 +86,22 @@ export const describedPanelAdapter: DialogAdapter = {
       text: described?.html ?? "",
       html: true,
       closable: !hasClose,
-      actions: actions.map((action, index) => ({ label: action.label, key: String(index) })),
+      actions: actions.map((action, index) => ({ label: action.label, key: keys[index] })),
     };
   },
 
   act(component, action, ctx) {
-    const live = liveActions(component);
+    // Always the live tree: a button pressed after the panel changed resolves to
+    // whatever the same key names now, or is refused - never to another button.
+    const live = liveText(component, ctx.redact ?? ((text) => text));
     if (action.type === "cancel") {
       const close = live?.actions.find((entry) => entry.act === "close");
       if (!close) return ctx.sendKey("esc");
       return fire(close, ctx);
     }
     if (action.type !== "choose" || !live) return false;
-    const index = /^\d+$/.test(action.key) ? Number(action.key) : Number.NaN;
-    const target = Number.isInteger(index) ? live.actions[index] : undefined;
+    const index = actionKeys(live.actions).indexOf(action.key);
+    const target = index >= 0 ? live.actions[index] : undefined;
     return target ? fire(target, ctx) : false;
   },
 };
