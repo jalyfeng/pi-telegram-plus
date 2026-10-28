@@ -22,13 +22,16 @@ type TelegramApiResponse = {
 
 export class TelegramApiRequestError extends Error {
   readonly retryAfterMs?: number;
+  /** HTTP status of the Telegram answer (400 for a rejected payload, 429 for flood control). */
+  readonly status?: number;
 
-  constructor(message: string, retryAfterSeconds?: number) {
+  constructor(message: string, retryAfterSeconds?: number, status?: number) {
     super(message);
     this.name = "TelegramApiRequestError";
     this.retryAfterMs = typeof retryAfterSeconds === "number" && retryAfterSeconds >= 0
       ? retryAfterSeconds * 1_000
       : undefined;
+    this.status = status;
   }
 }
 
@@ -85,7 +88,7 @@ export async function telegramApi<T>(
   }
   const json = (await response.json()) as TelegramApiResponse & { result: T };
   if (!json.ok) {
-    throw new TelegramApiRequestError(json.description ?? `${method} failed`, json.parameters?.retry_after);
+    throw new TelegramApiRequestError(json.description ?? `${method} failed`, json.parameters?.retry_after, response.status);
   }
   return json.result;
 }
@@ -134,6 +137,18 @@ export async function downloadTelegramFile(
 
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * True when repeating the same request may succeed: flood control (429), server
+ * errors (5xx), and network-level failures (no Telegram answer). Any other
+ * Telegram answer, such as 400 "can't parse entities" or "message is too long",
+ * is a deterministic rejection of this payload; repeating it only resends the
+ * same rejected message.
+ */
+function isTransientSendError(error: unknown): boolean {
+  if (!(error instanceof TelegramApiRequestError) || error.status === undefined) return true;
+  return error.status === 429 || error.status >= 500;
+}
 
 // ── Telegram Rich Messages (Bot API 10.1+) ──────────────────────────────────
 // Rich Messages render Markdown tables natively, which the regular HTML parse
@@ -202,7 +217,12 @@ export function createTelegramTransport(
         return await telegramApi<T>(token, method, body, requestSignal, cfg().apiBase);
       } catch (error) {
         lastError = error;
-        if (error instanceof TelegramSendSuppressedError || attempt + 1 >= maxAttempts || requestSignal?.aborted) throw error;
+        if (
+          error instanceof TelegramSendSuppressedError
+          || !isTransientSendError(error)
+          || attempt + 1 >= maxAttempts
+          || requestSignal?.aborted
+        ) throw error;
         const retryAfterMs = error instanceof TelegramApiRequestError ? error.retryAfterMs : undefined;
         // Prefer Telegram's explicit flood-control delay; otherwise use exponential backoff.
         await sleep(retryAfterMs ?? 250 * Math.pow(2, attempt));
@@ -251,6 +271,13 @@ export function createTelegramTransport(
     return /\bfetch failed\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR|socket hang up|network(?:\s|_)?error/i.test(msg);
   };
 
+  /** True when a failed send must NOT be retried as plain text. Network
+   *  failures and transient Telegram answers (429/5xx) that already used up
+   *  their retry budget are not payload problems: a plain-text resend would hit
+   *  the same flaky server. Only a deterministic rejection (400 "can't parse
+   *  entities", …) earns the single plain-text fallback. */
+  const skipsFallback = (err: unknown): boolean => isNetworkError(err) || isTransientSendError(err);
+
   /** Log why an HTML-format send failed before falling back to plain text.
    *  Without this the renderer's failures were completely silent — a single
    *  unsupported tag nuked the whole message's formatting and nobody noticed.
@@ -260,7 +287,7 @@ export function createTelegramTransport(
    *  every failed send when the bot is simply offline would only noise up the
    *  log file. */
   const warnHtmlFallback = (label: string, err: unknown, preview: string) => {
-    if (isNetworkError(err)) return;
+    if (skipsFallback(err)) return;
     const reason = err instanceof Error ? err.message : String(err);
     const snippet = preview.replace(/\s+/g, " ").slice(0, 120);
     apiLog.warn(`HTML ${label} rejected; falling back to plain text`, { reason, snippet });
@@ -302,7 +329,7 @@ export function createTelegramTransport(
         ...messageTargetFields(messageThreadId, replyToMessageId),
       }, undefined, lease, delivery);
     } catch (err) {
-      if (isNetworkError(err)) throw err;
+      if (skipsFallback(err)) throw err;
       noteRichFailure("sendRichMessage", err);
       return undefined;
     }
@@ -332,7 +359,7 @@ export function createTelegramTransport(
             // Network failure: the plain-text retry will fail identically.
             // Propagate so the caller's `.catch` (or renderer suppression)
             // handles it; the polling status line already reports outages.
-            if (isNetworkError(err)) throw err;
+            if (skipsFallback(err)) throw err;
             warnHtmlFallback("sendMessage", err, chunk);
             return callApi<TelegramSentMessage>("sendMessage", {
               chat_id: chatId,
@@ -358,7 +385,7 @@ export function createTelegramTransport(
         reply_markup,
         ...messageTargetFields(messageThreadId, replyToMessageId),
       }, undefined, lease).catch((err) => {
-        if (isNetworkError(err)) throw err;
+        if (skipsFallback(err)) throw err;
         warnHtmlFallback("sendButtons", err, first);
         return callApi<TelegramSentMessage>("sendMessage", {
           chat_id: chatId,
@@ -381,7 +408,7 @@ export function createTelegramTransport(
           return;
         } catch (err) {
           // Network failure: nothing useful to retry (same as the HTML path).
-          if (isNetworkError(err)) return;
+          if (skipsFallback(err)) return;
           noteRichFailure("editMessageText", err);
         }
       }
@@ -392,7 +419,7 @@ export function createTelegramTransport(
         text: first,
         parse_mode: "HTML",
       }, undefined, lease).catch((err) => {
-        if (isNetworkError(err)) return; // swallow; nothing useful to retry
+        if (skipsFallback(err)) return; // swallow; nothing useful to retry
         warnHtmlFallback("editMessageText", err, first);
         return callApi("editMessageText", {
           chat_id: chatId,
@@ -413,7 +440,7 @@ export function createTelegramTransport(
         parse_mode: "HTML",
         reply_markup,
       }, undefined, lease).catch((err) => {
-        if (isNetworkError(err)) return; // swallow; nothing useful to retry
+        if (skipsFallback(err)) return; // swallow; nothing useful to retry
         warnHtmlFallback("editButtons", err, first);
         return callApi("editMessageText", {
           chat_id: chatId,
