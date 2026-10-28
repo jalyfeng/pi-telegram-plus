@@ -23086,10 +23086,10 @@
         }
       ],
       "field": "mode.defaultEditor",
-      "note": "mode.defaultEditor 与 mode.editor 是同一对象, onSubmit 在 setupEditorSubmitHandler 后存在。"
+      "note": "mode.defaultEditor and mode.editor are the same object; onSubmit exists after setupEditorSubmitHandler."
     },
     "focusRead": {
-      "pi": "无 getFocused/getFocus; ui.focusedComponent 是数据字段, 在 setFocus 之后读取会滞后一次, 只能用于校验; 焦点事件本身是权威。",
+      "pi": "No getFocused/getFocus; ui.focusedComponent is a data field, and reading it after setFocus lags by one step, so it can only be used for validation; the focus event itself is authoritative.",
       "focusedComponent": {
         "type": "object",
         "fields": {
@@ -23115,7 +23115,7 @@
         }
       },
       "overlayWrapper": true,
-      "note": "overlay 的 setFocusInternal 收到 {component, overlayFocusRestore} 包装; 分类前要取 .component。"
+      "note": "The overlay's setFocusInternal receives a {component, overlayFocusRestore} wrapper; take .component before classifying."
     },
     "dialogFrames": [
       {
@@ -23477,7 +23477,7 @@
         "_lastAssistantMessage",
         "_handleAgentEvent"
       ],
-      "note": "pi 0.81.1 的 quietSince 三个字段都存在。"
+      "note": "All three quietSince fields exist in pi 0.81.1."
     },
     "entryMethods": [
       "showLoadedResources",

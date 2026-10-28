@@ -1,205 +1,205 @@
-# 重构技术方案：Telegram 等价使用 TUI 全部命令
+# Refactor technical plan: using all TUI commands equivalently from Telegram
 
-> 状态：v8（2026-10-28）：目标见 §0.0，生效规则见 §0.2；冲突时以 §0.0 > §0.2 > §0.1 > 正文为准
-> 适用宿主：pi（`@earendil-works/pi-coding-agent`，核对版本 0.81.1）、OMP（`omp/18.12.5`，安装在 `~/.local/bin/omp`，编译后的单文件）
-> 取代：`docs/telegram-interactions-plan.md` 的**原则 1**（"Telegram 发起的对话框只走 Telegram，不在 TUI 弹框"）。该文档的原则 2（状态类 UI 回写 TUI）、原则 3（Telegram turn 期间不碰本地编辑器）、原则 4（不挂死）继续有效。
-> 读者：负责实现的工程师或模型。本文自包含，不依赖之前的对话。
-> 引用约定：插件代码一律用**函数名或常量名**定位（行号会漂移）；pi 宿主代码用"文件 + 函数名 + 0.81.1 行号"，因为发布包内容是固定的。
-> 修订说明见 §11。
+> Status: v8 (2026-10-28): the goal is in §0.0, the rules in force are in §0.2; on conflict, §0.0 > §0.2 > §0.1 > body text
+> Target hosts: pi (`@earendil-works/pi-coding-agent`, checked version 0.81.1), OMP (`omp/18.12.5`, installed at `~/.local/bin/omp`, a compiled single file)
+> Supersedes: **principle 1** of `docs/telegram-interactions-plan.md` ("dialogs initiated from Telegram go only to Telegram and do not pop up in the TUI"). Principle 2 of that document (status UI is written back to the TUI), principle 3 (do not touch the local editor during a Telegram turn) and principle 4 (never hang) remain in force.
+> Reader: the engineer or model doing the implementation. This document is self-contained and does not depend on earlier conversation.
+> Citation convention: plugin code is always located by **function name or constant name** (line numbers drift); pi host code is cited as "file + function name + 0.81.1 line number", because the published package content is fixed.
+> Revision notes are in §11.
 
 ---
 
-## 0. 一句话
+## 0. In one sentence
 
-### 0.0 目标（v8，2026-10-28，优先于本文其他内容）
+### 0.0 Goal (v8, 2026-10-28, takes precedence over everything else in this document)
 
-**人不在电脑前时，用 Telegram 就能完整驾驭正在运行的 pi/OMP：手机上只出现有价值的信息和可点的按钮，不出现终端画面。**
+**When the person is away from the computer, Telegram alone should be enough to fully drive the running pi/OMP: only valuable information and tappable buttons appear on the phone, and no terminal screen.**
 
-1. **内容区**（agent 消息、思考、工具调用、用户消息）：经 session 事件由 `lib/renderer.ts` 收发，已可用，保持可靠即可；用户消息按 steer/queue 进主线程。
-2. **交互区**（TUI 输入框区域：宿主临时替换编辑器画出的选择器、输入框、登录提示、进度，以及 `ask`/approve 等工具对话框）：在 Telegram 上做成等价的原生交互。
-   - TUI 上能选择 → 可翻页的内联按钮（例：`/model` 只显示模型列表；`/login` 先显示 provider 列表，点选后显示链接或"请输入 API key"）。
-   - TUI 上是文本展示 → Telegram 文本。
-   - 一条命令一条消息：按钮、进度、结果在同一条消息上原地编辑替换，不刷屏。
-   - 命令由宿主执行，插件不重写宿主功能；Telegram 发起的对话框两端都可答，先答者生效；本地发起的只在终端。
-3. **数据只认宿主主动给出的结构化数据**：对话框入口方法的参数、组件公开的数据字段、OMP 组件的 `describe()` 语义树、宿主状态/错误/警告字符串、扩展 `notify`。**宿主没给的就是不支持，不猜。**
-4. **禁止镜像思路**：不调用 `render()` 读画面，不截取对话区组件，不用正则解析画面，不按画面数行定位光标，不靠模拟按键推算位置。读不到 → 明确提示"Telegram 不支持，请在终端操作"，只给"取消"。验收：`lib/` 中不存在读取 `render()` 返回内容的代码（grep 检查）。
-5. **可靠性前提**：每个宿主方法最多一层插件包装（§0.2 #19 设计），长会话、`/new`、`/reload` 后不叠层。
+1. **Content area** (agent messages, thinking, tool calls, user messages): sent and received through session events by `lib/renderer.ts`. It already works and only needs to stay reliable; user messages enter the main thread as steer/queue.
+2. **Interaction area** (the TUI input area: the selectors, input boxes, login prompts and progress that the host draws by temporarily replacing the editor, plus tool dialogs such as `ask`/approve): build equivalent native interaction on Telegram.
+   - Selectable on the TUI → inline buttons with paging (example: `/model` shows only the model list; `/login` first shows the provider list, and after a pick shows the link or "Please enter the API key").
+   - Text display on the TUI → Telegram text.
+   - One command, one message: buttons, progress and result are edited in place on the same message, with no flooding.
+   - Commands are executed by the host and the plugin does not rewrite host functionality; a dialog initiated from Telegram can be answered on both ends, and whoever answers first wins; a locally initiated one stays in the terminal only.
+3. **Only structured data that the host actively provides is trusted**: the arguments of the dialog entry methods, the public data fields of components, the `describe()` semantic tree of OMP components, host status/error/warning strings, and extension `notify`. **What the host does not provide is unsupported; do not guess.**
+4. **The mirroring approach is forbidden**: do not call `render()` to read the screen, do not intercept chat-area components, do not parse the screen with regular expressions, do not locate the cursor by counting screen lines, and do not infer positions by simulating key presses. If it cannot be read → clearly say "Telegram does not support this, please operate in the terminal" and give only "Cancel". Acceptance: no code in `lib/` reads the return value of `render()` (grep check).
+5. **Reliability precondition**: at most one plugin wrapper layer per host method (§0.2 #19 design); no stacking of layers after a long session, `/new` or `/reload`.
 
-本文其余章节中与上述目标冲突的内容（终端镜像、快照、渲染文本例外、对话区截取等）一律作废。
+Anything in the rest of this document that conflicts with the goal above (terminal mirroring, snapshots, the rendered-text exception, chat-area interception, etc.) is void.
 
-### 0.0.1 原一句话（v4，保留作历史）
+### 0.0.1 The original one sentence (v4, kept as history)
 
-**除插件独有的命令（`pluginOnly`，§4.2.1）外，所有命令都交给宿主自己执行；插件在宿主的"输出入口"和"焦点变化"处截获结构化数据，用 Telegram 原生消息和按钮呈现；用户在 Telegram 上的操作通过宿主组件自己的输入处理回传。谁发起，谁显示：Telegram 发起的对话框两边都能看到（宿主一定会画在终端上），谁先操作谁生效；本地发起的不推送到 Telegram。**
+**Except for plugin-only commands (`pluginOnly`, §4.2.1), all commands are handed to the host to execute itself; the plugin intercepts structured data at the host's "output entry points" and "focus changes" and presents it with native Telegram messages and buttons; the user's actions on Telegram are passed back through the host component's own input handling. Whoever initiates, displays: a dialog initiated from Telegram can be seen on both sides (the host always draws it in the terminal), and whoever acts first wins; a locally initiated one is not pushed to Telegram.**
 
-不再在 Telegram 里重写命令逻辑，不再解析终端画面文本来生成可操作按钮。
+Command logic is no longer rewritten inside Telegram, and terminal screen text is no longer parsed to generate actionable buttons.
 
-### 0.1 v6 生效规则（2026-10-24，优先于本文其他位置的冲突内容）
+### 0.1 v6 rules in force (2026-10-24, take precedence over conflicting content elsewhere in this document)
 
-1. **只支持一个宿主版本**：pi `1.4.0`、OMP `18.12.x`。版本不符或读不到版本时，插件启动直接报错（状态栏 + Telegram 提示），不做任何降级或兼容。`peerDependencies` 固定为 pi `1.4.0`；不再维护多版本测试矩阵。
-2. **以宿主源码为准**：本地只读副本 pi `/Users/jaly/Documents/project/research/pi-1.4.0`（tag `v1.4.0`）、OMP `/Users/jaly/Documents/project/research/oh-my-pi-18.12.5`（tag `v18.12.5`）。文中所有"pi 0.81.1、第 N 行"的字段和行号引用作废，以 1.4.0 源码为准，任务 A1 核对后逐处更新；`docs/host-probe/pi-0.81.1.json` 及基于它的结论作废。
-3. **不做降级，只有一套做法**：识别不了的对话框不给截图加方向键，也不交回屏幕镜像，而是在 Telegram 明确告知"终端上有一个 Telegram 无法处理的对话框（<类型>），请在终端处理"，只提供"取消"按钮（发 Esc）。桥接不可用（宿主以 RPC/print 模式运行、hook 失败）时插件启动直接报错，不退回插件原生实现。
-4. **立即删除旧路径**（任务 D1–D4，先于后续迁移）：`off` 模式与 `tuiBridge` 配置项、旧屏幕镜像（`runTuiCommand`、`tui-selector.ts`、`tgplus:tui:` 回调）、插件重做宿主功能的原生实现（`lib/commands/` 中 model/session/settings/auth 等对应部分、`telegram-ui.ts` 中对应的原生对话框流程、`custom-dialogs.ts`）、快照方向键。插件自己的管理功能（`/tg` 菜单、`/stop`、`/pair` 等 `pluginOnly` 命令）保留。
-5. **E2E"待迁移"清单**：删除旧路径后，尚未迁移到新架构的命令在 Telegram 上暂时没有输出或交互。E2E 套件维护一份"待迁移"清单：清单内步骤失败算预期结果，单独列出；清单外步骤失败才算回归。每完成一项迁移，从清单中移除对应步骤。
-6. 本节与 §4.11（OMP 结构化通道）、§9 决定 41–50 共同构成 v6 的约束。
+1. **Only one host version is supported**: pi `1.4.0`, OMP `18.12.x`. When the version does not match or cannot be read, the plugin errors out at startup (status bar + Telegram notice), with no degradation or compatibility. `peerDependencies` is pinned to pi `1.4.0`; the multi-version test matrix is no longer maintained.
+2. **The host source is authoritative**: local read-only copies are pi `/Users/jaly/Documents/project/research/pi-1.4.0` (tag `v1.4.0`) and OMP `/Users/jaly/Documents/project/research/oh-my-pi-18.12.5` (tag `v18.12.5`). All field and line number citations of the form "pi 0.81.1, line N" in the text are void and 1.4.0 source is authoritative; task A1 updates them one by one after checking; `docs/host-probe/pi-0.81.1.json` and conclusions based on it are void.
+3. **No degradation, only one way**: a dialog that cannot be recognized does not get a screenshot plus arrow keys and is not handed back to screen mirroring. Instead Telegram says clearly "There is a dialog in the terminal that Telegram cannot handle (<type>), please handle it in the terminal" and offers only a "Cancel" button (sends Esc). When the bridge is unavailable (the host runs in RPC/print mode, or a hook fails), the plugin errors out at startup and does not fall back to the plugin's native implementation.
+4. **Delete old paths immediately** (tasks D1–D4, before the later migration): the `off` mode and the `tuiBridge` config item, the old screen mirroring (`runTuiCommand`, `tui-selector.ts`, the `tgplus:tui:` callback), the native implementations where the plugin redoes host functionality (the matching parts of model/session/settings/auth etc. in `lib/commands/`, the matching native dialog flows in `telegram-ui.ts`, `custom-dialogs.ts`), and snapshot arrow keys. The plugin's own management functions (`pluginOnly` commands such as the `/tg` menu, `/stop`, `/pair`) are kept.
+5. **E2E "to be migrated" list**: after the old paths are deleted, commands not yet migrated to the new architecture temporarily have no output or interaction on Telegram. The E2E suite maintains a "to be migrated" list: a failure of a step on the list is an expected result and is listed separately; a failure of a step off the list is a regression. Each time a migration is completed, remove the matching step from the list.
+6. This section, together with §4.11 (OMP structured channel) and decisions 41–50 in §9, forms the constraints of v6.
 
-### 0.2 v8 生效规则（2026-10-28，优先于本文其他位置及 §0.1 的冲突内容）
+### 0.2 v8 rules in force (2026-10-28, take precedence over conflicting content elsewhere in this document and in §0.1)
 
-背景：#19（长会话后 `/tg`、`ask` 栈溢出，#16 复发）和 #20（命令回复混入 agent 工具框）都出在"观察终端渲染、反推归属"的镜像层。W-1 实测：OMP 上 UI 上下文的 13 个对话框方法约每秒被重装一次（94 秒 95 次）；pi 上每次 `/new`、`/reload` 在自己上一层包装外再套一层（`ptp:showExtensionSelector > ptp:…`）。
+Background: #19 (after a long session `/tg` and `ask` overflow the stack, #16 recurs) and #20 (command replies get mixed into the agent tool box) both come from the mirroring layer that "observes terminal rendering and infers ownership backwards". W-1 measured: on OMP, the 13 dialog methods of the UI context are reinstalled about once per second (95 times in 94 seconds); on pi, every `/new` and `/reload` wraps another layer around its own previous layer (`ptp:showExtensionSelector > ptp:…`).
 
-**交互规则（用户确认）**
+**Interaction rules (confirmed by the user)**
 
-1. **对话区不归插件截取。** agent 消息、用户消息、工具调用由 `lib/renderer.ts` 经 session 事件发送，这部分保持不变。Telegram 上的命令/工具交互只对应 TUI **输入框区域**的内容（宿主在那里临时替换编辑器画出的选择器、输入框、登录提示、进度）。
-2. **TUI 上能选择 → Telegram 内联按钮（可翻页）；TUI 上是文本展示 → Telegram 文本。** 文本只取宿主给的结构化数据：对话框入口参数、组件的 `text`/`markdown` 等字段、`showStatus`/`showError`/`showWarning` 的字符串、扩展 `notify`、`showCommandReport` 的 `title`。
-3. **不做终端镜像：不调用 `render()` 读画面。** 拿不到结构化数据的界面，一律提示"Telegram 不支持，请在终端操作"，只给"取消"。
-4. **一条命令一条消息，原地编辑。** 按钮、进度、结果都在同一条 Telegram 消息上 `editMessageText` 替换，完成后移除按钮。
-5. 本地发起的对话框只在终端（原则 3 不变）。
+1. **The chat area is not intercepted by the plugin.** Agent messages, user messages and tool calls are sent by `lib/renderer.ts` through session events, and this part is unchanged. Command/tool interaction on Telegram corresponds only to the content of the TUI **input area** (the selectors, input boxes, login prompts and progress that the host draws there by temporarily replacing the editor).
+2. **Selectable on the TUI → Telegram inline buttons (with paging); text display on the TUI → Telegram text.** Text is taken only from structured data given by the host: the dialog entry arguments, the `text`/`markdown` etc. fields of components, the strings of `showStatus`/`showError`/`showWarning`, extension `notify`, and the `title` of `showCommandReport`.
+3. **No terminal mirroring: do not call `render()` to read the screen.** An interface from which structured data cannot be obtained always gets the notice "Telegram does not support this, please operate in the terminal", with only "Cancel".
+4. **One command, one message, edited in place.** Buttons, progress and result are all replaced with `editMessageText` on the same Telegram message, and the buttons are removed when done.
+5. A locally initiated dialog stays in the terminal only (principle 3 unchanged).
 
-**由此删除**
+**What is deleted as a result**
 
-- `OutputCapture` 对 `chatContainer.addChild` 的截取：`AGENT_CTORS`、`AGENT_FIELDS`、方法形状排除（2f936f5）、`clear` 重建窗口、`REBUILD_OUTPUT_LABELS`、`renderComponent` 的 `render()` 分支、`showCommandReport` 的 body 渲染。保留：`showStatus/showError/showWarning`、`/export` 发文件、`!` 命令的 bash 结果（宿主 bash 组件的 `getOutput()`，见下）。
-- 用渲染文本工作的适配器：`customGoalAdapter`（pi-goal，§4.6.6 例外一作废）、`infoPanelAdapter` 的 `renderText`（改为只读结构化字段，读不到则按 unsupported）、`adapters/utils.ts` 的 `renderText`。
-- `!` 命令结果改为读宿主 bash 组件的 `getOutput()`，不再 `render()`；认领方式（"!" scope 内的 bash 执行组件，含 pending 区）不变。
+- `OutputCapture`'s interception of `chatContainer.addChild`: `AGENT_CTORS`, `AGENT_FIELDS`, the method-shape exclusion (2f936f5), the `clear` rebuild window, `REBUILD_OUTPUT_LABELS`, the `render()` branch of `renderComponent`, and the body rendering of `showCommandReport`. Kept: `showStatus/showError/showWarning`, `/export` sending a file, and the bash result of the `!` command (`getOutput()` of the host bash component, see below).
+- Adapters that work from rendered text: `customGoalAdapter` (pi-goal, §4.6.6 exception 1 is void), the `renderText` of `infoPanelAdapter` (changed to read structured fields only; if unreadable, treat as unsupported), and `renderText` in `adapters/utils.ts`.
+- The `!` command result is changed to read `getOutput()` of the host bash component and no longer calls `render()`; the claiming method (the bash execution component inside the "!" scope, including the pending area) is unchanged.
 
-**#19：宿主方法包装改为"每个对象每个方法只有一个包装"**
+**#19: host method wrapping changes to "one wrapper per method per object"**
 
-- 新模块 `lib/tui/hooks.ts` 取代 `install-marks.ts` 的启发式（对象标记、两次读取比较、函数身份、按 tracker 分作用域）以及 `hookMethod`/`installRace`/`hookEntryMethods`/`watchEditor` 各自的包装代码。
-- 注册表放在 `globalThis`（`Symbol.for` 键），跨模块实例（OMP `?mtime=` 导入、`/reload`）共享：`WeakMap<object, Map<method, Slot>>`。`Slot = { wrapper, base, handlers: Map<kind, Handler> }`。
-- 每个 (对象, 方法) 只有一个 `wrapper`；各功能（race、entry、focus、status、bash…）作为 `kind` 处理器挂在 slot 上，按固定优先级组成调用管道。**再次安装同一 kind 只替换处理器，不新增包装**。runtime 重建（`/new`、`/reload`）时，新 tracker 用同一 kind 覆盖旧处理器，旧 runtime dispose 时移除自己的处理器。
-- **身份判断读自有属性描述符，不读 `object[method]`。** 已核实的失效机制（OMP 18.12.5 `extensibility/extensions/user-wait.ts` `trackUserWaits`）：工具 UI 上下文是一个 Proxy，`get` 对底层每个函数值缓存一个匿名转发函数。我们写入的包装落在底层对象上，再读回来得到的是"转发到我们包装的匿名函数"，读取稳定但不是我们的包装 → 旧逻辑每秒在它外面再包一层。`Object.getOwnPropertyDescriptor(proxy, method)` 在没有对应 trap 时转发到底层，拿到的正是我们写入的值。
-- 安装规则：
-  - 首次：`base` = `object[method]` 读到的值（可能来自原型）；写入 `wrapper`；
-  - 之后：自有描述符的 `value === slot.wrapper` → 不动；
-  - 自有描述符存在、是函数且不是我们的包装（宿主真的换了方法）→ `slot.base = 描述符的值`（原始函数，不是 Proxy 的转发函数），重新写回同一个 `wrapper`，记 debug 日志；
-  - 写入失败（冻结对象）→ 放弃，记 debug 日志。
-- 我们的包装统一登记在一个 `WeakSet` 里；`base` 永远不能是登记过的包装（防止自引用）。
-- tick 只比较宿主对象身份是否变化；对象没变就不进入安装逻辑。
-- 回归测试：上千次 attach tick、tracker 重建、宿主每次读返回新函数、宿主替换方法后换回，调用链深度恒定（每个对象方法至多一层插件包装）。
+- A new module `lib/tui/hooks.ts` replaces the heuristics of `install-marks.ts` (object marks, comparing two reads, function identity, scoping by tracker) and the separate wrapper code in `hookMethod`/`installRace`/`hookEntryMethods`/`watchEditor`.
+- The registry lives on `globalThis` (`Symbol.for` key) and is shared across module instances (OMP `?mtime=` import, `/reload`): `WeakMap<object, Map<method, Slot>>`. `Slot = { wrapper, base, handlers: Map<kind, Handler> }`.
+- Each (object, method) has only one `wrapper`; each feature (race, entry, focus, status, bash…) is attached to the slot as a `kind` handler, forming the call pipeline in a fixed priority order. **Installing the same kind again only replaces the handler and adds no wrapper.** When the runtime is rebuilt (`/new`, `/reload`), the new tracker overwrites the old handler with the same kind, and when the old runtime is disposed it removes its own handlers.
+- **Identity is judged by reading the own property descriptor, not `object[method]`.** The verified failure mechanism (OMP 18.12.5 `extensibility/extensions/user-wait.ts` `trackUserWaits`): the tool UI context is a Proxy, and `get` caches an anonymous forwarding function for each underlying function value. The wrapper we write lands on the underlying object; reading it back gives "an anonymous function that forwards to our wrapper". The read is stable but it is not our wrapper → the old logic wrapped another layer around it every second. `Object.getOwnPropertyDescriptor(proxy, method)` forwards to the underlying object when there is no matching trap, and returns exactly the value we wrote.
+- Installation rules:
+  - First time: `base` = the value read from `object[method]` (may come from the prototype); write `wrapper`;
+  - Afterwards: the own descriptor's `value === slot.wrapper` → leave alone;
+  - The own descriptor exists, is a function and is not our wrapper (the host really replaced the method) → `slot.base = the descriptor's value` (the original function, not the Proxy's forwarding function), write the same `wrapper` back, and log a debug message;
+  - The write fails (frozen object) → give up and log a debug message.
+- Our wrappers are all registered in one `WeakSet`; `base` can never be a registered wrapper (prevents self-reference).
+- The tick only compares whether the host object identity has changed; if the object has not changed it does not enter the installation logic.
+- Regression test: thousands of attach ticks, tracker rebuilds, the host returning a new function on every read, and the host replacing the method and then switching back; the call-chain depth stays constant (at most one plugin wrapper layer per object method).
 
-**数据来源决定（2026-10-28，SRC-3 取证，用户确认）**
+**Data source decisions (2026-10-28, SRC-3 evidence gathering, confirmed by the user)**
 
-- **等价原则**：TUI 上用户能看到、能交互的，Telegram 上就要能。识别不了几乎都是插件没做，不是宿主没给数据；只有宿主确实没有结构化数据的界面才提示不支持。
-- **OMP：一律走 `describe(cx)` 语义树。** 选择器的 `selected`、`/settings` 的 `focus`、ask 的 `list.selected`（`overlays/ask-dialog.ts:930`）、输入的 `cursor` 都是公开数据；设置选中走 `handleNativeEvent` 的 `select`/`activate`/`action`。注意 ask 单选题与 approve 的 `select` 即提交。文本面板（报告/`/hotkeys`、`/session` 会话信息、`/usage`、`/jobs`、`/btw` 等）同样有 `describe()`（text/span/meter/spinner 等节点），转换成 Telegram 文本 + 面板自带的按钮（如 Close）。`ask.ts` 自己推算光标的做法作废，改读 `list.selected`。
-- **pi：没有语义接口，读组件字段。** 允许读 TS `private` 但运行时可读的字段（`selectedIndex`、`filteredModels` 等），限定 pi `1.4.0`，契约测试固定在 1.4.0 真实组件上；设置选中按 `selectedIndex` 计算步数后对焦点组件发方向键（操作走组件自己的输入处理，§2 原则 4）。扩展 `custom()` 组件数据在闭包里 → 不支持。
-- **pi 写进对话区的命令文本**（`/session`、`/hotkeys`、`/debug`、`/changelog` 等）：TUI 上可见，Telegram 上等价显示。只认领**处在该命令调用链里**加入 `chatContainer` 的组件：Gateway 用 `AsyncLocalStorage` 包住提交调用（同步部分与其后的 await 续体都带着该命令的上下文；agent 事件在 agent 循环自己的上下文里，带不上）。两处切断：`session.prompt`（命令启动的 agent turn 归 renderer，不归命令）和宿主的历史重建方法（pi `renderInitialMessages`/`renderSessionItems`/`renderSessionEntries`/`rebuildChatFromMessages`，OMP `rebuildChatFromMessages`/`renderSessionContextIncrementally`/`renderInitialMessages`）在各自的上下文里运行，期间加入的组件不认领。只取内容源：`text` 字段、`markdown` 字段、`ThemedText` 的内容函数（返回字符串，去 ANSI）、容器的 `children` 逐个取；`Spacer`、`DynamicBorder` 等无内容组件跳过。不调用 `render()`。OMP 的 `presentCommandOutput`（宿主自己声明的命令输出，agent 运行中会延迟到 `agent_end` 才加入对话区）在调用时按同一上下文认领。
-- **加载器/进度**：pi `Loader`（继承 `Text`，`message` 字段）、OMP spinner/progress 节点的 label，原地编辑同一条消息。
+- **Equivalence principle**: whatever the user can see and interact with on the TUI must also be possible on Telegram. Failure to recognize something is almost always because the plugin has not done it, not because the host gave no data; only for interfaces where the host truly has no structured data do we say it is unsupported.
+- **OMP: always use the `describe(cx)` semantic tree.** The selector's `selected`, the `/settings` `focus`, the ask `list.selected` (`overlays/ask-dialog.ts:930`) and the input `cursor` are all public data; setting selection goes through the `select`/`activate`/`action` of `handleNativeEvent`. Note that for an ask single-choice question and for approve, `select` means submit. Text panels (reports/`/hotkeys`, `/session` session info, `/usage`, `/jobs`, `/btw`, etc.) also have `describe()` (text/span/meter/spinner and other nodes), converted into Telegram text + the panel's own buttons (such as Close). The way `ask.ts` computes the cursor by itself is void; read `list.selected` instead.
+- **pi: there is no semantic interface, so read the component fields.** Reading fields that are TS `private` but readable at runtime (`selectedIndex`, `filteredModels`, etc.) is allowed, restricted to pi `1.4.0`, with contract tests pinned to the real 1.4.0 components; setting selection computes the step count from `selectedIndex` and then sends arrow keys to the focused component (the operation goes through the component's own input handling, §2 principle 4). An extension `custom()` component keeps its data in a closure → unsupported.
+- **Command text that pi writes into the chat area** (`/session`, `/hotkeys`, `/debug`, `/changelog`, etc.): visible on the TUI, shown equivalently on Telegram. Only components added to `chatContainer` **inside that command's call chain** are claimed: the Gateway wraps the submit call in `AsyncLocalStorage` (the synchronous part and the await continuations after it both carry that command's context; agent events run in the agent loop's own context and do not carry it). There are two cut-off points: `session.prompt` (an agent turn started by a command belongs to the renderer, not the command), and the host's history rebuild methods (pi `renderInitialMessages`/`renderSessionItems`/`renderSessionEntries`/`rebuildChatFromMessages`, OMP `rebuildChatFromMessages`/`renderSessionContextIncrementally`/`renderInitialMessages`) run in their own contexts, and components added during that time are not claimed. Only content sources are taken: the `text` field, the `markdown` field, the content function of `ThemedText` (returns a string, ANSI stripped), and the container's `children` one by one; components with no content such as `Spacer` and `DynamicBorder` are skipped. `render()` is not called. OMP's `presentCommandOutput` (command output declared by the host itself, which is deferred until `agent_end` before being added to the chat area while the agent is running) is claimed at call time by the same context.
+- **Loader/progress**: pi `Loader` (extends `Text`, `message` field), the label of OMP spinner/progress nodes, edited in place on the same message.
 
-**任务（依次派发，每个都要求 typecheck + 单测全绿）**
+**Tasks (dispatched in turn, each requires typecheck + unit tests all green)**
 
-| 编号 | 内容 |
+| ID | Content |
 |---|---|
-| H-1 | `lib/tui/hooks.ts` 注册表 + 回归测试（含 `trackUserWaits` 真实形状的 Proxy、tracker 重建、上千 tick） |
-| H-2 | `hookMethod`/`installRace`/`hookEntryMethods`/`watchEditor` 迁到注册表，删除 `install-marks.ts`，dispose 时移除处理器 |
-| H-3 | tick 只比较宿主对象身份 |
-| O-1 | 删除对话区截取（`AGENT_CTORS`、`AGENT_FIELDS`、形状规则、重建窗口、`renderComponent` 的 `render()`），改为"命令调用链（ALS）+ 内容源"认领，含 `session.prompt` 与历史重建的切断 |
-| O-1b | `!` 结果改读 `getOutput()`；OMP `presentCommandOutput` 认领 |
-| O-2 | 删除 `customGoalAdapter`（pi-goal）与 `renderText`；`infoPanelAdapter` 改读字段/`describe` |
-| N-1 | OMP 语义树 → Telegram 文本/按钮的通用转换，覆盖文本面板与报告；补报告面板的认领 |
-| N-2 | `ask.ts` 改读 `list.selected` |
-| N-3 | 加载器/进度改读字段与 spinner/progress 节点 |
-| T-1 | 单元测试不写入用户真实日志目录 |
-| E2E | 阶段末由主控在 pi、OMP 各跑一次 + 长时运行叠层复测（W-1 打点，确认安装次数不随时间增长） |
+| H-1 | `lib/tui/hooks.ts` registry + regression tests (including a Proxy with the real `trackUserWaits` shape, tracker rebuild, thousands of ticks) |
+| H-2 | Migrate `hookMethod`/`installRace`/`hookEntryMethods`/`watchEditor` to the registry, delete `install-marks.ts`, remove handlers on dispose |
+| H-3 | The tick compares only whether the host object identity has changed |
+| O-1 | Delete chat-area interception (`AGENT_CTORS`, `AGENT_FIELDS`, shape rules, rebuild window, the `render()` in `renderComponent`), changed to claiming by "command call chain (ALS) + content source", including the cut-off of `session.prompt` and history rebuild |
+| O-1b | `!` result changed to read `getOutput()`; OMP `presentCommandOutput` claiming |
+| O-2 | Delete `customGoalAdapter` (pi-goal) and `renderText`; `infoPanelAdapter` changed to read fields/`describe` |
+| N-1 | General conversion from the OMP semantic tree to Telegram text/buttons, covering text panels and reports; add claiming of report panels |
+| N-2 | `ask.ts` changed to read `list.selected` |
+| N-3 | Loader/progress changed to read fields and spinner/progress nodes |
+| T-1 | Unit tests do not write to the user's real log directory |
+| E2E | At the end of the stage the controller runs once each on pi and OMP + a long-running layer-stacking retest (W-1 instrumentation, confirming the install count does not grow over time) |
 
 
 ---
 
-## 1. 背景与现状诊断
+## 1. Background and current-state diagnosis
 
-### 1.1 目标
+### 1.1 Goal
 
-- Telegram 上可以使用 TUI 的**全部**斜杠命令（内置命令、扩展命令、提示词模板、技能），以及 Telegram 发起的 agent turn 中弹出的全部对话框（`ask` 工具、扩展的 `select/confirm/input/editor/custom`、OMP 的 `approve`）。
-- "等价"的定义是**语义等价**：同样的选项、同样的当前值、同样的可执行操作、执行后宿主状态完全一样。不追求画面一致。
-- 对终端专属的命令（剪贴板、外部编辑器、退出等），提供明确的 Telegram 等价替代（§4.8）。
+- All slash commands of the TUI (built-in commands, extension commands, prompt templates, skills) can be used on Telegram, along with all dialogs that pop up during an agent turn initiated from Telegram (the `ask` tool, the extension's `select/confirm/input/editor/custom`, OMP's `approve`).
+- "Equivalent" is defined as **semantic equivalence**: the same options, the same current values, the same executable actions, and exactly the same host state after execution. Visual identity is not pursued.
+- For terminal-only commands (clipboard, external editor, quit, etc.), provide a clear Telegram equivalent (§4.8).
 
-### 1.2 非目标
+### 1.2 Non-goals
 
-- 不做像素级终端镜像，也不做网页终端（Telegram Mini App + xterm.js）。
-- 不改宿主源码。
-- 不改变本地 TUI 用户自己发起的操作的行为。
-- 不支持宿主的非捕获浮层（`showOverlay(c, { nonCapturing: true })`）：它们不获得焦点、不接收输入，只是装饰。
-- 不保留 `off` 模式与插件原生实现（§0.1 第 4 条，v6）。
+- No pixel-level terminal mirroring, and no web terminal (Telegram Mini App + xterm.js).
+- The host source is not changed.
+- The behavior of operations the local TUI user initiates is not changed.
+- Non-capturing host overlays (`showOverlay(c, { nonCapturing: true })`) are not supported: they take no focus and receive no input, and are only decoration.
+- The `off` mode and the plugin's native implementation are not kept (§0.1 item 4, v6).
 
-### 1.3 现状（为什么要重构）
+### 1.3 Current state (why refactor)
 
-现在有三条并行的交互通道，具体走哪条取决于配置和写死的命令集合：
+There are now three parallel interaction channels, and which one is used depends on configuration and hard-coded command sets:
 
-| 通道 | 位置 | 做法 | 问题 |
+| Channel | Location | Approach | Problem |
 |---|---|---|---|
-| Telegram 原生重写 | `lib/commands/*.ts`、`lib/telegram-ui.ts` | 用会话接口重新实现 `/model`、`/session` 等 | 追不上宿主；会漏掉 TUI 回调里的副作用 |
-| custom 对话框桥 | `lib/custom-dialogs.ts` | 按 pi-goal 的固定文案匹配 | 只认识 pi-goal |
-| 屏幕镜像 | `lib/tui-bridge.ts`、`lib/tui-selector.ts`、`lib/controller.ts` 中的 `refreshTuiMirror`/`startPromptMirror`/`runTuiCommand` | `ui.render(100)` → 去掉颜色码 → 正则识别选项 → 模拟方向键 | 信息丢失、只能靠猜；两天改了 14 次 |
+| Telegram native rewrite | `lib/commands/*.ts`, `lib/telegram-ui.ts` | Re-implements `/model`, `/session`, etc. with the session interface | Cannot keep up with the host; misses side effects inside TUI callbacks |
+| custom dialog bridge | `lib/custom-dialogs.ts` | Matches the fixed wording of pi-goal | Only knows pi-goal |
+| Screen mirroring | `lib/tui-bridge.ts`, `lib/tui-selector.ts`, `refreshTuiMirror`/`startPromptMirror`/`runTuiCommand` in `lib/controller.ts` | `ui.render(100)` → strip color codes → recognize options by regex → simulate arrow keys | Information is lost and it can only guess; changed 14 times in two days |
 
-路由分支见 `controller.ts` 中的常量 `TUI_NATIVE_SELECTOR_COMMANDS`、`MIRROR_FIRST_COMMANDS`、`HOST_CAPABILITY_COMMANDS` 和函数 `dispatchNamedCommand`。`createTelegramController` 中 `getTuiMode` 的缺省值是 `"commands"`，该模式下交互对话框只读。
+The routing branches are in the constants `TUI_NATIVE_SELECTOR_COMMANDS`, `MIRROR_FIRST_COMMANDS`, `HOST_CAPABILITY_COMMANDS` and the function `dispatchNamedCommand` in `controller.ts`. The default of `getTuiMode` in `createTelegramController` is `"commands"`, in which mode interactive dialogs are read-only.
 
-另外两份文档约定互相矛盾：`README.md` 的 "Interactive modals are Telegram-only during a Telegram turn" 一段，与 full 模式的 `createPromptObserverUi`（画在终端里再镜像出去）。本方案按 §2 原则 3 统一。
-
----
-
-## 2. 设计原则（实现时必须遵守）
-
-1. **宿主执行，插件不重写。** 除 `pluginOnly` 命令外，命令文本交给宿主的提交处理器执行。插件不保留重做宿主功能的原生实现；桥接不可用时启动报错（§0.1）。
-2. **读结构化数据，不读画面。** 数据来源依次是：入口方法的参数 → 宿主方法的返回值 → 组件对象上的字段 → 最后才是只读截图。任何层级都**禁止**用正则解析渲染出来的文本来生成可操作按钮。例外只有 §4.6.6 列出的两种（pi-goal 的不透明 `custom()` 组件；OMP 入口对话框的当前行定位），都有严格限制。
-3. **谁发起，谁显示；共享所有权，先操作者生效。** Telegram 发起的对话框：Telegram 显示，终端也会显示（宿主画的），任一端完成操作，另一端立即关闭或显示"已在另一端处理"。本地发起的对话框：只在终端。终端上的变化不主动同步到 Telegram。
-4. **操作走组件自己的输入处理。** Telegram 上的选择翻译成：先设置组件的结构化状态（比如 `selectedIndex`），再对**焦点对象**调用 `handleInput("\r")`。不去猜私有回调的参数签名。
-5. **识别不了就明确告知，永不卡死。** 识别失败时不降级、不给半吊子操作：在 Telegram 明确告知并只提供"取消"（Esc）（§0.1 第 3 条）。任何 Telegram 端的等待都必须能被终端端的完成、宿主超时或 `/stop` 打断。
-6. **不覆盖本地草稿。** 从 Telegram 提交命令前保存本地编辑器内容，在命令 scope 结束时按 §4.2.4 的规则恢复。
-7. **hook 不得影响宿主。** 所有包装函数先调用原方法、原样返回结果，插件逻辑全部包在 `try/catch` 中。
+In addition, two documents promise contradictory things: the paragraph "Interactive modals are Telegram-only during a Telegram turn" in `README.md`, versus `createPromptObserverUi` in full mode (draw in the terminal, then mirror out). This plan unifies them under §2 principle 3.
 
 ---
 
-## 3. 总体架构
+## 2. Design principles (must be followed in implementation)
+
+1. **The host executes; the plugin does not rewrite.** Except for `pluginOnly` commands, the command text is handed to the host's submit handler to execute. The plugin keeps no native implementation that redoes host functionality; when the bridge is unavailable it errors out at startup (§0.1).
+2. **Read structured data, not the screen.** The data sources, in order, are: the arguments of the entry method → the return value of a host method → fields on the component object → and only last a read-only screenshot. At every level it is **forbidden** to parse rendered text with regular expressions to generate actionable buttons. The only exceptions are the two listed in §4.6.6 (the opaque `custom()` component of pi-goal; locating the current row of an OMP entry dialog), both with strict limits.
+3. **Whoever initiates, displays; shared ownership, whoever acts first wins.** A dialog initiated from Telegram: Telegram displays it and the terminal also displays it (drawn by the host); when either side completes the operation, the other side closes immediately or shows "already handled on the other side". A locally initiated dialog: terminal only. Changes in the terminal are not actively synced to Telegram.
+4. **Operations go through the component's own input handling.** A choice on Telegram is translated into: first set the component's structured state (such as `selectedIndex`), then call `handleInput("\r")` on the **focused object**. Do not guess the argument signatures of private callbacks.
+5. **If it cannot be recognized, say so clearly and never hang.** On a recognition failure do not degrade and do not give half-baked actions: say it clearly on Telegram and offer only "Cancel" (Esc) (§0.1 item 3). Any wait on the Telegram side must be interruptible by completion on the terminal side, a host timeout, or `/stop`.
+6. **Do not overwrite the local draft.** Before submitting a command from Telegram, save the local editor content, and restore it when the command scope ends by the rule of §4.2.4.
+7. **Hooks must not affect the host.** Every wrapper function calls the original method first and returns its result unchanged, and all plugin logic is inside `try/catch`.
+
+---
+
+## 3. Overall architecture
 
 ```
-                   ┌──────────────────────────── 宿主进程（pi / OMP 交互模式）────────────────────────────┐
- Telegram 消息 ──▶ │  CommandGateway ──submit──▶ editor.onSubmit（宿主自己的命令分发）                    │
-                   │     │ 开启 scope                     │                                               │
+                   ┌──────────────────────────── Host process (pi / OMP interactive mode) ────────────────────────────┐
+ Telegram message ─▶ │  CommandGateway ──submit──▶ editor.onSubmit (the host's own command dispatch)                    │
+                   │     │ open scope                     │                                               │
                    │     ▼                                ▼                                               │
-                   │  OriginTracker ◀──────┐      宿主执行命令 ─┬─▶ showStatus / showError / showWarning   │
-                   │     ▲                 │                    │         │ (原型 hook)                    │
+                   │  OriginTracker ◀──────┐      host runs the command ─┬─▶ showStatus / showError / showWarning   │
+                   │     ▲                 │                    │         │ (prototype hook)                    │
                    │     │ Telegram turn   │                    │         ▼                                │
-                   │     │ (UI 栈顶)       │                    │   OutputCapture ──────────▶ Telegram 文本 │
-                   │                       │                    ├─▶ chatContainer.addChild (实例 hook)     │
-                   │                       │                    └─▶ ui.setFocus / showOverlay (实例 hook)  │
+                   │     │ (UI stack top)  │                    │   OutputCapture ──────────▶ Telegram text │
+                   │                       │                    ├─▶ chatContainer.addChild (instance hook)     │
+                   │                       │                    └─▶ ui.setFocus / showOverlay (instance hook)  │
                    │                       │                               │                              │
                    │                       │                               ▼                              │
-                   │                       └───────────────── FocusTracker：分类焦点对象                  │
+                   │                       └───────────────── FocusTracker: classify the focused object       │
                    │                                                       │ dialog / progress           │
                    │                                                       ▼                              │
-                   │                                     DialogBroker（单一活动会话）                     │
+                   │                                     DialogBroker (single active session)             │
                    │                                       AdapterRegistry → DialogModel                  │
                    │                                                       │                              │
- Telegram 按钮 ◀── │                                       TelegramDialogRenderer                         │
- Telegram 回调 ──▶ │  Broker.act() ──▶ adapter.act() ──▶ 焦点对象.handleInput("\r") 等                     │
+ Telegram buttons ◀── │                                       TelegramDialogRenderer                         │
+ Telegram callback ─▶ │  Broker.act() ──▶ adapter.act() ──▶ focused object.handleInput("\r") etc.            │
                    └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-模块划分（新建目录 `lib/tui/`）：
+Module breakdown (new directory `lib/tui/`):
 
-| 模块 | 文件 | 职责 |
+| Module | File | Responsibility |
 |---|---|---|
-| HostAdapter | `lib/tui/host.ts` | 捕获宿主对象，安装 hook，`HostCapabilities` |
-| FocusTracker | `lib/tui/focus.ts` | 包装 `setFocus`/`showOverlay`/`hideOverlay`，分类焦点对象，发出事件，校验焦点 |
-| OriginTracker | `lib/tui/origin.ts` | 判断当前焦点、输出属于哪个 Telegram 会话 |
-| CommandGateway | `lib/tui/gateway.ts` | 命令分发优先级、提交、草稿保护、终端专属映射、enqueued turn 持有 |
-| OutputCapture | `lib/tui/output.ts` | 截获命令输出，转成 Telegram 文本 |
-| DialogBroker | `lib/tui/broker.ts` | 对话框会话状态机、先操作者生效、Telegram 文本输入接入 |
-| Model | `lib/tui/model.ts` | DialogModel、DialogAction 类型 |
-| Adapters | `lib/tui/adapters/*.ts` | 从焦点对象读出 DialogModel，并把操作写回 |
-| Renderer | `lib/tui/render-telegram.ts` | DialogModel → Telegram 消息和键盘；回调编解码 |
-| Snapshot | `lib/tui/snapshot.ts` | 只读截图兜底（从 `tui-bridge.ts` 的 `renderScreen` 迁移） |
-| Probe | `lib/tui/probe.ts` | 阶段 0 的宿主探测（§6 阶段 0） |
-| SecretStore | `lib/tui/secrets.ts` | 密钥登记与源头脱敏（§4.7.4） |
+| HostAdapter | `lib/tui/host.ts` | Capture host objects, install hooks, `HostCapabilities` |
+| FocusTracker | `lib/tui/focus.ts` | Wrap `setFocus`/`showOverlay`/`hideOverlay`, classify focused objects, emit events, validate focus |
+| OriginTracker | `lib/tui/origin.ts` | Decide which Telegram session the current focus and output belong to |
+| CommandGateway | `lib/tui/gateway.ts` | Command dispatch priority, submit, draft protection, terminal-only mapping, holding enqueued turns |
+| OutputCapture | `lib/tui/output.ts` | Intercept command output and convert it to Telegram text |
+| DialogBroker | `lib/tui/broker.ts` | Dialog session state machine, whoever acts first wins, Telegram text input hookup |
+| Model | `lib/tui/model.ts` | DialogModel and DialogAction types |
+| Adapters | `lib/tui/adapters/*.ts` | Read a DialogModel from the focused object, and write operations back |
+| Renderer | `lib/tui/render-telegram.ts` | DialogModel → Telegram message and keyboard; callback encoding/decoding |
+| Snapshot | `lib/tui/snapshot.ts` | Read-only screenshot fallback (migrated from `renderScreen` of `tui-bridge.ts`) |
+| Probe | `lib/tui/probe.ts` | Stage 0 host probe (§6 stage 0) |
+| SecretStore | `lib/tui/secrets.ts` | Secret registration and source-level redaction (§4.7.4) |
 
 ---
 
-## 4. 模块详细设计
+## 4. Detailed module design
 
-### 4.1 HostAdapter 与 FocusTracker
+### 4.1 HostAdapter and FocusTracker
 
-#### 4.1.1 两种打补丁方式
+#### 4.1.1 Two ways of patching
 
-1. **原型补丁**：针对能 import 到的类（`InteractiveMode`）。沿用 `tui-bridge.ts` 中现有的 `patchMethod`。插件和宿主拿到的是同一个模块实例，这一点已被现有端到端测试证明。
-2. **实例补丁**：针对运行时捕获到的对象（`mode.ui`、`mode.chatContainer`、`mode.editor`、`mode.session`）。直接替换实例上的方法，并给包装函数打上标记，防止重复包装。
-   - **控件层一律只用实例补丁加形状判断，不 import `@earendil-works/pi-tui` 或 `@oh-my-pi/pi-tui`。** 原因：插件和宿主可能各自加载了一份 pi-tui（本仓库就嵌套了一份 `node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui`），`instanceof` 和原型补丁会失效；OMP 是编译后的单文件，内部模块不保证能 import。
+1. **Prototype patch**: for classes that can be imported (`InteractiveMode`). Keep using the existing `patchMethod` in `tui-bridge.ts`. The plugin and the host get the same module instance, which is proven by the existing end-to-end tests.
+2. **Instance patch**: for objects captured at runtime (`mode.ui`, `mode.chatContainer`, `mode.editor`, `mode.session`). Directly replace the method on the instance, and mark the wrapper function to prevent double wrapping.
+   - **The control layer always uses only instance patches plus shape checks, and does not import `@earendil-works/pi-tui` or `@oh-my-pi/pi-tui`.** Reason: the plugin and the host may each load their own copy of pi-tui (this repository even nests one at `node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui`), so `instanceof` and prototype patches would fail; OMP is a compiled single file, and its internal modules cannot be guaranteed importable.
 
 ```ts
 // lib/tui/host.ts
@@ -220,419 +220,419 @@ export function wrapMethod<T extends object>(
 }
 ```
 
-**实例 hook 会变旧。** 宿主会在运行中替换被 hook 的对象，而这些替换不会再触发 `init`/`run`/`setupEditorSubmitHandler`，所以不能只依赖 `captureMode`：
+**Instance hooks go stale.** The host replaces the hooked objects while running, and these replacements no longer trigger `init`/`run`/`setupEditorSubmitHandler`, so we cannot rely on `captureMode` alone:
 
-- `setCustomEditorComponent`（L1830-1888）用扩展提供的新编辑器替换 `mode.editor`，并 `setFocus(newEditor)`；它把 `defaultEditor.onSubmit` 复制给新编辑器（L1841）。
-- `/new`、`/resume`、`/fork` 会替换 `mode.session`。
+- `setCustomEditorComponent` (L1830-1888) replaces `mode.editor` with the new editor provided by the extension and calls `setFocus(newEditor)`; it copies `defaultEditor.onSubmit` to the new editor (L1841).
+- `/new`, `/resume`, `/fork` replace `mode.session`.
 
-规则：
+Rules:
 
-1. **提交 hook 打在 `mode.defaultEditor.onSubmit` 上**（不是 `mode.editor.onSubmit`）。宿主替换编辑器时复制的就是它，所以包装后的版本会被一起带过去。
-2. **每秒一次的 tick**（与 §4.1.3 的焦点校验共用一个定时器）检查 `mode.editor`、`mode.session`、`mode.ui`、`mode.chatContainer` 是否换了对象，换了就对新对象重新安装实例 hook（`wrapMethod` 靠标记防止重复包装）。
-3. tick 在 mode 捕获后启动，只要插件在运行就一直存在；它的开销只是几次引用比较。
+1. **The submit hook goes on `mode.defaultEditor.onSubmit`** (not `mode.editor.onSubmit`). It is what the host copies when it replaces the editor, so the wrapped version is carried over together.
+2. **A tick once per second** (sharing one timer with the focus validation of §4.1.3) checks whether `mode.editor`, `mode.session`, `mode.ui` and `mode.chatContainer` have changed object, and if so reinstalls the instance hooks on the new object (`wrapMethod` uses its mark to prevent double wrapping).
+3. The tick starts after the mode is captured and exists as long as the plugin is running; its cost is only a few reference comparisons.
 
-#### 4.1.2 Hook 点总表
+#### 4.1.2 Hook point table
 
-| 用途 | pi 0.81.1（`dist/modes/interactive/interactive-mode.js`） | OMP 18.12.5 | 方式 |
+| Purpose | pi 0.81.1 (`dist/modes/interactive/interactive-mode.js`) | OMP 18.12.5 | Method |
 |---|---|---|---|
-| 捕获 mode | `init` / `run` / `setupEditorSubmitHandler`（现有） | `initHooksAndCustomTools` / `render`（现有） | 原型 |
-| 命令提交 | `mode.defaultEditor.onSubmit`（与 `mode.editor` 同一实例；`setupEditorSubmitHandler`，L2085 装上） | `mode.editor.onSubmit`（没有 `defaultEditor`；阶段 0 探测时该字段在捕获阶段还是 `undefined`，初始化后才赋值，所以必须由每秒 tick 安装） | 实例 |
-| 焦点 | `ui.setFocus(c)`；当前焦点读 `ui.focusedComponent`。阶段 0 证明它是普通数据字段且**滞后一次事件**（`setFocus` 返回后读到的是上一个焦点），只能用于校验；焦点事件本身是权威。overlay 的 `setFocusInternal` 收到 `{component, overlayFocusRestore}` 包装，分类前取 `.component` | `ui.setFocus(c)`；当前焦点读 `ui.getFocused()`（存在且返回实时焦点）；没有 `focusedComponent` | 实例 |
-| 扩展命令的执行 | `mode.session.prompt(text)`：空闲时 `onSubmit` 只是把文本交给主循环（`onInputCallback`，L2262 → `getUserInput` L2817），主循环再 `await this.session.prompt(userInput)`（L653） | `mode.session.prompt(text)` 存在；`session.isStreaming`/`isCompacting` 是 accessor；没有 `mode.pendingUserInputs`（§4.3 的 OMP 分支） | 实例（§4.3 的完成信号） |
-| 聊天区重建 | `chatContainer.clear()` | 同名 | 实例（§4.4 排除历史重绘） |
-| 浮层 | `ui.showOverlay(c, opts)` / `ui.hideOverlay()` | 同名（OMP `/settings` 用浮层） | 实例 |
-| 状态输出 | `showStatus`（L2563）、`showError`（L3180）、`showWarning`（L3185） | 同名 | 原型 |
-| 其他输出 | `chatContainer.addChild(c)` | 同名 | 实例 |
-| 导出结果 | `session.exportToHtml(path)` / `session.exportToJsonl(path)`；阶段 0 证明返回 **Promise**，路径取解析值（探测文件的 `export-resolved`） | `session.exportToHtml(path, false)` 存在，同样返回 Promise | 实例（仅在 `/export` 的 scope 内生效） |
-| 扩展选择入口 | `showExtensionSelector(title, options, opts)`（L1712） | UI 上下文的 `select(title, options, opts)`（内部 `showCollabAwareSelector`） | 入口 hook 包 **UI 上下文**，不是 mode 原型 |
-| 扩展确认 | `showExtensionConfirm(title, message)`（L1752，内部复用 selector，选项 `["Yes","No"]`） | UI 上下文的 `confirm(title, message, opts)`（内部 `showHookConfirm`） | 同上 |
-| 扩展输入 | `showExtensionInput(title, placeholder, opts)`（L1763） | UI 上下文的 `input(title, placeholder, opts)`（内部 `showHookInput`）；没有 `inputSecret` | 同上 |
-| 扩展编辑器 | `showExtensionEditor(title, prefill)`（L1803） | UI 上下文的 `editor(title, prefill, opts)`（内部 `showCollabAwareEditor`） | 同上 |
-| 扩展 custom | `showExtensionCustom(factory, options)`（L1903） | UI 上下文的 `custom(factory, options)`（内部 `showHookCustom`） | 同上 |
-| OMP ask | — | 工具 UI 上下文的 `askDialog(questions, options)`：第一参数是问题数组（`id/question/header/options/recommended`），第二参数是 `{timeout, signal, acceptImages}`；焦点组件只有 `callbacks`/`options`，答题状态在闭包里 | 上下文 hook |
-| OMP approve | — | 工具 UI 上下文的 `approve({full, compact, session})`：三个字符串；焦点组件只有 `callbacks{onApprove,onDeny}` / `options{fullPrompt,...}` | 上下文 hook |
-| 编辑器本地输入 | `mode.editor.handleInput`（判断本地用户是否在打字，§4.2.4）；编辑器被替换时由 tick 重新包装 | 同名 | 实例 |
+| Capture mode | `init` / `run` / `setupEditorSubmitHandler` (existing) | `initHooksAndCustomTools` / `render` (existing) | Prototype |
+| Command submit | `mode.defaultEditor.onSubmit` (same instance as `mode.editor`; `setupEditorSubmitHandler`, installed at L2085) | `mode.editor.onSubmit` (there is no `defaultEditor`; during the stage 0 probe this field was still `undefined` at capture time and was assigned only after initialization, so it must be installed by the once-per-second tick) | Instance |
+| Focus | `ui.setFocus(c)`; the current focus is read from `ui.focusedComponent`. Stage 0 proved it is a plain data field that **lags by one event** (after `setFocus` returns, what is read is the previous focus), so it can only be used for validation; the focus event itself is authoritative. The overlay's `setFocusInternal` receives a `{component, overlayFocusRestore}` wrapper; take `.component` before classifying | `ui.setFocus(c)`; the current focus is read from `ui.getFocused()` (exists and returns the live focus); there is no `focusedComponent` | Instance |
+| Execution of extension commands | `mode.session.prompt(text)`: when idle, `onSubmit` only hands the text to the main loop (`onInputCallback`, L2262 → `getUserInput` L2817), and the main loop then does `await this.session.prompt(userInput)` (L653) | `mode.session.prompt(text)` exists; `session.isStreaming`/`isCompacting` are accessors; there is no `mode.pendingUserInputs` (the OMP branch of §4.3) | Instance (completion signal of §4.3) |
+| Chat area rebuild | `chatContainer.clear()` | Same name | Instance (§4.4 excludes history redraw) |
+| Overlay | `ui.showOverlay(c, opts)` / `ui.hideOverlay()` | Same name (OMP `/settings` uses an overlay) | Instance |
+| Status output | `showStatus` (L2563), `showError` (L3180), `showWarning` (L3185) | Same name | Prototype |
+| Other output | `chatContainer.addChild(c)` | Same name | Instance |
+| Export result | `session.exportToHtml(path)` / `session.exportToJsonl(path)`; stage 0 proved they return a **Promise**, and the path is taken from the resolved value (`export-resolved` in the probe file) | `session.exportToHtml(path, false)` exists and also returns a Promise | Instance (effective only inside the `/export` scope) |
+| Extension select entry | `showExtensionSelector(title, options, opts)` (L1712) | `select(title, options, opts)` of the UI context (internally `showCollabAwareSelector`) | The entry hook wraps the **UI context**, not the mode prototype |
+| Extension confirm | `showExtensionConfirm(title, message)` (L1752, internally reuses the selector with options `["Yes","No"]`) | `confirm(title, message, opts)` of the UI context (internally `showHookConfirm`) | Same as above |
+| Extension input | `showExtensionInput(title, placeholder, opts)` (L1763) | `input(title, placeholder, opts)` of the UI context (internally `showHookInput`); there is no `inputSecret` | Same as above |
+| Extension editor | `showExtensionEditor(title, prefill)` (L1803) | `editor(title, prefill, opts)` of the UI context (internally `showCollabAwareEditor`) | Same as above |
+| Extension custom | `showExtensionCustom(factory, options)` (L1903) | `custom(factory, options)` of the UI context (internally `showHookCustom`) | Same as above |
+| OMP ask | — | `askDialog(questions, options)` of the tool UI context: the first argument is the question array (`id/question/header/options/recommended`), the second is `{timeout, signal, acceptImages}`; the focused component has only `callbacks`/`options`, and the answering state is in a closure | Context hook |
+| OMP approve | — | `approve({full, compact, session})` of the tool UI context: three strings; the focused component has only `callbacks{onApprove,onDeny}` / `options{fullPrompt,...}` | Context hook |
+| Local editor input | `mode.editor.handleInput` (decides whether the local user is typing, §4.2.4); re-wrapped by the tick when the editor is replaced | Same name | Instance |
 
-阶段 0 结论（2026-10-23，探测文件 `docs/host-probe/`）：OMP 的扩展入口**不在 `InteractiveMode` 原型上直接触发**，扩展和工具通过各自的 UI 上下文调用（`select`/`confirm`/`input`/`editor`/`custom`，工具上下文另有 `askDialog`/`approve`）。只包 mode 原型会漏掉扩展对话框。OMP 的组件类名被压缩（`Ww`、`Ej`、`kj` 等），适配器**禁止用类名匹配**，必须用形状/字段或入口参数；同一版本内类名稳定，跨版本不稳定。
+Stage 0 conclusion (2026-10-23, probe files in `docs/host-probe/`): OMP's extension entry points are **not triggered directly on the `InteractiveMode` prototype**; extensions and tools call through their own UI contexts (`select`/`confirm`/`input`/`editor`/`custom`, with the tool context additionally having `askDialog`/`approve`). Wrapping only the mode prototype would miss extension dialogs. OMP's component class names are minified (`Ww`, `Ej`, `kj`, etc.), and adapters **must not match by class name**; they must use shapes/fields or entry arguments; class names are stable within one version and unstable across versions.
 
-**入口信息与焦点对象的关联**：入口方法 hook 记录语义信息（`EntryInfo`：kind、标题、原始选项、问题列表），关联方式如下，不使用时间窗口：
+**Associating entry information with the focused object**: the entry method hook records semantic information (`EntryInfo`: kind, title, original options, question list), associated as follows, without using a time window:
 
-- 同步入口（`showExtensionSelector`、`showExtensionInput`、`showExtensionEditor`）：宿主在入口方法内部同步创建组件并 `setFocus`。hook 在调用原方法前把 entry 压入 `entryStack`，`setFocus` hook 看到新的 dialog 焦点时取栈顶 entry，存入 `WeakMap<object, EntryInfo>`（键是焦点对象）。出栈写在 `finally` 中，原方法抛异常时也会出栈，避免过期 entry 被下一个焦点事件误用。
-- **嵌套入口合并**：`showExtensionConfirm` 内部调用 `showExtensionSelector`。内层 hook 发现栈顶已有外层 entry 时，只补充字段（例如原始选项），**不覆盖** `kind`，所以最终 kind 是 `confirm`。
-- 异步入口（`showExtensionCustom`）：宿主先 `await factory(...)`，之后才 `showOverlay`/`setFocus`（L1943-1959），慢工厂可能耗时很久。hook 把 entry 记在本次调用的闭包里，并包装传入的 `factory`：工厂返回的组件（或 promise 解析出的组件）直接写入 `WeakMap<component, EntryInfo>`。焦点事件发生时，先按焦点对象查，再按根组件查。
+- Synchronous entries (`showExtensionSelector`, `showExtensionInput`, `showExtensionEditor`): the host creates the component synchronously inside the entry method and calls `setFocus`. Before calling the original method, the hook pushes the entry onto `entryStack`; when the `setFocus` hook sees a new dialog focus, it takes the top entry and stores it in `WeakMap<object, EntryInfo>` (keyed by the focused object). The pop is written in `finally`, so it also pops when the original method throws, preventing a stale entry from being misused by the next focus event.
+- **Nested entry merging**: `showExtensionConfirm` internally calls `showExtensionSelector`. When the inner hook finds an outer entry already on top of the stack, it only fills in fields (such as the original options) and **does not overwrite** `kind`, so the final kind is `confirm`.
+- Asynchronous entry (`showExtensionCustom`): the host first does `await factory(...)` and only then `showOverlay`/`setFocus` (L1943-1959), and a slow factory may take a long time. The hook records the entry in the closure of this call and wraps the incoming `factory`: the component returned by the factory (or the component the promise resolves to) is written directly into `WeakMap<component, EntryInfo>`. When the focus event happens, look up by focused object first, then by root component.
 
-#### 4.1.3 焦点对象分类
+#### 4.1.3 Classifying the focused object
 
-焦点变化有三条路径，都要覆盖：
+There are three paths for focus changes, and all must be covered:
 
-1. `ui.setFocus(x)`：主路径，实例 hook。
-2. `ui.showOverlay(x, opts)`：只有非 `nonCapturing` 且可见时才会内部调用 `setFocus`（pi-tui `tui.js` 中 `showOverlay`），所以 hook `setFocus` 已覆盖。
-3. **绕过 `setFocus` 的路径**：pi-tui 的输入处理中，"获得焦点的浮层已不可见"这一分支会调用私有的 `setFocusInternal`（`tui.js` 约 L590），实例 hook 抓不到。（`hideOverlay` 调用的是公开的 `setFocus`，已被覆盖。）
+1. `ui.setFocus(x)`: the main path, an instance hook.
+2. `ui.showOverlay(x, opts)`: it calls `setFocus` internally only when it is not `nonCapturing` and is visible (`showOverlay` in pi-tui `tui.js`), so hooking `setFocus` already covers it.
+3. **Paths that bypass `setFocus`**: in pi-tui's input handling, the branch "the focused overlay is no longer visible" calls the private `setFocusInternal` (about L590 of `tui.js`), which the instance hook cannot catch. (`hideOverlay` calls the public `setFocus` and is already covered.)
 
-因此 FocusTracker 除了事件驱动，还要做**校验**：在以下时机读一次当前焦点（读法见 §4.1.2），与 Broker 记录的焦点对象比较，不一致就按"焦点变化"处理：
+Therefore, besides being event-driven, FocusTracker must also **validate**: at the following moments read the current focus once (how to read is in §4.1.2), compare it with the focused object recorded by the Broker, and treat any mismatch as a "focus change":
 
-- 每次处理 Telegram 回调或文本输入之前；
-- 每次 OutputCapture 收到输出时；
-- 每秒一次的 tick（§4.1.1）。
+- before handling each Telegram callback or text input;
+- each time OutputCapture receives output;
+- the once-per-second tick (§4.1.1).
 
-阶段 0 探测补充：pi 的 `ui.focusedComponent` 在 `setFocus` 返回后读到的仍是**上一个**焦点（普通数据字段，不是实时 getter）。所以校验读取只用来发现"绕过 `setFocus` 的内部切换"；当前焦点以最近一次 `setFocus`/`setFocusInternal` 事件为准。overlay 路径的 `setFocusInternal` 收到 `{component, overlayFocusRestore}` 包装对象，分类前先取 `.component`。OMP 的 `ui.getFocused()` 是实时读取，且所有对话框都经过 `setFocus`，没有观察到包装对象。
+Stage 0 probe addition: pi's `ui.focusedComponent` still reads the **previous** focus after `setFocus` returns (a plain data field, not a live getter). So validation reads are used only to discover "internal switches that bypass `setFocus`"; the current focus is whatever the most recent `setFocus`/`setFocusInternal` event says. The overlay path's `setFocusInternal` receives a `{component, overlayFocusRestore}` wrapper object, and `.component` is taken before classifying. OMP's `ui.getFocused()` is a live read, all dialogs go through `setFocus`, and no wrapper object was observed.
 
-焦点对象 `F` 的分类（按顺序判断，第一个命中即止）：
+Classification of the focused object `F` (judged in order, stop at the first hit):
 
-| 分类 | 判断 | 处理 |
+| Class | Criterion | Handling |
 |---|---|---|
-| `editor` | `F === mode.editor` 或 `F === mode.defaultEditor` | 关闭当前会话（如有），但**焦点交回编辑器必须是持续的**：同一组件在确认窗口（250ms）内重新拿到焦点就取消这次关闭。OMP 重绘已打开的 overlay 时会把焦点交回编辑器一帧，按单次事件判定会在作答途中撤掉 Telegram 键盘并把聊天让给镜像（决定 28） |
-| `inert` | `F` 没有 `handleInput` 函数 | 忽略（例如 `/reload` 的 `reloadBox`，它是一个只显示文字的容器） |
-| `progress` | `F.constructor.name` 以 `Loader` 结尾，或 `F` 有 `signal`/`abortController` 且没有任何列表、输入字段（按 §4.6.3 的 `findShape` 查找） | 进度状态，不是对话框：broker 不为它建会话、不发 Telegram 消息，终端镜像照旧显示画面。原设计的"发'⏳ 进行中'并只给取消按钮"实测有害：OMP 的 working spinner 一出现就在聊天里占住一条带键盘的消息，把用户发给下一个（还没建起来的）对话框的文本吃掉，那条文本永远到不了模型；中断仍由 `/stop` 与镜像按键覆盖（决定 28）。例：`/share` 的 `BorderedLoader`（L4613） |
-| `dialog` | 其他 | 交给 AdapterRegistry |
+| `editor` | `F === mode.editor` or `F === mode.defaultEditor` | Close the current session (if any), but **the focus returning to the editor must be sustained**: if the same component regains focus within the confirmation window (250ms), cancel this close. When OMP redraws an already-open overlay it hands focus back to the editor for one frame; judging by a single event would withdraw the Telegram keyboard mid-answer and hand the chat to mirroring (decision 28) |
+| `inert` | `F` has no `handleInput` function | Ignore (for example `reloadBox` of `/reload`, a container that only shows text) |
+| `progress` | `F.constructor.name` ends with `Loader`, or `F` has `signal`/`abortController` and no list or input field at all (looked up by `findShape` of §4.6.3) | A progress state, not a dialog: the broker creates no session for it and sends no Telegram message, and terminal mirroring still shows the screen as before. The original design of "send '⏳ In progress' with only a cancel button" proved harmful in testing: as soon as OMP's working spinner appeared it took up a keyboard-carrying message in the chat and swallowed the text the user sent to the next (not yet created) dialog, so that text never reached the model; interruption is still covered by `/stop` and mirrored keys (decision 28). Example: the `BorderedLoader` of `/share` (L4613) |
+| `dialog` | Anything else | Hand to AdapterRegistry |
 
-**会话身份以焦点对象 `F` 为准。** 宿主的 `showSelector(create)` 返回 `{ component, focus }`，两者可能不同：`/settings` 的焦点是 `selector.getSettingsList()`（L3583），`/fork` 的焦点是 `selector.getMessageList()`（L3819）。规则：
+**Session identity is based on the focused object `F`.** The host's `showSelector(create)` returns `{ component, focus }`, and the two may differ: for `/settings` the focus is `selector.getSettingsList()` (L3583), and for `/fork` the focus is `selector.getMessageList()` (L3819). Rules:
 
-- `detect` / `read` / `act` 一律针对焦点对象 `F`，向下查找数据。
-- 根组件 `root`（`editorContainer.children[0]`，或浮层项的 `component`）只用于向上找标题和入口信息，不用于判断会话是否还活着。
-- 输入一律发给 `F.handleInput`，因为宿主就是把按键发给焦点对象的。
+- `detect` / `read` / `act` always target the focused object `F` and look for data downward from it.
+- The root component `root` (`editorContainer.children[0]`, or the `component` of an overlay item) is used only to look upward for the title and entry information, not to decide whether the session is still alive.
+- Input is always sent to `F.handleInput`, because that is what the host sends keys to.
 
-#### 4.1.4 宿主能力探测
+#### 4.1.4 Host capability probe
 
 ```ts
 type HostCapabilities = {
   host: "pi" | "omp" | "unknown";
   version?: string;
-  focusHook: boolean;      // ui.setFocus 已包装
-  focusRead: boolean;      // 能读到当前焦点
+  focusHook: boolean;      // ui.setFocus is wrapped
+  focusRead: boolean;      // the current focus can be read
   overlayHook: boolean;
-  outputHook: boolean;     // showStatus/showError/showWarning 至少一个
+  outputHook: boolean;     // at least one of showStatus/showError/showWarning
   submitHook: boolean;
-  entryHooks: string[];    // 成功包装的入口方法名
+  entryHooks: string[];    // names of the entry methods wrapped successfully
 };
 ```
 
-启动时写入调试日志。`focusHook`、`focusRead`、`submitHook` 任一失败，插件启动直接报错（§0.1），不退回任何其他路径。
+It is written to the debug log at startup. If any of `focusHook`, `focusRead`, `submitHook` fails, the plugin errors out at startup (§0.1) and does not fall back to any other path.
 
 ### 4.2 CommandGateway
 
-#### 4.2.1 命令目录
+#### 4.2.1 Command catalog
 
-沿用 `getTuiCommands()`：OMP 内置注册表 `BUILTIN_SLASH_COMMAND_DEFS`、自动补全列表、`session.slashCommands`/`customCommands`/`promptTemplates`。Telegram 菜单生成和 `/more` 翻页（`menuOverflow`、`moreKeyboard`）保持不变。
+Keep `getTuiCommands()`: the OMP built-in registry `BUILTIN_SLASH_COMMAND_DEFS`, the autocomplete list, and `session.slashCommands`/`customCommands`/`promptTemplates`. Telegram menu generation and `/more` paging (`menuOverflow`, `moreKeyboard`) are unchanged.
 
-运行时计算三个名字集合（每次 mode 重新捕获时刷新）：
+Three name sets are computed at runtime (refreshed each time the mode is re-captured):
 
-- `hostBuiltin`：宿主内置命令名。
-  - **pi**：无法从命令目录推导。`buildCommandCatalog` 中 pi 的 `source` 只有 `"autocomplete"` 和 `"host"`（`"builtin"` 只出现在 OMP 的注册表），而且自动补全列表里混有扩展命令和插件自己注册的 6 个命令。所以 pi 的 `hostBuiltin` **直接使用附录 A 的静态列表**，按 pi 版本维护。阶段 0 的自动补全目录仍无法区分内置/扩展（`catalog` 为空），与本判断一致。
-  - **OMP**：取注册表 `BUILTIN_SLASH_COMMAND_DEFS`。
-- `pluginNative`：插件 `telegramCommands` map 中的全部名字（`index.ts` 中 `registerAllCommands`、`registerTelegramCommands` 注册的）。
-- `pluginOnly = pluginNative − hostBuiltin`：只有插件实现、宿主没有内置的命令，例如 `/tg*`、`/stop`、`/status`、`/cwd`、`/cd`。
-- 两个**不在 `telegramCommands` 中**的插件特例，在分发第 0 步单独处理（§4.2.2）：`/pair`（在 `authorizeUser` 阶段、命令分发之前就被消费）和 `/more`（`dispatchNamedCommand` 顶部的特殊分支，仅在 bot 菜单溢出时生效）。
+- `hostBuiltin`: host built-in command names.
+  - **pi**: cannot be derived from the command catalog. In `buildCommandCatalog` the `source` for pi has only `"autocomplete"` and `"host"` (`"builtin"` appears only in OMP's registry), and the autocomplete list mixes extension commands and the 6 commands the plugin registers itself. So pi's `hostBuiltin` **directly uses the static list in Appendix A**, maintained per pi version. The stage 0 autocomplete catalog still cannot distinguish built-in from extension (`catalog` is empty), consistent with this judgment.
+  - **OMP**: take the registry `BUILTIN_SLASH_COMMAND_DEFS`.
+- `pluginNative`: all names in the plugin's `telegramCommands` map (registered by `registerAllCommands` and `registerTelegramCommands` in `index.ts`).
+- `pluginOnly = pluginNative − hostBuiltin`: commands implemented only by the plugin and not built into the host, for example `/tg*`, `/stop`, `/status`, `/cwd`, `/cd`.
+- Two plugin special cases that are **not in `telegramCommands`** are handled separately at dispatch step 0 (§4.2.2): `/pair` (consumed in the `authorizeUser` stage, before command dispatch) and `/more` (a special branch at the top of `dispatchNamedCommand`, effective only when the bot menu overflows).
 
-注意：`index.ts` 的 `TUI_VISIBLE_COMMANDS`（`tg`、`cwd`、`cd`、`status`、`stop`、`debug`）同时注册给了宿主。其中 `debug` 与 pi 内置的 `/debug` 重名，pi 的 `onSubmit` 中内置分支先匹配，所以在终端里执行的是 pi 内置版本。按下面的优先级，Telegram 上的 `/debug` 也会走宿主内置版本，和终端一致。
+Note: the `TUI_VISIBLE_COMMANDS` of `index.ts` (`tg`, `cwd`, `cd`, `status`, `stop`, `debug`) are also registered with the host. Among them `debug` has the same name as pi's built-in `/debug`; in pi's `onSubmit` the built-in branch matches first, so what runs in the terminal is the pi built-in version. By the priority below, `/debug` on Telegram also goes to the host built-in version, consistent with the terminal.
 
-`pluginOnly` 命令是"所有命令交给宿主执行"的**唯一例外**：它们继续走现有的 `runCommandHandler`（Telegram 原生 UI），因为它们管理的是 Telegram 侧的状态（bot、绑定、配置），宿主里没有对应实现。
+`pluginOnly` commands are the **only exception** to "all commands are handed to the host to execute": they keep going through the existing `runCommandHandler` (Telegram native UI), because they manage Telegram-side state (bots, bindings, config) and have no matching implementation in the host.
 
-#### 4.2.2 分发优先级（替换 `dispatchNamedCommand` 的分流逻辑）
+#### 4.2.2 Dispatch priority (replaces the routing logic of `dispatchNamedCommand`)
 
 ```
-收到 Telegram 命令 /name args：
-0. 特例：/pair（授权阶段已消费，不会到这里）；/more 且菜单有溢出 → 现有逻辑，不变
-0'. 对话框守卫：当前 chat+thread 有 owner 为自己的活动 Broker 会话，或有待输入的流
-    （deps.ui.hasPendingInput(chatId, thread)）时：
-      name 是 stop   → 取消对话框并执行 /stop（§4.5 规则 6）
-      name 是 status → 正常执行（只读）
-      其他           → 回复"请先处理当前对话框"，结束
-1. name ∈ pluginOnly                 → 插件自己的 handler（现有 runCommandHandler，不变）
-2. name 命中终端专属映射表（§4.8）    → 执行映射
-3. 桥接可用 且 (name ∈ hostBuiltin 或 name 是宿主扩展命令/模板/技能)
+A Telegram command /name args is received:
+0. Special cases: /pair (consumed in the authorization stage, never gets here); /more with a menu overflow → existing logic, unchanged
+0'. Dialog guard: when the current chat+thread has an active Broker session owned by itself, or has a flow awaiting input
+    (deps.ui.hasPendingInput(chatId, thread)):
+      name is stop   → cancel the dialog and run /stop (§4.5 rule 6)
+      name is status → run normally (read-only)
+      otherwise      → reply "Please handle the current dialog first", end
+1. name ∈ pluginOnly                 → the plugin's own handler (existing runCommandHandler, unchanged)
+2. name hits the terminal-only mapping table (§4.8)    → run the mapping
+3. bridge available and (name ∈ hostBuiltin or name is a host extension command/template/skill)
                                        → gateway.submit("/name args", origin)
-4. （v6 删除：不再有插件原生兜底 handler，§0.1）
-5. 否则                               → 回复"该命令需要在终端执行"
+4. (deleted in v6: no more plugin-native fallback handler, §0.1)
+5. otherwise                           → reply "This command needs to be run in the terminal"
 ```
 
-"宿主扩展命令"包括其他扩展注册的命令（例如 pi-goal 的 `/goals`、`/sisyphus`）。插件自己注册给宿主的那几个已经在第 1 步处理，不会走到第 3 步。
+"Host extension commands" include commands registered by other extensions (for example pi-goal's `/goals` and `/sisyphus`). The few the plugin registers with the host itself are already handled at step 1 and never reach step 3.
 
-第 0' 步的守卫对**所有**分支生效（包括 `pluginOnly` 和原生兜底），因为 `pluginOnly` 命令（例如 `/cwd` 的 `ui.select`）会开启 Telegram 原生输入流，与 Broker 的外部输入流共用"最新流"表（§4.5.1），两者并存会互相覆盖。
+The guard at step 0' applies to **all** branches (including `pluginOnly` and the native fallback), because `pluginOnly` commands (for example `ui.select` of `/cwd`) start a Telegram-native input flow, which shares the "latest flow" table with the Broker's external input flow (§4.5.1), and letting both coexist would make them overwrite each other.
 
-删除 `TUI_NATIVE_SELECTOR_COMMANDS`、`MIRROR_FIRST_COMMANDS`、`HOST_CAPABILITY_COMMANDS` 三个常量和按命令名分流的逻辑（阶段 3）。
+The three constants `TUI_NATIVE_SELECTOR_COMMANDS`, `MIRROR_FIRST_COMMANDS`, `HOST_CAPABILITY_COMMANDS` and the logic that routes by command name are deleted (stage 3).
 
-普通文本（不以 `/` 开头）仍走现有的 `runPrompt`，不经过 Gateway。`!`/`!!` bash 保留现有的 `runTelegramBash`。
+Plain text (not starting with `/`) still goes through the existing `runPrompt` and does not pass through the Gateway. `!`/`!!` bash keeps the existing `runTelegramBash`.
 
-#### 4.2.3 提交流程
+#### 4.2.3 Submit flow
 
 ```ts
 async function submit(text: string, origin: Origin): Promise<SubmitResult> {
-  // 1. 终端正开着对话框（焦点不在编辑器）→ 拒绝
+  // 1. The terminal has a dialog open (focus is not on the editor) → reject
   if (focus.classify(focus.current()) !== "editor") return { ok: false, reason: "dialog-open" };
-  // 2. 已有命令 scope 未结束，或该 chat 有待输入的流 → 拒绝
+  // 2. A command scope is still unfinished, or this chat has a flow awaiting input → reject
   if (origin.hasActiveCommandScope()) return { ok: false, reason: "busy" };
   if (deps.ui.hasPendingInput(origin.chatId, origin.messageThreadId)) return { ok: false, reason: "input-pending" };
-  // 3. 保存草稿并开启 scope
+  // 3. Save the draft and open the scope
   const draft = readEditorText();                              // getExpandedText?.() ?? getText()
   const scope = originTracker.beginCommand(origin, text, draft);
-  // 4. 在 Telegram turn + 宿主提示模式的 UI 栈中执行（§4.2.6），
-  //    并在 agent 原本空闲时持有到 enqueued turn 链结束
+  // 4. Execute inside the Telegram turn + host prompt mode UI stack (§4.2.6),
+  //    and hold until the enqueued turn chain ends when the agent was originally idle
   const run = () => {
-    // 必须先登记再调用：流式/压缩路径的 session.prompt 在 onSubmit 内部同步发生
-    if (gateway.isHostBuiltin(text)) scope.promptDone = true;   // 内置命令不会调用 session.prompt
-    else promptTracker.expect(scope, text);                    // §4.3：扩展命令、模板、技能
-    // 只在同步分发期间抑制"本地提交"监听；onSubmit 返回的 promise 不在抑制范围内
+    // Must register before calling: in the streaming/compacting path session.prompt happens synchronously inside onSubmit
+    if (gateway.isHostBuiltin(text)) scope.promptDone = true;   // built-in commands do not call session.prompt
+    else promptTracker.expect(scope, text);                    // §4.3: extension commands, templates, skills
+    // Suppress the "local submit" listener only during the synchronous dispatch; the promise returned by onSubmit is not covered by the suppression
     return withSuppressedLocalSubmit(() => mode.defaultEditor.onSubmit(text));
   };
-  scope.submitPromise = runAsTelegramCommand(origin, run);    // 不 await，见下
+  scope.submitPromise = runAsTelegramCommand(origin, run);    // not awaited, see below
   scope.submitPromise.finally(() => originTracker.markSubmitDone(scope));
   return { ok: true };
 }
 ```
 
-要点：
+Key points:
 
-- **不调用 `editor.setText(text)`**。现有 `submitToHost` 先 `setText(text)` 再提交，会覆盖本地草稿，这是现有 bug。
-- `withSuppressedLocalSubmit` 只包住**同步调用**那一刻（防止插件自己的提交被当成本地输入），不能包住整个 `await`。否则 `/compact` 这类命令执行的几分钟里，本地用户敲的命令都会被漏掉。阶段 5 删除旧的本地命令镜像后（§4.9 第 5 条），这个抑制机制可以一并删除。
-- 不调用 `editor.addToHistory`，避免污染本地输入历史。
-- 调用方不能 `await` 整个流程：`onSubmit` 可能挂起很久（`/compact` 几十秒），会阻塞 Telegram 轮询。
-- `onSubmit` 什么时候返回取决于命令。pi 0.81.1 `setupEditorSubmitHandler` 中：
-  - **await 型**（返回时命令已完成）：`/scoped-models`、`/model`、`/export`、`/import`、`/share`、`/copy`、`/clone`、`/login`、`/clear`（即 `/new`）、`/compact`、`/reload`。
-  - **立即返回型**（打开对话框后马上 return，之后由对话框回调异步完成）：`/settings`、`/name`、`/session`、`/changelog`、`/hotkeys`、`/fork`、`/tree`、`/trust`、`/logout`、`/debug`、`/resume`、彩蛋命令。
-  - **扩展命令、模板、技能**：空闲时 `onSubmit` 只是把文本交给主循环就返回了，真正的执行在主循环的 `session.prompt` 里（§4.1.2 "扩展命令的执行"一行）。流式和压缩中，`onSubmit` 会直接 `await session.prompt(...)`。
-  - 所以 scope 的结束不能只看 `onSubmit`，见 §4.3。
+- **Do not call `editor.setText(text)`**. The existing `submitToHost` does `setText(text)` and then submits, which overwrites the local draft; this is an existing bug.
+- `withSuppressedLocalSubmit` wraps only the moment of the **synchronous call** (to stop the plugin's own submit from being treated as local input) and must not wrap the whole `await`. Otherwise, during the minutes a command like `/compact` runs, commands the local user types would be missed. After stage 5 deletes the old local-command mirroring (§4.9 item 5), this suppression mechanism can be deleted too.
+- Do not call `editor.addToHistory`, to avoid polluting the local input history.
+- The caller must not `await` the whole flow: `onSubmit` may hang for a long time (`/compact` takes tens of seconds) and would block Telegram polling.
+- When `onSubmit` returns depends on the command. In pi 0.81.1 `setupEditorSubmitHandler`:
+  - **await type** (the command has finished when it returns): `/scoped-models`, `/model`, `/export`, `/import`, `/share`, `/copy`, `/clone`, `/login`, `/clear` (i.e. `/new`), `/compact`, `/reload`.
+  - **return-immediately type** (returns right after opening a dialog, and the dialog callback completes asynchronously later): `/settings`, `/name`, `/session`, `/changelog`, `/hotkeys`, `/fork`, `/tree`, `/trust`, `/logout`, `/debug`, `/resume`, Easter egg commands.
+  - **Extension commands, templates, skills**: when idle, `onSubmit` just hands the text to the main loop and returns; the real execution is in the main loop's `session.prompt` (the row "Execution of extension commands" in §4.1.2). While streaming or compacting, `onSubmit` directly does `await session.prompt(...)`.
+  - So the end of a scope cannot be judged by `onSubmit` alone, see §4.3.
 
-#### 4.2.4 草稿保护
+#### 4.2.4 Draft protection
 
-草稿 `D` 在提交前保存（§4.2.3 第 3 步）。**恢复在 scope 结束时进行**（不是在 `submit` 末尾），因为立即返回型命令在 `submit` 返回时焦点还在对话框上。
+The draft `D` is saved before submit (§4.2.3 step 3). **Restoring happens when the scope ends** (not at the end of `submit`), because for return-immediately commands the focus is still on the dialog when `submit` returns.
 
-本地用户可能在焦点回到编辑器后开始打字。FocusTracker 包装 `editor.handleInput`（实例 hook），焦点回到编辑器后只要有一次本地按键，就给 scope 打上 `localEdited = true`。插件自己从不调用 `editor.handleInput`，所以这个标志只代表本地输入。
+The local user may start typing after the focus returns to the editor. FocusTracker wraps `editor.handleInput` (an instance hook), and once focus is back on the editor, a single local key press sets `localEdited = true` on the scope. The plugin itself never calls `editor.handleInput`, so this flag represents local input only.
 
-scope 结束时（§4.3），设当前编辑器内容为 `E`：
+When the scope ends (§4.3), let the current editor content be `E`:
 
-| 情况 | 处理 |
+| Case | Handling |
 |---|---|
-| `localEdited` | 什么都不做。本地用户在场并且已经在编辑，编辑器归他 |
-| `E === D` | 什么都不做 |
-| `E === ""` | `setText(D)`（恢复草稿） |
-| `E` 非空且 `≠ D` | 这是宿主为发起者写入的文本（例：`/fork` 选中消息后执行 `this.editor.setText(result.selectedText)`，见 `showUserMessageSelector` L3814）。按"谁发起，谁显示"：把 `E` 作为一条消息发到 Telegram（标注"已放入编辑器的文本，可复制修改后发送"），然后 `setText(D)` 恢复本地草稿 |
+| `localEdited` | Do nothing. The local user is present and already editing; the editor belongs to them |
+| `E === D` | Do nothing |
+| `E === ""` | `setText(D)` (restore the draft) |
+| `E` non-empty and `≠ D` | This is text the host wrote for the initiator (example: after `/fork` selects a message, `this.editor.setText(result.selectedText)` runs, see `showUserMessageSelector` L3814). Per "whoever initiates, displays": send `E` as a message to Telegram (labeled "Text placed in the editor, can be copied, edited and sent"), then `setText(D)` to restore the local draft |
 
-#### 4.2.5 兜底路径
+#### 4.2.5 Fallback path
 
-**v6 取消兜底路径。** `HostCapabilities` 显示不可用时（宿主以 RPC/print 模式运行、宿主升级导致 hook 失败），插件启动直接报错；不保留 `off` 模式，Telegram 原生实现（`lib/commands/*` 中重做宿主功能的部分、`telegram-ui.ts` 中对应的原生对话框流程、`custom-dialogs.ts`）在任务 D1–D4 中删除（§0.1）。
+**v6 removes the fallback path.** When `HostCapabilities` shows it is unavailable (the host runs in RPC/print mode, or a host upgrade breaks the hooks), the plugin errors out at startup; the `off` mode is not kept, and the Telegram native implementation (the parts of `lib/commands/*` that redo host functionality, the matching native dialog flows in `telegram-ui.ts`, `custom-dialogs.ts`) is deleted in tasks D1–D4 (§0.1).
 
-#### 4.2.6 Enqueued turn 的持有
+#### 4.2.6 Holding enqueued turns
 
-pi-goal 的 `/goals`、`/sisyphus` 这类扩展命令通过 `pi.sendUserMessage` 把 agent turn 放进队列后立即返回，真正弹对话框（`goal_question`、`propose_goal_draft`、`goal_questionnaire`）是在之后的 turn 里。现有 `runCommandHandler` 的做法是：命令到达时如果 agent 空闲（`ctx.isIdle()`），就在 handler 返回后用 `ctx.waitForIdle()` 循环等待，并在每次空闲后再等 120ms（大于 pi-goal 的 50ms 续跑重试间隔），确认没有新 turn 才结束，期间一直保持 `runWithTelegramTurn` + `runWithTelegramUi`。
+Extension commands such as pi-goal's `/goals` and `/sisyphus` put an agent turn into the queue through `pi.sendUserMessage` and return immediately; the dialogs that really pop up (`goal_question`, `propose_goal_draft`, `goal_questionnaire`) come in a later turn. The existing approach of `runCommandHandler` is: if the agent is idle when the command arrives (`ctx.isIdle()`), after the handler returns it loops waiting with `ctx.waitForIdle()`, waits another 120ms after each idle (longer than pi-goal's 50ms continuation retry interval) to confirm no new turn, and only then ends, keeping `runWithTelegramTurn` + `runWithTelegramUi` throughout.
 
-**新方案中，扩展命令改为经 `editor.onSubmit` 交给宿主执行，不再经过 `runCommandHandler`，所以这段持有逻辑会被跳过。必须这样处理：**
+**In the new plan, extension commands are handed to the host through `editor.onSubmit` and no longer pass through `runCommandHandler`, so this holding logic would be skipped. It must be handled like this:**
 
-1. 把 `runCommandHandler` 中的持有逻辑抽成共享函数 `holdThroughEnqueuedTurns(ctx, wasIdle)`，`runCommandHandler` 和 Gateway 都调用它。
-2. Gateway 的 `runAsTelegramCommand` 借用 `runCommandHandler` 的**持有逻辑**，但 **UI 模式不同**：
-   - `runCommandHandler` 调 `runWithTelegramUi` 时不传 `observePrompts`，于是使用默认的 `createRoutedTelegramUi`，扩展的 `ctx.ui.select/confirm/input` 会走 Telegram 原生 UI。这是 `pluginOnly` 命令和 `off` 模式需要的行为，保持不变。
-   - Gateway 必须让提示交给**宿主 UI** 绘制，由 Broker 接管。把 `runWithTelegramUi` 的 `observePrompts?: () => void` 参数改为 `uiMode: "telegram-native" | "host"`：`"telegram-native"` 用 `createRoutedTelegramUi`；`"host"` 用 §4.9 简化后的 `createHostPromptUi`（由 `createPromptObserverUi` 改名而来）。
-   - 代码：`runWithTelegramTurn(turn, () => runWithTelegramUi({ session, ui, turn, uiMode: "host", run: async () => { await run(); await holdThroughEnqueuedTurns(ctx, wasIdle); } }))`，`wasIdle` 在提交前读取。
-   - `runPrompt` / `runMainDelivery`（普通文本）在 `on` 模式下同样传 `uiMode: "host"`，`off` 模式传 `"telegram-native"`。
-3. 持有期间，对话框按 §4.3 规则 2（Telegram UI 栈顶）归属该 chat。
-4. 宿主内置命令（`/model` 等）也走同一包装：对不会产生 turn 的命令，`holdThroughEnqueuedTurns` 发现 agent 一直空闲就会立即结束，没有额外代价。
+1. Extract the holding logic from `runCommandHandler` into a shared function `holdThroughEnqueuedTurns(ctx, wasIdle)`, called by both `runCommandHandler` and the Gateway.
+2. The Gateway's `runAsTelegramCommand` borrows the **holding logic** of `runCommandHandler`, but with a **different UI mode**:
+   - When `runCommandHandler` calls `runWithTelegramUi` it does not pass `observePrompts`, so it uses the default `createRoutedTelegramUi`, and the extension's `ctx.ui.select/confirm/input` go through the Telegram native UI. This is the behavior `pluginOnly` commands and `off` mode need, and is unchanged.
+   - The Gateway must have prompts handed to the **host UI** to draw, taken over by the Broker. Change the `observePrompts?: () => void` parameter of `runWithTelegramUi` to `uiMode: "telegram-native" | "host"`: `"telegram-native"` uses `createRoutedTelegramUi`; `"host"` uses `createHostPromptUi` as simplified in §4.9 (renamed from `createPromptObserverUi`).
+   - Code: `runWithTelegramTurn(turn, () => runWithTelegramUi({ session, ui, turn, uiMode: "host", run: async () => { await run(); await holdThroughEnqueuedTurns(ctx, wasIdle); } }))`, with `wasIdle` read before submit.
+   - `runPrompt` / `runMainDelivery` (plain text) likewise pass `uiMode: "host"` in `on` mode, and `"telegram-native"` in `off` mode.
+3. During the hold, dialogs belong to that chat by §4.3 rule 2 (top of the Telegram UI stack).
+4. Host built-in commands (`/model`, etc.) go through the same wrapper: for commands that produce no turn, `holdThroughEnqueuedTurns` finds the agent idle throughout and ends immediately, at no extra cost.
 
-验收（阶段 2）：从 Telegram 发 `/goals <topic>`，agent 调 `propose_goal_draft` 时 Telegram 收到确认按钮（与现在 README 宣传的能力一致）。
+Acceptance (stage 2): send `/goals <topic>` from Telegram, and when the agent calls `propose_goal_draft` Telegram receives confirmation buttons (consistent with the capability the README advertises today).
 
-### 4.3 OriginTracker（这次操作属于谁）
+### 4.3 OriginTracker (who this operation belongs to)
 
 ```ts
 type Origin = { chatId: number; messageThreadId?: number; sourceMessageId?: number };
 
 type CommandScope = {
-  id: string;                     // 自增，base36
+  id: string;                     // auto-increment, base36
   origin: Origin;
-  label: string;                  // 例如 "/model"
+  label: string;                  // for example "/model"
   draft: string;                  // §4.2.4
   localEdited: boolean;
   submitPromise?: Promise<void>;
-  submitDone: boolean;            // submitPromise 已结束（含持有）
-  promptExpect?: { text: string; startedAt: number; quietSince?: number };   // 等待匹配的 session.prompt
-  promptPromise?: Promise<unknown>;                  // 匹配到的那次 session.prompt
-  promptDone: boolean;            // 没有匹配到，或匹配到的 prompt 已结束
+  submitDone: boolean;            // submitPromise has ended (including holding)
+  promptExpect?: { text: string; startedAt: number; quietSince?: number };   // the session.prompt being waited for
+  promptPromise?: Promise<unknown>;                  // the session.prompt that was matched
+  promptDone: boolean;            // not matched, or the matched prompt has ended
   lastOutputAt: number;
-  telegramMessageId?: number;     // scope 复用的 Telegram 消息
+  telegramMessageId?: number;     // the Telegram message the scope reuses
 };
 ```
 
-对话框和输出的归属，按顺序判断：
+The ownership of dialogs and output is judged in order:
 
-1. **活动的命令 scope** → 归该 scope 的 chat。
-2. **Telegram UI 栈非空**（`controller.ts` 中 `telegramUiStacks.get(runner)` 的栈顶有条目）→ 归栈顶条目的 `turn.chatId/messageThreadId`。这覆盖 Telegram 发起的普通 agent turn 和 §4.2.6 的持有期间。用 UI 栈而不是 `getCurrentTelegramTurn()`（AsyncLocalStorage）判断，因为宿主的对话框回调不一定运行在插件的异步上下文里，而 UI 栈是全局状态，现有的 goal 对话框路由正是依赖它。为此 controller 需要导出一个只读函数 `getTopTelegramTurn(runner)`。
-3. **都没有** → 本地发起：不推送到 Telegram。Broker 仍然记录会话（第 0' 步守卫和 §4.2.3 第 1 步的焦点检查会据此拒绝 Telegram 提交），但不发任何消息。
+1. **An active command scope** → belongs to that scope's chat.
+2. **The Telegram UI stack is non-empty** (the top of `telegramUiStacks.get(runner)` in `controller.ts` has an entry) → belongs to the `turn.chatId/messageThreadId` of the top entry. This covers ordinary agent turns initiated from Telegram and the holding period of §4.2.6. The UI stack, not `getCurrentTelegramTurn()` (AsyncLocalStorage), is used because the host's dialog callbacks do not necessarily run inside the plugin's async context, while the UI stack is global state, and the existing goal dialog routing relies on exactly this. For this the controller needs to export a read-only function `getTopTelegramTurn(runner)`.
+3. **Neither** → locally initiated: not pushed to Telegram. The Broker still records the session (the step 0' guard and the focus check of §4.2.3 step 1 reject Telegram submits on that basis), but sends no message.
 
-"owner 相同"一律按 `chatId + messageThreadId` 比较，不按 `Origin` 对象引用比较。
+"Same owner" is always compared by `chatId + messageThreadId`, not by `Origin` object reference.
 
-**第二个完成信号：匹配 `session.prompt`。** 扩展命令在空闲路径上，`onSubmit` 返回时 handler 可能还没开始执行（§4.2.3）。规则：
+**The second completion signal: matching `session.prompt`.** For an extension command on the idle path, the handler may not have started when `onSubmit` returns (§4.2.3). Rules:
 
-- **只对非内置命令登记**（扩展命令、模板、技能；判断依据是 §4.2.1 的 `hostBuiltin`）。内置命令提交时直接 `promptDone = true`，不等待，scope 可以立即进入其他结束条件的判断。
-- 实例 hook `mode.session.prompt`（session 被替换时由 tick 重新包装）。
-- **先登记，再调用 `onSubmit`**（§4.2.3）。流式和压缩路径中，`onSubmit` 内部同步调用 `session.prompt`，晚于登记就会错过。
-- 登记之后，第一次参数（去掉首尾空白后）等于 `text` 的 `session.prompt` 调用就是本次提交引起的：记录其 promise 到 `promptPromise`，结束后置 `promptDone = true`。
-- **过期条件不按固定时间**：主循环可能正忙（上一轮收尾、`pendingUserInputs` 排队），文本要等循环回到 `getUserInput` 才变成 `session.prompt`，耗时不确定。没有匹配时，只有以下三点**连续保持 500ms** 才判定"不会再来"并置 `promptDone = true`：
-  - session 空闲（`isStreaming` 和 `isCompacting` 都为假）；
-  - `mode.pendingUserInputs` 为空；
-  - 主循环正停在 `getUserInput`（`mode.onInputCallback` 已设置）。
+- **Register only for non-built-in commands** (extension commands, templates, skills; judged by `hostBuiltin` of §4.2.1). Built-in commands set `promptDone = true` directly on submit without waiting, and the scope can go straight to judging the other end conditions.
+- Instance hook on `mode.session.prompt` (re-wrapped by the tick when the session is replaced).
+- **Register first, then call `onSubmit`** (§4.2.3). In the streaming and compacting paths, `onSubmit` calls `session.prompt` synchronously inside, and registering later would miss it.
+- After registration, the first `session.prompt` call whose argument (trimmed of leading and trailing whitespace) equals `text` is the one caused by this submit: record its promise in `promptPromise`, and set `promptDone = true` when it ends.
+- **The expiry condition is not a fixed time**: the main loop may be busy (finishing the previous round, `pendingUserInputs` queued), and the text only becomes `session.prompt` after the loop returns to `getUserInput`, taking an uncertain time. When there is no match, only when the following three points **hold continuously for 500ms** is it decided that "it will not come" and `promptDone = true` is set:
+  - the session is idle (`isStreaming` and `isCompacting` are both false);
+  - `mode.pendingUserInputs` is empty;
+  - the main loop is parked at `getUserInput` (`mode.onInputCallback` is set).
 
-  `quietSince` 记录这三点开始同时成立的时间，任一点不成立就清空。另设 60 秒上限，防止宿主字段变化导致永远等待（上限触发时记警告日志）。这三个字段是 pi 0.81.1 的私有字段（L2817-2826）。**OMP 18.12.5（阶段 0 探测）**：`session.isStreaming`/`isCompacting` 是 accessor，`mode.onInputCallback` 存在，但**没有** `mode.pendingUserInputs`；OMP 只有在 `onInputCallback` 是函数且前两个 accessor 都为假时才开始计 `quietSince`，连续 500ms 后结束，另设 60 秒上限。读不到字段时直接退回 60 秒上限。
+  `quietSince` records the time at which these three points started to hold simultaneously, and is cleared when any one stops holding. A 60-second cap is also set, to prevent waiting forever if host fields change (a warning is logged when the cap triggers). These three fields are private fields of pi 0.81.1 (L2817-2826). **OMP 18.12.5 (stage 0 probe)**: `session.isStreaming`/`isCompacting` are accessors and `mode.onInputCallback` exists, but there is **no** `mode.pendingUserInputs`; OMP starts counting `quietSince` only when `onInputCallback` is a function and both of the first two accessors are false, ends after 500ms of continuous holding, and also has a 60-second cap. When the fields cannot be read, it falls straight back to the 60-second cap.
 
-**命令 scope 的结束条件**（全部满足）：
+**End conditions of a command scope** (all must hold):
 
-- `submitDone && promptDone`；
-- Broker 没有活动会话；
-- 当前焦点分类为 `editor`；
-- 距最后一次输出超过 `IDLE_MS = 1500`。
+- `submitDone && promptDone`;
+- the Broker has no active session;
+- the current focus is classified as `editor`;
+- more than `IDLE_MS = 1500` since the last output.
 
-这样，await 型的长任务（`/compact`、`/share`、`/new`）靠 `submitDone` 兜住，完成时的输出不会丢；扩展命令靠 `promptDone` 兜住；立即返回型的对话框命令（`/settings`、`/resume`）靠"有活动会话"兜住；多步对话框（`/login` 的"认证方式 → 服务商 → 输入"之间短暂回到编辑器）靠 `IDLE_MS` 吸收。
+This way, long await-type tasks (`/compact`, `/share`, `/new`) are covered by `submitDone` and their completion output is not lost; extension commands are covered by `promptDone`; return-immediately dialog commands (`/settings`, `/resume`) are covered by "has an active session"; and multi-step dialogs (where `/login` briefly returns to the editor between "auth method → provider → input") are absorbed by `IDLE_MS`.
 
-**安全上限 `SCOPE_MAX_MS = 30 分钟`**：
+**Safety cap `SCOPE_MAX_MS = 30 minutes`**:
 
-- 超时时如果 Broker 仍有属于该 scope 的活动会话，**不结束**，每次延长 30 分钟（对话框还开着，说明用户可能还会操作）。
-- 没有活动会话时才强制结束：释放 scope，**跳过草稿恢复**（此时无法判断编辑器内容的来源），记一条警告日志。不动宿主。
+- On timeout, if the Broker still has an active session belonging to that scope, **do not end**; extend by 30 minutes each time (the dialog is still open, which means the user may still act).
+- Only when there is no active session is the scope force-ended: release the scope, **skip draft restoration** (the source of the editor content cannot be determined at that point), and log a warning. The host is not touched.
 
-正常结束时执行 §4.2.4 的草稿处理，然后释放 scope。
+On normal end, run the draft handling of §4.2.4, then release the scope.
 
 ### 4.4 OutputCapture
 
-**内容域划分**（必须遵守，否则会双发）：
+**Content domain split** (must be followed, otherwise messages are sent twice):
 
-| 内容 | 唯一负责方 |
+| Content | Sole owner |
 |---|---|
-| agent 的消息、思考、工具调用及结果 | 现有 `lib/renderer.ts`（通过 `agent_start`、`tool_execution_*`、`message_end` 等事件）。宿主在 turn 期间往 `chatContainer` 加的 `AssistantMessageComponent`、`ToolExecutionComponent`（L2330、L2406、L2663、L2700）**一律不截获** |
-| 宿主的状态、错误、警告（`showStatus`/`showError`/`showWarning`），包括扩展 `notify` 经宿主转成的状态 | OutputCapture |
-| 命令产生的其他聊天区内容（例如 `/session` 的信息块、`/changelog`、压缩摘要） | OutputCapture，但只在下表的条件下 |
+| Agent messages, thinking, tool calls and results | The existing `lib/renderer.ts` (through events such as `agent_start`, `tool_execution_*`, `message_end`). The `AssistantMessageComponent` and `ToolExecutionComponent` that the host adds to `chatContainer` during a turn (L2330, L2406, L2663, L2700) are **never intercepted** |
+| Host status, errors, warnings (`showStatus`/`showError`/`showWarning`), including status the host converts from an extension `notify` | OutputCapture |
+| Other chat-area content produced by commands (for example the info block of `/session`, `/changelog`, the compaction summary) | OutputCapture, but only under the conditions in the table below |
 
-截获规则：
+Interception rules:
 
-| 来源 | 何时截获 | 转换 |
+| Source | When intercepted | Conversion |
 |---|---|---|
-| `showStatus(msg)` | 归属为 Telegram（§4.3 规则 1 或 2） | 纯文本。pi 会原地更新上一条状态（`showStatus` L2563-2570），同一 scope 内的连续状态编辑同一条 Telegram 消息 |
-| `showError(msg)` / `showWarning(msg)` | 同上 | 加 `❌` / `⚠️` 前缀 |
-| `chatContainer.addChild(c)` | **同时满足**：① 有活动的**命令 scope**（§4.3 规则 1；只有规则 2 归属的 turn 期间不截获）；② 不在聊天区重建中（见下）；③ `c` 不是 agent 渲染的组件（见下）。**不用 `isStreaming` 粗筛**：pi 的 `onSubmit` 中 `/session`、`/changelog`、`/debug`、`/name` 等分支在流式检查（L2248）之前，agent 流式时从 Telegram 发这些命令，宿主照样往聊天区加内容，必须截获 | 有字符串 `text` 字段（Text）→ 去掉颜色码；Markdown 组件（有 markdown 原文字段）→ `lib/markdown.ts` 转 Telegram HTML；其他 → `c.render(80)` 去色后放进 `<pre>`，超长用 `splitTelegramText` 切分 |
+| `showStatus(msg)` | Attributed to Telegram (§4.3 rule 1 or 2) | Plain text. pi updates the previous status in place (`showStatus` L2563-2570), and consecutive statuses within the same scope edit the same Telegram message |
+| `showError(msg)` / `showWarning(msg)` | Same as above | Add a `❌` / `⚠️` prefix |
+| `chatContainer.addChild(c)` | **All of**: ① there is an active **command scope** (§4.3 rule 1; during a turn attributed only by rule 2 it is not intercepted); ② not inside a chat area rebuild (see below); ③ `c` is not a component rendered by the agent (see below). **Do not pre-filter with `isStreaming`**: in pi's `onSubmit`, branches such as `/session`, `/changelog`, `/debug`, `/name` come before the streaming check (L2248); when these commands are sent from Telegram while the agent is streaming, the host still adds content to the chat area, and it must be intercepted | A string `text` field (Text) → strip color codes; a Markdown component (has the original markdown field) → convert to Telegram HTML with `lib/markdown.ts`; anything else → `c.render(80)` with colors stripped, put into `<pre>`, and split with `splitTelegramText` when too long |
 
-- **聊天区重建**：`/resume`、`/fork`、`/new` 会先 `chatContainer.clear()`，再用 `addChild` 把整段历史重新加一遍。实例 hook `chatContainer.clear`：调用后设置 `rebuilding = true`，直到下一个宏任务（`setTimeout(0)`）才清除；期间的 `addChild` 一律不截获。会话历史在 Telegram 上由现有的历史回放功能负责，不归 OutputCapture。
-- **agent 渲染的组件**（满足任一即排除）：
-  - `c === mode.streamingComponent`；
-  - `c.constructor.name` 匹配 `/MessageComponent$/`（`AssistantMessageComponent`、`UserMessageComponent` 等）或等于 `ToolExecutionComponent`、`BashExecutionComponent`；
-  - `c` 有 `lastMessage`、`hasToolCalls`、`toolCallId` 中任一自有字段。
+- **Chat area rebuild**: `/resume`, `/fork`, `/new` first call `chatContainer.clear()` and then use `addChild` to add the whole history again. Instance hook on `chatContainer.clear`: after the call set `rebuilding = true`, cleared only at the next macrotask (`setTimeout(0)`); `addChild` during that time is never intercepted. Session history on Telegram is handled by the existing history replay feature, not by OutputCapture.
+- **Components rendered by the agent** (excluded if any one holds):
+  - `c === mode.streamingComponent`;
+  - `c.constructor.name` matches `/MessageComponent$/` (`AssistantMessageComponent`, `UserMessageComponent`, etc.) or equals `ToolExecutionComponent` or `BashExecutionComponent`;
+  - `c` has any own field among `lastMessage`, `hasToolCalls`, `toolCallId`.
 
-  pi 0.81.1 核对过的字段：`AssistantMessageComponent` 有 `lastMessage`、`hasToolCalls`，没有 `message`；`UserMessageComponent` 只有 `text`，靠构造器名识别。
-  **OMP 18.12.5（阶段 0 探测）**：聊天区组件只暴露 `children`，没有 `lastMessage`/`hasToolCalls`/`toolCallId`。观察到的 agent 渲染构造器：`qs`（用户消息）、`_Te`（助手消息）、`Aw`（工具块）、`Ds`（流式组件，且 `c === mode.streamingComponent`）；`j`/`w` 是布局/文本原语，命令输出也会用，不能单独作为排除依据。排除规则用"这组构造器名 + `c === mode.streamingComponent`"；构造器名是压缩后的，跨 OMP 版本会变，契约测试固定 18.12.5 的集合。
-- **每个 scope 最多截获 20 个组件**，超出部分合并为一行"…还有 N 项输出，请在终端查看"。
+  Fields checked in pi 0.81.1: `AssistantMessageComponent` has `lastMessage` and `hasToolCalls` and no `message`; `UserMessageComponent` has only `text` and is recognized by constructor name.
+  **OMP 18.12.5 (stage 0 probe)**: chat-area components expose only `children`, with no `lastMessage`/`hasToolCalls`/`toolCallId`. The observed agent-rendering constructors are: `qs` (user message), `_Te` (assistant message), `Aw` (tool block), `Ds` (streaming component, and `c === mode.streamingComponent`); `j`/`w` are layout/text primitives that command output also uses, so they cannot be used alone as an exclusion basis. The exclusion rule uses "this group of constructor names + `c === mode.streamingComponent`"; the constructor names are minified and change across OMP versions, and the contract test pins the 18.12.5 set.
+- **At most 20 components are intercepted per scope**; the excess is merged into one line "…N more outputs, please see the terminal".
 
-其他规则：
+Other rules:
 
-- 忽略渲染结果全是空行的组件（`Spacer`）。
-- 同一 scope 内的输出防抖 700ms 合并成一条消息，发在 scope 的 Telegram 消息之后。
-- 去重：`showStatus`/`showError`/`showWarning` 的 hook 在调用原方法期间设置 `inShowX = true`，期间的 `addChild` 跳过。
-- 发送前对文本做密钥脱敏（§4.7.4）。
-- `notify` 的去重见 §4.9 第 1 条：`on` 模式下 Telegram 副本只由 OutputCapture 发出。
+- Ignore components whose rendering is entirely blank lines (`Spacer`).
+- Output within the same scope is debounced for 700ms and merged into one message, sent after the scope's Telegram message.
+- De-duplication: the hooks of `showStatus`/`showError`/`showWarning` set `inShowX = true` while calling the original method, and `addChild` during that time is skipped.
+- Secrets are redacted from the text before sending (§4.7.4).
+- For `notify` de-duplication see §4.9 item 1: in `on` mode the Telegram copy is sent only by OutputCapture.
 
 ### 4.5 DialogBroker
 
-终端同一时刻只有一个获得焦点的对象，所以 Broker 只维护**一个**活动会话。
+The terminal has only one focused object at a time, so the Broker maintains only **one** active session.
 
 ```ts
 type DialogSession = {
-  id: string;                       // base36 自增
-  generation: number;               // 每次 Telegram 端重绘 +1
-  focus: object;                    // 焦点对象 F（会话身份）
-  root?: object;                    // 根组件，只用于找标题
+  id: string;                       // base36 auto-increment
+  generation: number;               // +1 on each Telegram-side redraw
+  focus: object;                    // focused object F (session identity)
+  root?: object;                    // root component, used only to find the title
   kind: "dialog" | "progress";
   adapter?: DialogAdapter;
   model: DialogModel;
-  owner?: Origin;                   // §4.3 的归属；undefined = 本地，不推送
+  owner?: Origin;                   // ownership of §4.3; undefined = local, not pushed
   telegram?: { chatId: number; messageThreadId?: number; messageId: number };
   pendingInput?: { flowId: string; secret: boolean; purpose: "input" | "editor" | "search" | "type" };
-  keyMap: Map<number, Map<number, string>>; // generation → 页内序号 → item.key；只保留最近 3 代
+  keyMap: Map<number, Map<number, string>>; // generation → in-page index → item.key; only the latest 3 generations are kept
   state: "open" | "resolving" | "closed";
   closedBy?: "telegram" | "terminal" | "replaced";
-  lastAction?: string;              // 用于关闭时的摘要
+  lastAction?: string;              // used for the summary on close
 };
 ```
 
-状态机：
+State machine:
 
 ```
-            焦点 = dialog                Telegram 操作
-  (无) ───────────────▶ open ─────────────────────────▶ resolving ──(焦点离开 F)──▶ closed[telegram]
+            focus = dialog                Telegram action
+  (none) ───────────────▶ open ─────────────────────────▶ resolving ──(focus leaves F)──▶ closed[telegram]
                          │  ▲                              │
-                         │  └──(操作后焦点仍是 F：翻页、搜索、勾选、设置切换、子菜单)──┘
-                         ├──(焦点离开 F，非 Telegram 引起)──▶ closed[terminal]
-                         └──(焦点变为另一个 dialog)────────▶ closed[replaced] → 新会话 open
+                         │  └──(after the action the focus is still F: paging, search, check, setting toggle, submenu)──┘
+                         ├──(focus leaves F, not caused by Telegram)──▶ closed[terminal]
+                         └──(focus becomes another dialog)────────▶ closed[replaced] → new session open
 ```
 
-规则：
+Rules:
 
-1. **打开**：FocusTracker 报告 `dialog` 焦点。按 §4.1.2 取出关联的 `EntryInfo`，依次询问 AdapterRegistry，取第一个 `detect()` 为真的适配器，`read()` 得到 DialogModel；都不命中用 SnapshotAdapter。按 §4.3 确定 `owner`。`owner` 为空时不发 Telegram 消息。
-2. **重绘时机**（终端上的变化不同步）：
-   - Telegram 端操作后焦点仍是 `F`：重新 `read()`，`generation+1`，编辑消息；
-   - 同一 owner 下焦点换成另一个 dialog：owner 来自**命令 scope** 时，新会话原地编辑同一条消息；owner 来自 **turn**（§4.3 规则 2）时，新会话新发一条消息（turn 中的对话框之间隔着 agent 输出，原地编辑会让消息顺序错乱）。见 §4.7.3；
-   - 会话关闭（规则 4）。
-   - 每 chat 编辑频率上限 1 次/秒，模型无变化不编辑。
-3. **Telegram 操作**（回调或文本输入）：
-   1. 先做焦点校验（§4.1.3）。
-   2. 会话已关闭或 `sessionId` 不匹配 → `answerCallbackQuery("已在终端处理")`，移除该消息键盘。
-   3. `generation` 过期 → 用最新模型重绘，提示"列表已变化，请重新选择"。
-   4. 重新 `read()` 拿到实时模型，按 `item.key` 在实时列表中查找目标（不按下标）：找不到 → 重绘并提示"列表已变化"，不执行。
-   5. 找到 → `state = "resolving"`，`adapter.act(F, action)`，然后 `ui.requestRender()`，再做一次焦点校验以决定是 `open`（重绘）还是 `closed`。
-4. **关闭**（焦点离开 `F` 时，按新焦点的分类决定，优先级从高到低）：
-   1. **新焦点是另一个 dialog，且 owner 相同，且 owner 来自命令 scope**（例如 `/login` 多步，Telegram 操作后宿主直接切到下一步）→ `closedBy = "replaced"`，**不写摘要**，新会话直接在同一条消息上绘制。无论旧会话是否处于 `resolving` 都如此。（owner 来自 turn 时不适用本条，按 2、3 写摘要后新会话另发消息。）
-   2. 旧会话处于 `resolving` → `closedBy = "telegram"`，消息改为"✅ <lastAction 摘要>"（密钥类输入只写"✅ 已提交（内容已隐藏）"）。
-   3. 否则 → `closedBy = "terminal"`，消息改为"已在终端处理"，移除键盘。
-   - 有 `pendingInput` 时同时注销文本输入（§4.5.1）。
-5. **超时**：Broker 不设超时，由宿主负责（宿主对话框有自己的 `timeout` 选项）。会话关闭时 Telegram 端的等待随之结束，不会卡死。
-6. **`/stop`**：如果有 owner 为该 chat 的活动会话，先 `adapter.act(F, { type: "cancel" })`（发 Esc），再执行原有 `/stop` 逻辑。
-7. **progress 会话**：只有"取消"按钮（发 Esc 给 `F`）。它和 dialog 一样有关闭流程：
-   - 焦点离开时，消息编辑为"✅ 完成"（经 Telegram 取消的为"已取消"），移除键盘；
-   - 在命令 scope 中，progress 使用 scope 的消息；之后同一 scope 的对话框按规则 4.1 原地复用这条消息（progress 视同 dialog 参与"替换"判断）；
-   - 后续输出由 OutputCapture 作为新消息发送。
+1. **Open**: FocusTracker reports a `dialog` focus. Take the associated `EntryInfo` per §4.1.2, ask AdapterRegistry in turn, take the first adapter whose `detect()` is true, and `read()` it to get a DialogModel; if none hits, use SnapshotAdapter. Determine `owner` per §4.3. When `owner` is empty, no Telegram message is sent.
+2. **Redraw timing** (changes in the terminal are not synced):
+   - After a Telegram-side action the focus is still `F`: `read()` again, `generation+1`, edit the message;
+   - The focus changes to another dialog under the same owner: when the owner comes from a **command scope**, the new session edits the same message in place; when the owner comes from a **turn** (§4.3 rule 2), the new session sends a new message (dialogs within a turn are separated by agent output, and editing in place would scramble the message order). See §4.7.3;
+   - The session closes (rule 4).
+   - The edit rate limit per chat is 1 per second, and no edit if the model is unchanged.
+3. **Telegram action** (callback or text input):
+   1. First do the focus validation (§4.1.3).
+   2. The session is closed or the `sessionId` does not match → `answerCallbackQuery("Already handled in the terminal")`, and remove that message's keyboard.
+   3. `generation` is stale → redraw with the latest model and show "The list has changed, please select again".
+   4. `read()` again to get the live model, and look up the target in the live list by `item.key` (not by index): if not found → redraw and show "The list has changed", and do not execute.
+   5. Found → `state = "resolving"`, `adapter.act(F, action)`, then `ui.requestRender()`, then do a focus validation again to decide whether it is `open` (redraw) or `closed`.
+4. **Close** (when the focus leaves `F`, decided by the classification of the new focus, priority from high to low):
+   1. **The new focus is another dialog, with the same owner, and the owner comes from a command scope** (for example a multi-step `/login`, where after a Telegram action the host switches straight to the next step) → `closedBy = "replaced"`, **write no summary**, and the new session draws directly on the same message. This holds whether or not the old session is `resolving`. (When the owner comes from a turn this item does not apply; after writing the summary per 2 and 3, the new session sends a separate message.)
+   2. The old session is `resolving` → `closedBy = "telegram"`, and the message is changed to "✅ <lastAction summary>" (for secret-type input only "✅ Submitted (content hidden)" is written).
+   3. Otherwise → `closedBy = "terminal"`, the message is changed to "Handled in the terminal", and the keyboard is removed.
+   - If there is a `pendingInput`, also unregister the text input (§4.5.1).
+5. **Timeout**: the Broker has no timeout; the host is responsible (host dialogs have their own `timeout` option). When the session closes, the Telegram-side wait ends with it and does not hang.
+6. **`/stop`**: if there is an active session whose owner is that chat, first `adapter.act(F, { type: "cancel" })` (send Esc), then run the original `/stop` logic.
+7. **progress session**: only a "Cancel" button (sends Esc to `F`). It has a close flow just like a dialog:
+   - When the focus leaves, the message is edited to "✅ Done" ("Cancelled" if cancelled through Telegram) and the keyboard is removed;
+   - Inside a command scope, progress uses the scope's message; afterwards a dialog of the same scope reuses this message in place per rule 4.1 (progress counts as a dialog for the "replace" decision);
+   - Subsequent output is sent as a new message by OutputCapture.
 
-#### 4.5.1 Telegram 文本输入的路由
+#### 4.5.1 Routing of Telegram text input
 
-input、editor、搜索、快照"输入文字"都需要接收用户的下一条文本。规则：
+input, editor, search and snapshot "type text" all need to receive the user's next text message. Rules:
 
-- Broker 进入等待文本状态时，通过 `telegram-ui.ts` 新增的接口注册到现有的输入流表，与 `waitInput` 共用"按 chat + thread 的最新流"机制。这样控制器消息处理中现有的 `deps.ui.resolveInput(chatId, rawText, ...)` 调用会先把文本交给 Broker，不会被当成 prompt。接口：
+- When the Broker enters the awaiting-text state, it registers into the existing input flow table through an interface newly added to `telegram-ui.ts`, sharing the "latest flow per chat + thread" mechanism with `waitInput`. This way the existing call `deps.ui.resolveInput(chatId, rawText, ...)` in the controller's message handling hands the text to the Broker first, and it is not treated as a prompt. Interface:
 
   ```ts
   // lib/telegram-ui.ts
   registerExternalInput(opts: {
     chatId: number;
     messageThreadId?: number;
-    promptMessageId: number;   // 对话框所在的 Telegram 消息 id（DialogSession.telegram.messageId）
+    promptMessageId: number;   // the Telegram message id the dialog sits in (DialogSession.telegram.messageId)
     sensitive: boolean;
     onText(text: string): void;
     onCancel(): void;
   }): { flowId: string; dispose(): void };
   ```
 
-  - `flowId` 由 `telegram-ui.ts` 内部的 `beginFlow()` 分配并返回，Broker 只保存它，不自己生成。
-  - `promptMessageId` 写入流记录，供现有的 `isSensitiveInput` 和"回复某条消息"定位使用。对话框消息被原地编辑成下一步时 id 不变；Broker 换成新消息时要先 `dispose()` 再重新注册。
-  - 外部流**不设超时**：不启动 `INPUT_TIMEOUT_MS`（10 分钟）计时器。生命周期完全由 Broker 控制：会话关闭、`/stop`、或 Broker 调用 `dispose()` 时注销。
-  - 流记录增加一个标记 `external: true`，控制器据此执行下表的分类。
-- **在 `resolveInput` 之前**，控制器要先对文本分类（仅当该 chat/thread 的最新流是 Broker 注册的外部流时适用；现有 `telegram-ui` 流的行为不变）：
+  - `flowId` is allocated and returned by `beginFlow()` inside `telegram-ui.ts`; the Broker only stores it and does not generate it itself.
+  - `promptMessageId` is written into the flow record, for the existing `isSensitiveInput` and for locating "reply to a message". It does not change when the dialog message is edited in place into the next step; when the Broker switches to a new message it must `dispose()` first and then register again.
+  - External flows have **no timeout**: the `INPUT_TIMEOUT_MS` (10 minutes) timer is not started. The lifecycle is controlled entirely by the Broker: it is unregistered when the session closes, on `/stop`, or when the Broker calls `dispose()`.
+  - The flow record gets a flag `external: true`, on which the controller bases the classification in the table below.
+- **Before `resolveInput`**, the controller must first classify the text (applies only when the latest flow of that chat/thread is an external flow registered by the Broker; the behavior of existing `telegram-ui` flows is unchanged):
 
-| 收到的文本 | 处理 |
+| Received text | Handling |
 |---|---|
-| `/stop` | 取消对话框（规则 6）并执行 `/stop`，注销输入 |
-| `pluginOnly` 中的命令（`/tg`、`/status` 等） | 正常执行，输入继续等待 |
-| 其他 `/` 命令 | 回复"有对话框正在等待输入，请先回复或取消"，不消费 |
-| 直接发送的文本（不是回复），或回复对话框那条消息的文本 | 作为输入交给 Broker |
-| 回复**其他**消息的文本 | 不算输入，按普通消息处理（与现有 `resolveInput` 的匹配规则一致：有 `replyToMessageId` 时只匹配 `promptMessageId` 相同的流） |
+| `/stop` | Cancel the dialog (rule 6) and run `/stop`, unregister the input |
+| A command in `pluginOnly` (`/tg`, `/status`, etc.) | Run normally, the input keeps waiting |
+| Any other `/` command | Reply "A dialog is waiting for input, please reply or cancel first", do not consume |
+| Text sent directly (not a reply), or text replying to the dialog's message | Hand to the Broker as input |
+| Text replying to **another** message | Not input, handled as an ordinary message (consistent with the matching rule of the existing `resolveInput`: when there is a `replyToMessageId`, only the flow with the same `promptMessageId` matches) |
 
-- 只匹配同一个 thread；其他 thread 的文本不受影响。
-- 插件端不设输入超时；宿主关闭对话框时注销输入。
-- `sensitive` 为真时，消费后立即删除用户的消息（沿用现有 `isSensitiveInput` + `deleteMessage` 的做法）。
-- **实现现状（阶段 2 实测后修正）**：`registerExternalInput` 还没落地，Broker 的等待文本状态与 `waitInput` 仍是两张表。控制器据此排序：先 `deps.ui.resolveInput`（插件在这个 chat 里发起、正等 Telegram 键盘的那条流），再轮到镜像对话框（上表的搜索/输入）。等价于单表模型里"最新流优先"——谁最后问，谁拿答案。不这么排会出实测过的连锁故障：终端里遗留的一个对话框（读不到字段，只有"未适配的对话框"快照镜像）把用户给密钥提示的回答当成搜索词吃掉，那条提示接着把下一条 `/probe-custom` 命令当成自己的回答删掉，两个步骤一起失败。合成一张表（`registerExternalInput`）仍是目标，跟 T3.6 的搜索路由一起做。
+- Only the same thread is matched; text in other threads is unaffected.
+- The plugin side sets no input timeout; the input is unregistered when the host closes the dialog.
+- When `sensitive` is true, the user's message is deleted immediately after being consumed (following the existing `isSensitiveInput` + `deleteMessage` approach).
+- **Implementation status (corrected after stage 2 testing)**: `registerExternalInput` has not landed yet, and the Broker's awaiting-text state and `waitInput` are still two tables. The controller orders them accordingly: first `deps.ui.resolveInput` (the flow the plugin started in this chat and which is waiting for a Telegram keyboard), then the mirrored dialog (search/input in the table above). This is equivalent to "latest flow first" in the single-table model: whoever asked last gets the answer. Without this ordering a chain failure seen in testing occurs: a dialog left over in the terminal (fields unreadable, only an "Unsupported dialog" snapshot mirror) swallows the user's answer to a secret prompt as a search term, and that prompt then deletes the next `/probe-custom` command as if it were its own answer, so the two steps fail together. Merging into one table (`registerExternalInput`) is still the goal, to be done together with the search routing of T3.6.
 
-### 4.6 DialogModel 与适配器
+### 4.6 DialogModel and adapters
 
 #### 4.6.1 DialogModel
 
 ```ts
 type DialogItem = {
-  key: string;            // 适配器内稳定的标识（value/id 优先，没有时用"完整列表中的下标 + 标签"）
+  key: string;            // identifier stable within the adapter (value/id first; otherwise "index in the full list + label")
   label: string;
   description?: string;
-  value?: string;         // 设置项的当前值
-  current?: boolean;      // 当前生效值（例如当前模型）
-  checked?: boolean;      // 多选
-  focused?: boolean;      // 读取时终端光标所在行
+  value?: string;         // current value of a setting item
+  current?: boolean;      // the currently effective value (for example the current model)
+  checked?: boolean;      // multi-select
+  focused?: boolean;      // the row the terminal cursor was on when read
 };
 
 type Question = {
@@ -640,7 +640,7 @@ type Question = {
   prompt: string;
   items: DialogItem[];
   multi: boolean;
-  allowCustom: boolean;   // 是否允许自由文本答案
+  allowCustom: boolean;   // whether a free-text answer is allowed
   answered: boolean;
 };
 
@@ -650,7 +650,7 @@ type DialogModel =
   | { kind: "settings"; title: string;
       items: (DialogItem & { values?: string[]; hasSubmenu?: boolean })[];
       search?: { query: string };
-      submenu?: { itemKey: string; model: DialogModel } }          // 子菜单是嵌套状态，见 §4.6.4 #5
+      submenu?: { itemKey: string; model: DialogModel } }          // a submenu is nested state, see §4.6.4 #5
   | { kind: "questionnaire"; title: string; questions: Question[]; active: number; canSubmit: boolean }
   | { kind: "approval"; title: string; detail?: string; options: { key: string; label: string }[] }
   | { kind: "confirm"; title: string; message?: string }
@@ -665,52 +665,52 @@ type DialogAction =
   | { type: "toggle"; key: string }
   | { type: "cycle"; key: string; value?: string }
   | { type: "submenu"; key: string }
-  | { type: "question"; index: number }               // 切换问卷中的问题
+  | { type: "question"; index: number }               // switch the question in a questionnaire
   | { type: "search"; query: string }
   | { type: "submit"; text?: string }
   | { type: "confirm"; yes: boolean }
   | { type: "approve"; key: string }
-  | { type: "key"; name: string }                     // 组件特有按键；快照只允许 up/down/enter/esc
+  | { type: "key"; name: string }                     // component-specific keys; snapshots allow only up/down/enter/esc
   | { type: "cancel" };
 ```
 
-`items` 是完整的（过滤后的）列表，不是终端当前可见的那一屏。分页在 Telegram 端完成。
+`items` is the full (filtered) list, not the one screen currently visible in the terminal. Paging is done on the Telegram side.
 
-#### 4.6.2 适配器接口
+#### 4.6.2 Adapter interface
 
 ```ts
 interface DialogAdapter {
   id: string;
-  /** 只用形状判断，禁止 instanceof。F 是焦点对象。 */
+  /** Judge by shape only; instanceof is forbidden. F is the focused object. */
   detect(F: object, ctx: AdapterContext): boolean;
   read(F: object, ctx: AdapterContext): DialogModel;
-  /** 返回 false 表示无法执行；Broker 会提示失败并重绘，不会改用其他方式猜测。 */
+  /** Returning false means it cannot be executed; the Broker reports the failure and redraws, and does not switch to guessing some other way. */
   act(F: object, action: DialogAction, ctx: AdapterContext): boolean;
 }
 
 type AdapterContext = {
   host: "pi" | "omp";
   root?: object;
-  entry?: EntryInfo;        // 入口 hook 记录的语义信息
-  sendKey(name: string): boolean;   // 发给 F.handleInput
+  entry?: EntryInfo;        // semantic information recorded by the entry hook
+  sendKey(name: string): boolean;   // send to F.handleInput
   requestRender(): void;
 };
 ```
 
-#### 4.6.3 向下查找数据：`findShape`
+#### 4.6.3 Looking down for data: `findShape`
 
-数据不一定在焦点对象本身上，也不一定在 `children` 里。例：`SessionSelectorComponent` 的 `filteredSessions`、`selectedIndex`、`searchInput` 都在它的字段 `sessionList` 上，而 `SessionList` 是普通类，不是组件，不在 `children` 中（pi `session-selector.js` 的 `class SessionList`，L228）。
+The data is not necessarily on the focused object itself, nor in `children`. Example: the `filteredSessions`, `selectedIndex` and `searchInput` of `SessionSelectorComponent` are all on its field `sessionList`, and `SessionList` is an ordinary class, not a component, and is not in `children` (`class SessionList` in pi `session-selector.js`, L228).
 
 ```ts
 function findShape<T>(start: object, test: (o: any) => o is T, maxDepth = 3): T | undefined
 ```
 
-- 从 `F` 开始广度优先遍历对象的**自有可枚举字段**（不限于 `children`），数组只展开元素是对象的。
-- 用 `WeakSet` 防环。
-- 只跳过通向**宿主全局状态**的字段名：`tui`、`ui`、`theme`、`keybindings`、`session`、`settingsManager`、`modelRuntime`、`terminal`。环由 `WeakSet` 处理，不需要再跳过 `parent`。**不跳过 `editor`**：`ExtensionEditorComponent` 的 `editor` 字段就是它内部的 Editor（`extension-editor.js` L42），泛型查找需要能看到它。主编辑器不会被误入，因为对话框组件不持有它。
-- 先测 `F` 本身，再逐层向下。
+- Starting from `F`, traverse the object's **own enumerable fields** breadth-first (not limited to `children`); for arrays, expand only elements that are objects.
+- Use a `WeakSet` to prevent cycles.
+- Skip only field names that lead to **host global state**: `tui`, `ui`, `theme`, `keybindings`, `session`, `settingsManager`, `modelRuntime`, `terminal`. Cycles are handled by the `WeakSet`, so `parent` does not need to be skipped. **`editor` is not skipped**: the `editor` field of `ExtensionEditorComponent` is its internal Editor (`extension-editor.js` L42), and generic lookup needs to see it. The main editor is not entered by mistake, because dialog components do not hold it.
+- Test `F` itself first, then go down layer by layer.
 
-形状判断示例：
+Shape check examples:
 
 ```ts
 const isSelectList = (o: any) =>
@@ -727,633 +727,633 @@ const isFilteredList = (o: any) =>
   (typeof o?.onSelect === "function" || typeof o?.onSelectCallback === "function" || typeof o?.handleSelect === "function");
 ```
 
-#### 4.6.4 操作的统一做法：设状态 + 发按键给焦点对象
+#### 4.6.4 The unified way to operate: set state + send a key to the focused object
 
-选择第 i 项：
+Selecting item i:
 
 ```ts
-list.selectedIndex = liveIndex;      // list 是 findShape 找到的对象；SelectList 可用 setSelectedIndex(i)
-F.handleInput("\r");                 // 发给焦点对象，由宿主组件自己的逻辑完成确认
+list.selectedIndex = liveIndex;      // list is the object found by findShape; SelectList can use setSelectedIndex(i)
+F.handleInput("\r");                 // sent to the focused object; the host component's own logic completes the confirmation
 ctx.requestRender();
 ```
 
-- 按键一律发给 `F`，不是发给 `list`。宿主组件会自己把按键转交给内部列表（例如 `SessionSelectorComponent.handleInput` 转给 `sessionList`，`SettingsList.handleInput` 在子菜单打开时转给 `submenuComponent`）。
-- 不直接调用 `onSelectCallback(...)`，因为各组件回调参数不同。
-- 搜索：先发 `ctrl+u` 清空，再逐字符 `F.handleInput(ch)`。这与终端用户的操作方式相同。注意 `SettingsList` 会去掉输入中的空格（`handleInput` 中 `data.replace(/ /g, "")`），带空格的搜索词在设置里会被合并，这是宿主行为，不做补偿。
-- 执行前确认 `selectedIndex` 是数字、`liveIndex` 在范围内；不满足就返回 `false`。
+- Keys are always sent to `F`, not to `list`. The host component hands the key to its internal list itself (for example `SessionSelectorComponent.handleInput` passes it to `sessionList`, and `SettingsList.handleInput` passes it to `submenuComponent` when a submenu is open).
+- Do not call `onSelectCallback(...)` directly, because the callback arguments differ between components.
+- Search: first send `ctrl+u` to clear, then `F.handleInput(ch)` character by character. This is the same as how a terminal user operates. Note that `SettingsList` strips spaces from the input (`data.replace(/ /g, "")` in `handleInput`), so a search term with spaces is merged in settings; this is host behavior and is not compensated.
+- Before executing, confirm `selectedIndex` is a number and `liveIndex` is in range; if not, return `false`.
 
-#### 4.6.5 内置适配器清单（按优先级）
+#### 4.6.5 Built-in adapter list (by priority)
 
-字段名来自 pi 0.81.1。OMP 的对应适配器基于阶段 0 的探测结果编写（`docs/host-probe/omp-18.12.5.json`）；关键结论：OMP 的扩展入口在 UI 上下文、内置选择器的焦点组件没有可读数据字段，因此 OMP 上 #5-#9 先走快照，只有入口参数（#1/#2/#3/#4/#10）能给出结构化模型。
+Field names come from pi 0.81.1. The matching OMP adapters are written from the stage 0 probe results (`docs/host-probe/omp-18.12.5.json`); key conclusion: OMP's extension entry points are in the UI context, and the focused components of built-in selectors have no readable data fields, so on OMP #5-#9 go through snapshot first, and only the entry arguments (#1/#2/#3/#4/#10) can give a structured model.
 
-| # | 适配器 | 识别 | 读取 / 操作 | 覆盖 |
+| # | Adapter | Detection | Read / operate | Covers |
 |---|---|---|---|---|
-| 1 | `ExtensionSelectAdapter` | `entry.kind === "select"`（pi：`showExtensionSelector`；OMP：UI 上下文的 `select`），或 `F` 有 `options: string[]` + `selectedIndex` + `onSelectCallback` | 标题、选项取自入口参数。`showExtensionConfirm` 的入口是 `select(title + "\n" + message, ["Yes","No"])`，识别为 `confirm`。**OMP 18.12.5**：焦点组件没有 `options`/`selectedIndex`（只有 `children` 或空），选项必须取自 UI 上下文入口参数；当前光标只能靠按键后的重渲染确认 | 扩展 `select`、`confirm` |
-| 2 | `ExtensionInputAdapter` | `entry.kind === "input"`，或 `F` 有 Input 形状字段 `input` + `onSubmitCallback` | `input.setValue(text)` 后 `F.handleInput("\r")`。`secret` 只在入口明确是密钥输入时为真（pi 的 `ExtensionUIContext.input` 没有密钥标记；OMP **没有** `inputSecret`，以调用方标记为准）。**OMP 18.12.5**：焦点组件只有 `children`/`focused`，没有 `input` 字段；输入文本只能通过 `F.handleInput` 逐字发送 | 扩展 `input` |
-| 3 | `ExtensionEditorAdapter` | `entry.kind === "editor"` | 内部编辑器（字段 `editor`）`setText(text)` 后发 Enter 给 `F`。已核对：Enter 提交，Shift+Enter 换行（`extension-editor.js` L46-49）。**OMP 18.12.5**：焦点组件只有 `children`/`focused`，内部编辑器不可达；用 `F.handleInput` 输入 + Enter | 扩展 `editor` |
-| 4 | `AskDialogAdapter`（OMP） | `entry.kind === "ask"`（工具 UI 上下文的 `askDialog`） | 输出 `questionnaire` 模型：问题和选项取自 `askDialog(questions, options)` 的**第一个参数**（问题数组，每项 `id/question/header/options/recommended`），第二参数是 `{timeout, signal, acceptImages}`。**OMP 18.12.5 的焦点组件只有 `callbacks`/`options`，当前 tab、光标、已答状态都在闭包里**：适配器必须自己维护 `active`/`answers`，每次操作后重渲染确认；切换问题/选项全部发按键（探测的图例为 `Tab/←→` 切题、`↑↓` 选择、Enter 确认、Esc 取消） | OMP `ask` 工具 |
-| 5 | `SettingsListAdapter` | `F` 是 SettingsList 形状（`/settings` 的焦点就是 `getSettingsList()`） | 主列表读 `items`/`filteredItems`、`selectedIndex`。**子菜单**：`activateItem` 打开子菜单时只设置私有字段 `submenuComponent`，不调用 `setFocus`，后续按键由同一个 SettingsList 转交（pi-tui `settings-list.js` 的 `handleInput`/`activateItem`）。所以子菜单是**同一会话内的嵌套状态**：`read()` 发现 `submenuComponent` 非空时，对它用 `findShape` 找 SelectList 并生成 `submenu.model`；对子菜单的操作仍发给 `F`。设置 `submenuComponent` 内 SelectList 的 `selectedIndex` 后发 `\r` 给 `F`。子菜单形状不是 SelectList 的（例如 `settings-selector.js` 中的 `ThemeSubmenu`，有自己的模式状态）→ 子菜单部分降级为快照，只提供 ↑↓/Enter/Esc。**cycle**：先确认目标值在 `item.values` 中，且 `item.currentValue` 也在其中（否则返回 `false`，例如当前值是显示用的标签而不在 `values` 里）；按 `(indexOf(目标) − indexOf(当前) + n) % n` 算出按键次数，选中该项后发对应次数的 `\r`；最后重读确认 `currentValue` 已变。**OMP 18.12.5**：`showSettingsSelector` 的焦点组件（`AU`）没有任何自有字段，主列表/子菜单数据不可读 → 整个适配器降级为快照 | `/settings` |
-| 6 | `SelectListAdapter` | `findShape(F, isSelectList)` 命中 | `filteredItems` 的 `value/label/description`；操作见 §4.6.4。**OMP 18.12.5**：内置选择器（model/session/tree/oauth）的焦点组件没有 `items`/`filtered*`/`selectedIndex`，此适配器在 OMP 上不会命中，交给 #13 | theme、thinking、show-images 等选择器（pi） |
-| 7 | `FilteredListAdapter`（通用） | `findShape(F, isFilteredList)` 命中 | 标签提取器依次尝试 `label ?? name ?? title ?? id ?? String(x)`；当前值比较组件上的 `current*` 字段。**OMP 18.12.5**：内置 model/session 选择器的数据在闭包里，`findShape` 不命中 → 快照 | model（`filteredModels`、`currentModel`）、oauth（`filteredProviders`）、session（`sessionList.filteredSessions`）、scoped-models、tree、fork 的消息列表（pi） |
-| 8 | 专用适配器 | 按需 | — | pi：`ModelSelectorAdapter`（`provider/id`，标当前模型，作用域切换键）、`SessionSelectorAdapter`（会话名或首条消息、时间；删除、排序、名称筛选等按键作为 `extraActions`）。OMP 18.12.5：model/session/tree/oauth 的焦点组件没有可用字段，阶段 3 只能先按快照提供按键；不新增 OMP 专用字段适配器，除非后续版本暴露字段 |
-| 9 | `LoginDialogAdapter` | `F` 或 `root` 是登录对话框形状（有 `abortController`/`signal` + Input + 登录相关入口：`showLoginDialog`、`showApiKeyLoginDialog`） | 输入一律 `secret: true`。`LoginDialogComponent` 提交后会把输入框替换成文本 `> value`（`login-dialog.js` 的 `replaceInputWithSubmittedText`），所以**此适配器禁止对该对话框截图**，info 文本必须先脱敏。**OMP 18.12.5**：`/login` 先走 `showOAuthSelector`（焦点 `CF`，只有 `children`），没有发现 API key 对话框；OMP 的登录列表阶段 3 先按快照处理 | `/login` 的 API key、授权码输入（pi） |
-| 10 | `ApprovalAdapter`（OMP） | `entry.kind === "approval"`（工具 UI 上下文的 `approve`） | 入口参数是 `{full, compact, session}` 三个字符串；焦点组件只有 `callbacks{onApprove,onDeny}` / `options{fullPrompt, timeout, session, draft}`。模型标题/详情取 `full`，选项由组件自己渲染的按键决定（探测到 `handleInput`）；操作发按键给 `F`，不直接调用 `callbacks` | OMP `approve` |
-| 11 | `CustomGoalAdapter` | 见 §4.6.6：pi-goal 0.6.x 的三种形态都只有 `render/invalidate/handleInput`，没有字段，按例外规则识别 | 单问 → `select`；确认框 → `confirm`；多问 → `questionnaire`。通过 `F.handleInput` 发按键完成，不再旁路 `done` | pi-goal 0.6.x |
-| 12 | `InfoPanelAdapter` | **只在有正面证据时命中**：pi 按已知构造器/字段白名单；OMP 18.12.5 按入口语义白名单（`showCommandReport`、`showDebugSelector`、`showUsageDashboard`、`showExtensionsDashboard`、`showAgentsDashboard`）登记，焦点组件只有 `children`/空字段 | `render(80)` 去色、脱敏后作为只读文本，按钮只有"关闭"（发 Esc） | 已确认的只读面板（pi + OMP 入口白名单） |
-| 13 | `UnsupportedAdapter`（v6，取代 `SnapshotAdapter`） | 永远为真 | 不读画面；只取组件类型名和入口标题（如有） | 未知组件。Telegram 只显示"终端上有一个 Telegram 无法处理的对话框（<类型>），请在终端处理"，按钮只有"取消"（发 Esc）（§0.1 第 3 条） |
+| 1 | `ExtensionSelectAdapter` | `entry.kind === "select"` (pi: `showExtensionSelector`; OMP: `select` of the UI context), or `F` has `options: string[]` + `selectedIndex` + `onSelectCallback` | Title and options come from the entry arguments. The entry of `showExtensionConfirm` is `select(title + "\n" + message, ["Yes","No"])`, recognized as `confirm`. **OMP 18.12.5**: the focused component has no `options`/`selectedIndex` (only `children` or empty), so options must come from the UI context entry arguments; the current cursor can only be confirmed by re-rendering after a key press | Extension `select`, `confirm` |
+| 2 | `ExtensionInputAdapter` | `entry.kind === "input"`, or `F` has the Input-shaped fields `input` + `onSubmitCallback` | After `input.setValue(text)`, `F.handleInput("\r")`. `secret` is true only when the entry is explicitly a secret input (pi's `ExtensionUIContext.input` has no secret flag; OMP **has no** `inputSecret`, and the caller's marking is authoritative). **OMP 18.12.5**: the focused component has only `children`/`focused` and no `input` field; the input text can only be sent character by character through `F.handleInput` | Extension `input` |
+| 3 | `ExtensionEditorAdapter` | `entry.kind === "editor"` | After the internal editor (field `editor`) `setText(text)`, send Enter to `F`. Verified: Enter submits, Shift+Enter inserts a newline (`extension-editor.js` L46-49). **OMP 18.12.5**: the focused component has only `children`/`focused` and the internal editor is unreachable; input with `F.handleInput` + Enter | Extension `editor` |
+| 4 | `AskDialogAdapter` (OMP) | `entry.kind === "ask"` (`askDialog` of the tool UI context) | Outputs a `questionnaire` model: questions and options come from the **first argument** of `askDialog(questions, options)` (the question array, each with `id/question/header/options/recommended`), and the second argument is `{timeout, signal, acceptImages}`. **The focused component of OMP 18.12.5 has only `callbacks`/`options`, and the current tab, cursor and answered state are all in a closure**: the adapter must maintain `active`/`answers` itself and confirm by re-rendering after each operation; switching questions/options is all done with key presses (the probed legend is `Tab/←→` to switch question, `↑↓` to select, Enter to confirm, Esc to cancel) | OMP `ask` tool |
+| 5 | `SettingsListAdapter` | `F` has the SettingsList shape (the focus of `/settings` is `getSettingsList()`) | The main list reads `items`/`filteredItems`, `selectedIndex`. **Submenu**: when `activateItem` opens a submenu it only sets the private field `submenuComponent` and does not call `setFocus`, and subsequent keys are forwarded by the same SettingsList (`handleInput`/`activateItem` in pi-tui `settings-list.js`). So a submenu is **nested state within the same session**: when `read()` finds `submenuComponent` non-empty, it uses `findShape` on it to find the SelectList and generates `submenu.model`; operations on the submenu are still sent to `F`. After setting `selectedIndex` of the SelectList inside `submenuComponent`, send `\r` to `F`. If the submenu shape is not a SelectList (for example `ThemeSubmenu` in `settings-selector.js`, which has its own mode state) → the submenu part degrades to a snapshot, offering only ↑↓/Enter/Esc. **cycle**: first confirm the target value is in `item.values` and `item.currentValue` is also in it (otherwise return `false`, for example when the current value is a display label that is not in `values`); compute the key count as `(indexOf(target) − indexOf(current) + n) % n`, select the item and send `\r` that many times; finally re-read to confirm `currentValue` has changed. **OMP 18.12.5**: the focused component of `showSettingsSelector` (`AU`) has no own fields at all, and the main list/submenu data is unreadable → the whole adapter degrades to a snapshot | `/settings` |
+| 6 | `SelectListAdapter` | `findShape(F, isSelectList)` hits | `value/label/description` of `filteredItems`; for operations see §4.6.4. **OMP 18.12.5**: the focused components of built-in selectors (model/session/tree/oauth) have no `items`/`filtered*`/`selectedIndex`, so this adapter does not hit on OMP and hands over to #13 | theme, thinking, show-images and other selectors (pi) |
+| 7 | `FilteredListAdapter` (generic) | `findShape(F, isFilteredList)` hits | The label extractor tries in turn `label ?? name ?? title ?? id ?? String(x)`; the current value is compared against the `current*` fields on the component. **OMP 18.12.5**: the data of the built-in model/session selectors is in closures, `findShape` does not hit → snapshot | model (`filteredModels`, `currentModel`), oauth (`filteredProviders`), session (`sessionList.filteredSessions`), scoped-models, tree, the message list of fork (pi) |
+| 8 | Dedicated adapters | As needed | — | pi: `ModelSelectorAdapter` (`provider/id`, marks the current model, scope-toggle key), `SessionSelectorAdapter` (session name or first message, time; delete, sort, name filter and other keys are `extraActions`). OMP 18.12.5: the focused components of model/session/tree/oauth have no usable fields, so stage 3 can only provide keys by snapshot first; no new OMP-specific field adapters are added unless a later version exposes fields |
+| 9 | `LoginDialogAdapter` | `F` or `root` has the login dialog shape (has `abortController`/`signal` + Input + a login-related entry: `showLoginDialog`, `showApiKeyLoginDialog`) | Input is always `secret: true`. After submit, `LoginDialogComponent` replaces the input box with the text `> value` (`replaceInputWithSubmittedText` in `login-dialog.js`), so **this adapter must not screenshot that dialog**, and the info text must be redacted first. **OMP 18.12.5**: `/login` first goes through `showOAuthSelector` (focus `CF`, only `children`), and no API key dialog was found; OMP's login list is handled by snapshot first in stage 3 | API key and authorization code input of `/login` (pi) |
+| 10 | `ApprovalAdapter` (OMP) | `entry.kind === "approval"` (`approve` of the tool UI context) | The entry arguments are the three strings `{full, compact, session}`; the focused component has only `callbacks{onApprove,onDeny}` / `options{fullPrompt, timeout, session, draft}`. The model title/detail take `full`, and the options are decided by the keys the component renders itself (`handleInput` was detected); operations send keys to `F` and do not call `callbacks` directly | OMP `approve` |
+| 11 | `CustomGoalAdapter` | See §4.6.6: all three shapes of pi-goal 0.6.x have only `render/invalidate/handleInput` and no fields, recognized by the exception rules | Single question → `select`; confirmation box → `confirm`; multiple questions → `questionnaire`. Completed by sending keys through `F.handleInput`, no longer bypassing `done` | pi-goal 0.6.x |
+| 12 | `InfoPanelAdapter` | **Hits only on positive evidence**: pi by a whitelist of known constructors/fields; OMP 18.12.5 registered by an entry-semantics whitelist (`showCommandReport`, `showDebugSelector`, `showUsageDashboard`, `showExtensionsDashboard`, `showAgentsDashboard`), the focused component having only `children`/empty fields | `render(80)` with colors stripped and redacted, as read-only text, with only a "Close" button (sends Esc) | Confirmed read-only panels (pi + OMP entry whitelist) |
+| 13 | `UnsupportedAdapter` (v6, replaces `SnapshotAdapter`) | Always true | Does not read the screen; takes only the component type name and the entry title (if any) | Unknown components. Telegram shows only "There is a dialog in the terminal that Telegram cannot handle (<type>), please handle it in the terminal", with only a "Cancel" button (sends Esc) (§0.1 item 3) |
 
-每个适配器都要有单元测试（§7.1）。
+Every adapter needs unit tests (§7.1).
 
-#### 4.6.6 不透明组件：原则 2 的例外（仅限本节两种）
+#### 4.6.6 Opaque components: exceptions to principle 2 (only the two in this section)
 
-背景：扩展通过 `ctx.ui.custom(factory)` 提供的组件是不透明的，宿主不知道它的结构。现有 `custom-dialogs.ts` 识别 pi-goal 对话框的方式是"渲染成文本 → 正则匹配"（`detectShape`、`extractConfirmationHeader`、`parseTabBarIds` 等），这违反原则 2。
+Background: components that an extension provides through `ctx.ui.custom(factory)` are opaque, and the host does not know their structure. The existing way `custom-dialogs.ts` recognizes pi-goal dialogs is "render to text → regex match" (`detectShape`, `extractConfirmationHeader`, `parseTabBarIds`, etc.), which violates principle 2.
 
-处理顺序：
+Order of handling:
 
-1. **先结构化。** 阶段 0 必须探测 pi-goal 的三种 custom 组件（确认框、`goal_question` 单问、`goal_questionnaire` 多问），记录 `constructor.name` 和自有字段。只要能找到问题、选项、答题状态的字段，就写结构化适配器，不使用例外。
-2. **证明没有可用字段时，才启用例外**，并且必须同时满足：
-   - 只适用于 `custom()` 生成的组件，并且是 `CustomGoalAdapter` 白名单中登记过的已知形态（目前只有 pi-goal 的三种）；其他扩展的 custom 组件一律走快照；
-   - 渲染文本只能用于**识别形态和读取选项文字**；
-   - 所有操作都通过 `F.handleInput` 发按键完成（例如选项序号对应的方向键次数 + Enter，或组件自己的 Tab 切题），**不得**像现有代码那样绕过组件直接调用 `done` 构造结果；
-   - 发按键前重新渲染、重新识别，确认目标选项仍在原位置，不一致就重绘 Telegram 消息并提示"列表已变化"；
-   - 适配器绑定已测试的 pi-goal 版本范围（写在适配器常量里），版本不在范围内或识别失败时按 §0.1 第 3 条明确告知，不退回快照；
-   - 契约测试使用该版本的 pi-goal 真实组件，pi-goal 升级导致文本变化时测试先失败。
-3. 例外启用与否、依据的探测文件，记录在本节末尾（阶段 0 完成后填写）。
+1. **Structure first.** Stage 0 must probe pi-goal's three custom components (the confirmation box, the `goal_question` single question, the `goal_questionnaire` multi question), recording `constructor.name` and own fields. As long as fields for the questions, options and answering state can be found, write a structured adapter and do not use the exception.
+2. **Enable the exception only after proving there are no usable fields**, and all of the following must hold:
+   - It applies only to components produced by `custom()` that are known shapes registered in the `CustomGoalAdapter` whitelist (currently only pi-goal's three); custom components of other extensions always go to snapshot;
+   - Rendered text may be used only to **recognize the shape and read option text**;
+   - All operations are completed by sending keys through `F.handleInput` (for example the number of arrow key presses corresponding to the option index + Enter, or the component's own Tab to switch questions), and **must not** bypass the component and call `done` directly to construct the result as the existing code does;
+   - Before sending keys, re-render and re-recognize to confirm the target option is still in its original position; if not, redraw the Telegram message and show "The list has changed";
+   - The adapter is bound to the tested pi-goal version range (written in an adapter constant); when the version is outside the range or recognition fails, say so clearly per §0.1 item 3 and do not fall back to a snapshot;
+   - The contract test uses the real pi-goal components of that version, and when a pi-goal upgrade changes the text the test fails first.
+3. Whether the exception is enabled, and the probe file it rests on, is recorded at the end of this section (to be filled in after stage 0 is complete).
 
-阶段 0 结论（2026-10-23，pi-goal 0.6.0）：确认框、`goal_question` 单问、`goal_questionnaire` 多问都由 `ctx.ui.custom` 返回**同一个 Object 形态**，自有字段只有 `render`、`invalidate`、`handleInput`；问题、选项、当前 tab、已答状态全部在工厂闭包里，探测没有找到任何可读的结构化字段。三种形态的 `render(80)` 已记录在 `docs/host-probe/pi-0.81.1.json` 的 `conclusions.piGoal`。
+Stage 0 conclusion (2026-10-23, pi-goal 0.6.0): the confirmation box, the `goal_question` single question and the `goal_questionnaire` multi question are all returned by `ctx.ui.custom` as the **same Object shape**, whose own fields are only `render`, `invalidate`, `handleInput`; the questions, options, current tab and answered state are all in the factory closure, and the probe found no readable structured fields. The `render(80)` of the three shapes is recorded in `conclusions.piGoal` of `docs/host-probe/pi-0.81.1.json`.
 
-因此**启用例外一（pi-goal）**，条件收窄为：
+Therefore **exception 1 (pi-goal) is enabled**, with the conditions narrowed to:
 
-- 白名单只包含 pi-goal `0.6.x` 的这三种形态；确认框按标题 `Confirm Goal Draft` / `Confirm Sisyphus Goal Draft` 识别（单问/多问没有这个标题），单问与多问按渲染文本中的题目数量和 tab 栏区分。
-- 渲染文本只用于识别形态和读取标题/选项文字；当前光标、已答状态、当前 tab 由 `CustomGoalAdapter` 自己维护，并在每次操作后重新 `render` 确认目标仍在原位置。
-- 操作全部通过 `F.handleInput` 发按键（↑↓ 选择、Enter 确认、Tab/←→ 切题、Esc 取消），**不调用 `done`**。
-- 版本不在 `0.6.x`、渲染里找不到预期标题/选项、或重渲染结果与模型不一致 → 交给 `UnsupportedAdapter` 明确告知（§0.1 第 3 条）。
-- 契约测试固定使用 pi-goal 0.6.0 的真实组件；升级导致文本变化时测试先失败。
+- The whitelist contains only these three shapes of pi-goal `0.6.x`; the confirmation box is recognized by the title `Confirm Goal Draft` / `Confirm Sisyphus Goal Draft` (single/multi questions do not have this title), and single vs. multi questions are told apart by the number of questions in the rendered text and the tab bar.
+- Rendered text is used only to recognize the shape and read title/option text; the current cursor, answered state and current tab are maintained by `CustomGoalAdapter` itself, and after each operation it re-renders to confirm the target is still in its original position.
+- All operations send keys through `F.handleInput` (↑↓ to select, Enter to confirm, Tab/←→ to switch question, Esc to cancel), and **do not call `done`**.
+- Version not `0.6.x`, expected title/options not found in the rendering, or the re-rendered result inconsistent with the model → hand to `UnsupportedAdapter` to say so clearly (§0.1 item 3).
+- The contract test always uses the real pi-goal 0.6.0 components; when an upgrade changes the text, the test fails first.
 
-**例外二：OMP 入口对话框的当前行定位（2026-10-24 启用；已被 §4.11 取代，过渡期保留，T3.2g 删除）**
+**Exception 2: locating the current row of an OMP entry dialog (enabled 2026-10-24; superseded by §4.11, kept for the transition period, deleted by T3.2g)**
 
-背景：OMP 18.12.5 的扩展 `select`/`input`/`editor` 与 `askDialog` 组件把行和光标放在私有字段里，类名被压缩，无法按字段读取（§9 决定 28、35、36）。
+Background: in OMP 18.12.5 the extension `select`/`input`/`editor` and `askDialog` components keep rows and cursor in private fields and their class names are minified, so they cannot be read by field (§9 decisions 28, 35, 36).
 
-使用条件（全部满足才使用，否则退回 `SnapshotAdapter`）：
+Conditions of use (use only if all hold, otherwise fall back to `SnapshotAdapter`):
 
-- 只用于有入口记录（`EntryInfo`）的 OMP 对话框。题目、标题、选项文字**一律取自入口参数**。
-- 渲染帧（`render(80)` 去色）只用于两件事：确定当前高亮行、确定屏幕上可见的行。**不得**从帧里读取选项文字或任何状态值（下面 `approve` 的按键说明除外）。
-- 操作全部通过 `F.handleInput` 发按键。按键前重新渲染，确认目标行仍在可见行里，步数按可见行计算；对不上就拒绝操作并重绘 Telegram 消息。
-- 绑定 OMP 版本范围 `18.12.x`（写在适配器常量里）；版本不在范围内或无法确定版本时退回快照。
-- 契约测试固定使用 OMP 18.12.5 的真实帧（`docs/host-probe/omp-18.12.5.json` 的 `conclusions.dialogFrames`）；OMP 升级导致帧格式变化时测试先失败。
-- 唯一允许从帧里读取的文字：OMP `approve` 对话框页脚的按键说明（§4.6.5 #10），用来确定有哪些可按的选项；同样受上面的版本限制。
-- **不得**用于 OMP 内置选择器（`/model`、`/settings`、`/resume`、`/tree`、`/login` 等 `show*Selector` 打开的组件），它们仍按 §9 决定 18 走快照。插件自己通过 `ui.select` 弹出的列表（例如 OMP 上 Telegram 的 `/model`，由 `lib/commands/model.ts` 处理）属于入口对话框，适用本例外。
+- Only for OMP dialogs that have an entry record (`EntryInfo`). The question, title and option text are **always taken from the entry arguments**.
+- The rendered frame (`render(80)` with colors stripped) is used for only two things: determining the currently highlighted row and determining the rows visible on the screen. Option text or any state value **must not** be read from the frame (except the key legend of `approve` below).
+- All operations send keys through `F.handleInput`. Re-render before the keys, confirm the target row is still in the visible rows, and compute the step count by the visible rows; if they do not match, refuse the operation and redraw the Telegram message.
+- Bound to the OMP version range `18.12.x` (written in an adapter constant); when the version is outside the range or cannot be determined, fall back to snapshot.
+- The contract test always uses the real frames of OMP 18.12.5 (`conclusions.dialogFrames` of `docs/host-probe/omp-18.12.5.json`); when an OMP upgrade changes the frame format, the test fails first.
+- The only text allowed to be read from the frame: the key legend in the footer of the OMP `approve` dialog (§4.6.5 #10), used to determine which options can be pressed; it is subject to the same version limit.
+- **Must not** be used for OMP built-in selectors (components opened by `show*Selector` such as `/model`, `/settings`, `/resume`, `/tree`, `/login`), which still go through snapshot per §9 decision 18. Lists the plugin itself pops up through `ui.select` (for example Telegram's `/model` on OMP, handled by `lib/commands/model.ts`) are entry dialogs and fall under this exception.
 
 ### 4.7 TelegramDialogRenderer
 
-#### 4.7.1 回调数据格式
+#### 4.7.1 Callback data format
 
-Telegram 回调数据上限 64 字节。**所有对话框（包括快照）统一用新前缀**：
+Telegram callback data is limited to 64 bytes. **All dialogs (including snapshots) use a new prefix uniformly**:
 
 ```
 tgplus:dlg:<sessionId>:<generation>:<op>[:<arg>]
 ```
 
-- `sessionId`、`generation` 用 base36。
-- `op`：`c`（choose）、`t`（toggle）、`v`（cycle，arg = 值序号）、`m`（submenu）、`q`（切换问题，arg = 问题序号）、`p`（翻页，arg = 页码）、`s`（搜索输入）、`y`/`n`（confirm）、`a`（approval，arg = 选项序号）、`i`（文字输入）、`k`（按键，arg = 键名）、`x`（取消）。
-- choose/toggle 的 arg 是**页内序号**，服务端用 `session.keyMap[generation]` 映射回 `item.key`，因此回调长度与 key 长度无关。
-- 在 `lib/callback-protocol.ts` 新增 `encodeDialogCallback` / `decodeDialogCallback`，并有单测断言所有组合不超过 64 字节。
-- 旧前缀 `tgplus:tui:` 在过渡期仍由旧镜像代码处理；阶段 5 删除镜像后，收到旧前缀一律回复"该按钮已过期"。原因：旧回调没有会话标识，进程重启或对话框更换后会作用到错误的组件。
+- `sessionId` and `generation` use base36.
+- `op`: `c` (choose), `t` (toggle), `v` (cycle, arg = value index), `m` (submenu), `q` (switch question, arg = question index), `p` (page, arg = page number), `s` (search input), `y`/`n` (confirm), `a` (approval, arg = option index), `i` (text input), `k` (key, arg = key name), `x` (cancel).
+- The arg of choose/toggle is the **in-page index**, which the server maps back to `item.key` through `session.keyMap[generation]`, so the callback length is independent of the key length.
+- Add `encodeDialogCallback` / `decodeDialogCallback` in `lib/callback-protocol.ts`, with a unit test asserting that no combination exceeds 64 bytes.
+- The old prefix `tgplus:tui:` is still handled by the old mirroring code during the transition; after stage 5 deletes mirroring, any old-prefix callback is answered with "This button has expired". Reason: old callbacks have no session identity, and after a process restart or a dialog change they would act on the wrong component.
 
-#### 4.7.2 各类型布局
+#### 4.7.2 Layout of each type
 
-| kind | 正文 | 键盘 |
+| kind | Body | Keyboard |
 |---|---|---|
-| select | `<b>标题</b>`，搜索中附 `🔍 词`，`第 x/y 页 · 共 n 项` | 每项一行：`▸`（读取时的终端光标）+ `✓`（当前值）+ 标签（截断 45 字符）；每页 10 项；`◀ 上一页` `下一页 ▶`；`🔍 搜索` `取消`；`extraActions` 每行最多 3 个 |
-| select（multi） | 同上 | 每项前加 `☑/☐`，底部 `⏎ 提交` |
-| settings | `<b>标题</b>`，每项"标签：当前值" | 每项一个按钮；2 个取值的直接切换；多于 2 个的展开为值列表（原地编辑，带"返回"）；有子菜单的进入子菜单视图（显示 `submenu.model`，带"返回"，"返回"发 Esc） |
-| questionnaire | 标题 + 当前问题 + 各题完成状态（`✓`/`·`） | 问题切换行 `◀ 上一题` `下一题 ▶`；当前问题的选项（单选/多选同 select）；`allowCustom` 时 `✏️ 自己输入`；`canSubmit` 时 `⏎ 提交全部`；`取消` |
-| approval | 标题 + 详情 | 每个选项一个按钮 |
-| confirm | 标题 + 消息 | `✅ 是` `❌ 否` |
-| input / editor | 标题 + placeholder/prefill（`<pre>`），提示"直接发送一条消息作为输入" | `取消` |
-| progress | `⏳ 文本` | `取消`（`cancellable` 时） |
-| info | 文本 | `关闭` |
-| snapshot | 截图（`<pre>`）+ "未适配的对话框" | `↑` `↓` `Enter` `Esc` `⌨️ 输入` |
+| select | `<b>Title</b>`, with `🔍 term` appended during search, `Page x/y · n items total` | One row per item: `▸` (the terminal cursor when read) + `✓` (current value) + label (truncated to 45 characters); 10 items per page; `◀ Previous` `Next ▶`; `🔍 Search` `Cancel`; `extraActions` at most 3 per row |
+| select (multi) | Same | `☑/☐` before each item, and `⏎ Submit` at the bottom |
+| settings | `<b>Title</b>`, each item "label: current value" | One button per item; items with 2 values toggle directly; items with more than 2 expand into a value list (edited in place, with "Back"); items with a submenu enter the submenu view (shows `submenu.model`, with "Back", and "Back" sends Esc) |
+| questionnaire | Title + current question + completion state of each question (`✓`/`·`) | A question-switch row `◀ Previous question` `Next question ▶`; the options of the current question (single/multi choice same as select); `✏️ Type my own` when `allowCustom`; `⏎ Submit all` when `canSubmit`; `Cancel` |
+| approval | Title + detail | One button per option |
+| confirm | Title + message | `✅ Yes` `❌ No` |
+| input / editor | Title + placeholder/prefill (`<pre>`), with the prompt "Send a message directly as the input" | `Cancel` |
+| progress | `⏳ text` | `Cancel` (when `cancellable`) |
+| info | Text | `Close` |
+| snapshot | Screenshot (`<pre>`) + "Unsupported dialog" | `↑` `↓` `Enter` `Esc` `⌨️ Type` |
 
-#### 4.7.3 消息生命周期
+#### 4.7.3 Message lifecycle
 
-- **命令 scope** 内的连续对话框和 progress 原地编辑同一条消息（例如 `/login` 的多步）；输出（OutputCapture）作为后续新消息。
-- 会话关闭后，消息改为摘要并移除键盘。
-- **turn** 内的对话框：每个对话框新发一条消息，回复到触发该 turn 的用户消息（`TelegramTurn.sourceMessageId`）。
-- `▸` 只表示读取时的光标位置，不随终端操作更新。
+- Consecutive dialogs and progress within a **command scope** edit the same message in place (for example the multiple steps of `/login`); output (OutputCapture) is sent as subsequent new messages.
+- After a session closes, the message is changed to a summary and the keyboard is removed.
+- Dialogs within a **turn**: each dialog sends a new message, replying to the user message that triggered the turn (`TelegramTurn.sourceMessageId`).
+- `▸` only shows the cursor position at read time and is not updated by terminal operations.
 
-#### 4.7.4 密钥处理
+#### 4.7.4 Secret handling
 
-- 来源：`LoginDialogAdapter`（固定 `secret: true`）；宿主入口明确标记为密钥的输入（包括 Telegram turn 中通过 UI 上下文 `inputSecret` 发起的输入，若宿主提供该方法）。不用标题关键词猜测。
-- 用户回复后立即删除该消息；日志中不记录内容。
-- 原文存入**按 chat + thread 的密钥表** `SecretStore`（这样 Telegram turn 中输入的密钥也能覆盖）。每条记录保留 24 小时；该 chat 执行 `/new` 时清空其记录；进程退出即丢弃，不落盘。
-- **长度不到 8 个字符的密钥不登记**，不参与替换。短串（例如 `b`）全局替换会误伤正常文字。API key、授权码都远长于这个长度。
-- **在源头替换，不在传输层替换。** 传输层收到的是已经转义、转换过的 HTML 和单独的 `richMarkdown`：密钥中含 `& < > "` 时 HTML 里已变成实体，精确匹配不命中；在 HTML 上替换还可能改坏标签。所以替换必须发生在**转成 HTML 之前的原始文本**上，由每个发送源各自调用 `SecretStore.redact(chatKey, text)`：
-  - OutputCapture：截获到的原始字符串，在转换为 HTML/Markdown 之前；
-  - Broker：摘要、info 文本、快照文本，在渲染之前；
-  - `lib/renderer.ts`：assistant 文本、思考、工具参数和输出，在 Markdown → HTML 转换之前（同时作用于 `richMarkdown` 的原始 markdown）。
-  - 传输层**不做**替换。
-- 摘要只写"✅ 已提交（内容已隐藏）"。
-- 局限（写进 README）：
-  - 只能替换与输入**完全相同**的字符串；agent 对密钥做了变形（截断、编码）再输出时无法识别；
-  - 密钥一旦进入会话历史（例如 agent 把它写进了回答），24 小时或 `/new` 之后再被带出时不会被替换；
-  - 不经过上述三个发送源的路径（例如将来新增的发送代码）需要自行调用 `redact`。
-- 这是固定行为，不提供配置开关。
+- Sources: `LoginDialogAdapter` (fixed `secret: true`); input that the host entry explicitly marks as secret (including input started through the UI context's `inputSecret` during a Telegram turn, if the host provides that method). Do not guess from title keywords.
+- Delete the message immediately after the user replies; do not log the content.
+- The original text is stored in `SecretStore`, a **secret table per chat + thread** (so that secrets entered during a Telegram turn are covered too). Each record is kept for 24 hours; when that chat runs `/new` its records are cleared; they are discarded when the process exits and are not written to disk.
+- **Secrets shorter than 8 characters are not registered** and do not take part in replacement. Replacing a short string (for example `b`) globally would hurt normal text. API keys and authorization codes are far longer than this.
+- **Replace at the source, not at the transport layer.** The transport layer receives already escaped, converted HTML and a separate `richMarkdown`: when a secret contains `& < > "` they have become entities in the HTML and an exact match misses; replacing on HTML may also break tags. So replacement must happen on the **original text before conversion to HTML**, with each send source calling `SecretStore.redact(chatKey, text)` itself:
+  - OutputCapture: the intercepted original string, before conversion to HTML/Markdown;
+  - Broker: summaries, info text, snapshot text, before rendering;
+  - `lib/renderer.ts`: assistant text, thinking, tool arguments and output, before the Markdown → HTML conversion (and also applied to the original markdown of `richMarkdown`).
+  - The transport layer does **no** replacement.
+- The summary only says "✅ Submitted (content hidden)".
+- Limitations (to be written in the README):
+  - Only strings **identical** to the input can be replaced; when the agent transforms a secret (truncates, encodes) before outputting it, it cannot be recognized;
+  - Once a secret has entered the session history (for example the agent wrote it into an answer), it is not replaced when brought out again after 24 hours or after `/new`;
+  - Paths that do not go through the three send sources above (for example send code added in the future) must call `redact` themselves.
+- This is fixed behavior, with no config switch.
 
-### 4.8 终端专属命令映射
+### 4.8 Terminal-only command mapping
 
-在 Gateway 优先级第 2 步执行。
+Executed at step 2 of the Gateway priority.
 
-| 命令 | 宿主行为 | Telegram 等价 |
+| Command | Host behavior | Telegram equivalent |
 |---|---|---|
-| `/copy` | 复制最后一条回复到剪贴板 | 不提交。读取会话中最后一条 assistant 文本，直接作为消息发送 |
-| `/export [path]` | 导出到文件，`showStatus("Session exported to: <path>")` | 提交给宿主。包装 `session.exportToHtml` / `exportToJsonl`，取**返回值**作为文件路径，命令结束后把文件作为文档发送到 Telegram（复用现有附件发送）。不从输出文本里解析路径。包装是常驻的实例 hook，但**只在当前命令 scope 的标签是 `/export` 时记录返回值**：`/share` 内部也会调用 `exportToHtml(tmpFile)`，那个临时文件不能被当成导出结果发出去 |
-| `/share` | 上传 gist，输出 URL | 直接提交，输出由 OutputCapture 回传 |
-| `/hotkeys` | 显示终端快捷键 | 不提交。发送插件生成的 Telegram 用法说明 |
-| `/quit`、`/exit` | 退出进程 | Telegram 上二次确认（`✅ 确认退出` / `取消`），确认后提交 |
-| `/debug` | 写调试文件 | 直接提交，输出回传 |
-| `/import` | 从文件导入 | **保留原生处理器**，不提交编辑器（§9 决定 21）；参数照传 |
-| `/reload` | 重新加载扩展/技能/提示词 | **保留原生处理器**（§9 决定 21） |
-| `/fork`、`/clone` | 复制会话/分支 | **保留原生处理器**（§9 决定 21）；需要选择器的步骤由阶段 3 的 Broker 接管 |
-| `/new` | 清空当前会话 | **调用宿主 `ctx.newSession()`**，不提交编辑器（§9 决定 22）；完成后通知并恢复草稿 |
-| 外部编辑器（`ctrl+g`） | 打开 `$EDITOR` | 不支持；editor 对话框只能用"发送一条消息"输入 |
-| 彩蛋命令（`/arminsayshi`、`/dementedelves`） | 动画 | 直接提交，输出回传 |
+| `/copy` | Copy the last reply to the clipboard | Not submitted. Read the last assistant text in the session and send it directly as a message |
+| `/export [path]` | Export to a file, `showStatus("Session exported to: <path>")` | Submitted to the host. Wrap `session.exportToHtml` / `exportToJsonl`, take the **return value** as the file path, and after the command ends send the file to Telegram as a document (reusing the existing attachment sending). The path is not parsed from the output text. The wrapper is a resident instance hook, but **it records the return value only when the current command scope's label is `/export`**: `/share` also calls `exportToHtml(tmpFile)` internally, and that temporary file must not be sent as an export result |
+| `/share` | Upload a gist, output a URL | Submit directly, output sent back by OutputCapture |
+| `/hotkeys` | Show terminal hotkeys | Not submitted. Send the Telegram usage description generated by the plugin |
+| `/quit`, `/exit` | Exit the process | Second confirmation on Telegram (`✅ Confirm quit` / `Cancel`), submitted after confirmation |
+| `/debug` | Write a debug file | Submit directly, output sent back |
+| `/import` | Import from a file | **Keep the native handler**, do not submit through the editor (§9 decision 21); arguments passed through |
+| `/reload` | Reload extensions/skills/prompts | **Keep the native handler** (§9 decision 21) |
+| `/fork`, `/clone` | Copy session/branch | **Keep the native handler** (§9 decision 21); the steps that need a selector are taken over by the stage 3 Broker |
+| `/new` | Clear the current session | **Call the host `ctx.newSession()`**, do not submit through the editor (§9 decision 22); notify and restore the draft when done |
+| External editor (`ctrl+g`) | Open `$EDITOR` | Not supported; an editor dialog can only take input by "sending a message" |
+| Easter egg commands (`/arminsayshi`, `/dementedelves`) | Animation | Submit directly, output sent back |
 
-OMP 的同类命令按同样原则补表：默认"直接提交 + 输出回传"，只有需要确认或终端绑定的才进表。阶段 0 探测到的 OMP 18.12.5 内置注册表共 **87** 个命令（`BUILTIN_SLASH_COMMAND_DEFS`，完整名单见 `docs/host-probe/omp-18.12.5.json` 的 `catalog`）。按行为分类：
+OMP's similar commands are added to the table on the same principle: the default is "submit directly + send output back", and only those that need confirmation or are terminal-bound go in the table. The OMP 18.12.5 built-in registry detected in stage 0 has **87** commands in total (`BUILTIN_SLASH_COMMAND_DEFS`, full list in `catalog` of `docs/host-probe/omp-18.12.5.json`). Classified by behavior:
 
-| OMP 命令 | 宿主行为（阶段 0 探测） | Telegram 等价 |
+| OMP command | Host behavior (stage 0 probe) | Telegram equivalent |
 |---|---|---|
-| `/help`、`/status`、`/usage`、`/stats`、`/context`、`/changelog`、`/debug`、`/skills`、`/plugins`、`/extensions`、`/tools`、`/agents`、`/mcp`、`/plan`、`/session`、`/jobs`、`/todo`、`/memory` | 输出信息或打开只读面板（`showCommandReport`/`showDebugSelector`/`showUsageDashboard`/`showExtensionsDashboard`/`showAgentsDashboard`） | **阶段 3 接入 Gateway**：先实现 `InfoPanelAdapter`/快照面板截获，正文回传；按钮只有"关闭"。阶段 1 不接入，否则只会回 ack（§9 决定 23） |
-| `/model`、`/models`、`/switch`、`/modelpreset`、`/effort`、`/settings`、`/theme`、`/thinking`、`/sessions`、`/resume`、`/pin`、`/tree`、`/fork`、`/login`、`/logout` | 打开选择器（`showModelSelector`/`showSettingsSelector`/`showSessionSelector`/`showTreeSelector`/`showOAuthSelector`）；探测确认这些焦点组件没有可读数据字段 | 直接提交；阶段 3 先按 `SnapshotAdapter` 提供 ↑↓/Enter/Esc，不伪装成原生列表（§4.6.5 OMP 结论） |
-| `/new`、`/fresh`、`/clear`、`/delete`、`/fork`（确认）、`/cleanse`、`/wt`、`/worktree` | 可能弹确认框或要求参数 | 直接提交；确认框按 §4.7.2 的 `confirm` 渲染，按钮"是/否" |
-| `/copy`、`/open` | 读最后一条消息/链接；`/copy` 可能打开 `showCopySelector` | `/copy` 不提交，直接把最后一条 assistant 文本发到 Telegram；`/open` 直接提交，输出回传 |
-| `/export` | 调用 `session.exportToHtml(path, false)`，返回 Promise | 提交；等 Promise 解析，把解析出的文件作为文档发送（探测文件的 `export-resolved`；不解析状态文本） |
-| `/share`、`/collab`、`/join`、`/leave`、`/hub` | 网络/分享流程；可能有进度条 | 直接提交，输出回传；进度条按 `progress` 模型 |
-| `/quit`、`/exit`、`/restart`、`/reload-plugins`、`/marketplace`、`/ssh`、`/browser`、`/record`、`/live`、`/pause`、`/force` | 终端/进程绑定或高风险 | `/quit`、`/exit`、`/restart` 二次确认后提交；其余直接提交，参数照传 |
-| 其余命令（`/goal`、`/guided-goal`、`/loop`、`/queue`、`/prewalk`、`/advisor`、`/ratchet`、`/computer`、`/skillful`、`/extended-context`、`/fast`、`/slow`、`/shake`、`/handoff`、`/seance`、`/btw`、`/tan`、`/omfg`、`/retry`、`/rename`、`/move`、`/add-dir`、`/remove-dir`、`/dirs`、`/git`、`/branch`、`/forget-approvals`、`/dump`、`/trace`、`/security`、`/setup`） | 多为状态切换/输出/参数命令 | 默认直接提交 + 输出回传；有对话框的按入口 kind 走 Broker |
+| `/help`, `/status`, `/usage`, `/stats`, `/context`, `/changelog`, `/debug`, `/skills`, `/plugins`, `/extensions`, `/tools`, `/agents`, `/mcp`, `/plan`, `/session`, `/jobs`, `/todo`, `/memory` | Output information or open a read-only panel (`showCommandReport`/`showDebugSelector`/`showUsageDashboard`/`showExtensionsDashboard`/`showAgentsDashboard`) | **Connected to the Gateway in stage 3**: first implement `InfoPanelAdapter`/snapshot panel interception and send the body back; the only button is "Close". Not connected in stage 1, otherwise it would only reply with an ack (§9 decision 23) |
+| `/model`, `/models`, `/switch`, `/modelpreset`, `/effort`, `/settings`, `/theme`, `/thinking`, `/sessions`, `/resume`, `/pin`, `/tree`, `/fork`, `/login`, `/logout` | Open a selector (`showModelSelector`/`showSettingsSelector`/`showSessionSelector`/`showTreeSelector`/`showOAuthSelector`); the probe confirmed these focused components have no readable data fields | Submit directly; in stage 3 `SnapshotAdapter` first provides ↑↓/Enter/Esc, without pretending to be a native list (§4.6.5 OMP conclusion) |
+| `/new`, `/fresh`, `/clear`, `/delete`, `/fork` (confirmation), `/cleanse`, `/wt`, `/worktree` | May pop up a confirmation box or require arguments | Submit directly; the confirmation box is rendered as `confirm` per §4.7.2, with "Yes/No" buttons |
+| `/copy`, `/open` | Read the last message/link; `/copy` may open `showCopySelector` | `/copy` is not submitted and sends the last assistant text to Telegram directly; `/open` is submitted directly and its output sent back |
+| `/export` | Calls `session.exportToHtml(path, false)`, returning a Promise | Submit; wait for the Promise to resolve and send the resolved file as a document (`export-resolved` in the probe file; status text is not parsed) |
+| `/share`, `/collab`, `/join`, `/leave`, `/hub` | Network/sharing flows; may have a progress bar | Submit directly, output sent back; the progress bar follows the `progress` model |
+| `/quit`, `/exit`, `/restart`, `/reload-plugins`, `/marketplace`, `/ssh`, `/browser`, `/record`, `/live`, `/pause`, `/force` | Terminal/process bound or high risk | `/quit`, `/exit`, `/restart` are submitted after a second confirmation; the rest are submitted directly, arguments passed through |
+| Other commands (`/goal`, `/guided-goal`, `/loop`, `/queue`, `/prewalk`, `/advisor`, `/ratchet`, `/computer`, `/skillful`, `/extended-context`, `/fast`, `/slow`, `/shake`, `/handoff`, `/seance`, `/btw`, `/tan`, `/omfg`, `/retry`, `/rename`, `/move`, `/add-dir`, `/remove-dir`, `/dirs`, `/git`, `/branch`, `/forget-approvals`, `/dump`, `/trace`, `/security`, `/setup`) | Mostly state toggles/output/argument commands | Default is submit directly + send output back; those with dialogs go through the Broker by entry kind |
 
-OMP 的 `showAskDialog` 和 `approve` 不是命令，分别来自 `ask` 工具和工具审批；它们的模型见 §4.6.5 #4/#10。
+OMP's `showAskDialog` and `approve` are not commands; they come from the `ask` tool and tool approval respectively, and their models are in §4.6.5 #4/#10.
 
-### 4.9 Agent turn 中的对话框
+### 4.9 Dialogs inside an agent turn
 
-现状：Telegram turn 期间，`ExtensionUIContext` 被替换为 Telegram 原生 UI（off/commands 模式），或者 `createPromptObserverUi`（full 模式）。
+Current state: during a Telegram turn, `ExtensionUIContext` is replaced with the Telegram native UI (off/commands mode), or `createPromptObserverUi` (full mode).
 
-改为（`on` 模式，桥接可用时）：
+Changed to (`on` mode, when the bridge is available):
 
-1. Telegram turn 期间（以及 Gateway 提交的命令期间，§4.2.6）的 `select/confirm/input/editor/custom/askDialog/approve` **全部委托给宿主 UI**，由宿主在终端绘制。Broker 通过焦点 hook 接管，按 §4.3 推送。`createPromptObserverUi` 改名为 `createHostPromptUi`，简化为：
-   - 提示类方法直接转给宿主，不再触发 `startPromptMirror`；
-   - **`notify` 只转给宿主，不再同时调用 `telegramUi.notify`。** 宿主会把 `notify` 转成 `showStatus`/`showError`/`showWarning`（`showExtensionNotify` L1891），由 OutputCapture 按归属发到 Telegram。这样只有一条发送路径，不会双发。（`off` 模式的 `createRoutedTelegramUi` 不受影响。）
-   - 编辑器类方法（`pasteToEditor`、`setEditorText`、`getEditorText`）在 Telegram turn 期间不做任何事（继承旧文档原则 3）。
-2. 删除 `startPromptMirror` 和 `promptMirrorHook`；`runWithTelegramUi` 的参数改为 `uiMode`（§4.2.6）。
-3. `custom()`：宿主生成组件并给它焦点，Broker 照常接管；认不出来按 §0.1 第 3 条明确告知。不再直接返回 `undefined`。
-4. （v6 删除：桥接不可用时插件启动报错，不再有 `off` 模式，§0.1。）
-5. **删除本地命令镜像。** 现有的 `bridge.onLocalSubmit` 订阅（控制器中 `unsubscribeLocalTui` 一段）会把本地用户在终端敲的 `/` 和 `!` 命令及其结果截图推送到活动 chat，这违反"谁发起，谁显示"（§9 决定 1）。`on` 模式下不再注册该订阅；`off` 模式本来就不推送（该订阅在 `off` 下直接返回）。相应删除 README 和 E2E 中"local-command mirror"的说法与用例。
+1. During a Telegram turn (and during commands submitted by the Gateway, §4.2.6), `select/confirm/input/editor/custom/askDialog/approve` are **all delegated to the host UI**, drawn by the host in the terminal. The Broker takes over through the focus hook and pushes per §4.3. `createPromptObserverUi` is renamed `createHostPromptUi` and simplified to:
+   - Prompt-type methods are passed straight to the host and no longer trigger `startPromptMirror`;
+   - **`notify` is passed only to the host and no longer also calls `telegramUi.notify`.** The host converts `notify` into `showStatus`/`showError`/`showWarning` (`showExtensionNotify` L1891), which OutputCapture sends to Telegram by ownership. This way there is only one send path and nothing is sent twice. (`createRoutedTelegramUi` in `off` mode is unaffected.)
+   - Editor-type methods (`pasteToEditor`, `setEditorText`, `getEditorText`) do nothing during a Telegram turn (inheriting principle 3 of the old document).
+2. Delete `startPromptMirror` and `promptMirrorHook`; the parameter of `runWithTelegramUi` becomes `uiMode` (§4.2.6).
+3. `custom()`: the host produces the component and gives it focus, and the Broker takes over as usual; if it cannot be recognized, say so clearly per §0.1 item 3. It no longer returns `undefined` directly.
+4. (Deleted in v6: when the bridge is unavailable the plugin errors out at startup, and there is no `off` mode, §0.1.)
+5. **Delete local command mirroring.** The existing `bridge.onLocalSubmit` subscription (the `unsubscribeLocalTui` section in the controller) pushes the `/` and `!` commands the local user types in the terminal, together with a screenshot of their results, to the active chat, which violates "whoever initiates, displays" (§9 decision 1). In `on` mode this subscription is no longer registered; `off` mode never pushed (that subscription returns directly under `off`). Delete the matching "local-command mirror" wording and cases in the README and E2E accordingly.
 
-### 4.10 配置
+### 4.10 Configuration
 
-`tuiBridge` 的取值：
+Values of `tuiBridge`:
 
-| 值 | 含义 |
+| Value | Meaning |
 |---|---|
-| `on`（默认） | 本方案的架构 |
-| `off` | **v6 删除**（§0.1 第 4 条）：`tuiBridge` 配置项整体删除，读到旧配置时忽略并在日志里提示一次 |
+| `on` (default) | The architecture of this plan |
+| `off` | **Deleted in v6** (§0.1 item 4): the `tuiBridge` config item is deleted entirely, and when an old config is read it is ignored and a note is logged once |
 
-旧值迁移：未设置、`commands`、`full` → `on`。迁移写在 `lib/config.ts` 的读取逻辑里，不改写配置文件，直到用户下次在 `/tg → Config` 中保存。
+Old value migration: unset, `commands`, `full` → `on`. The migration is written in the read logic of `lib/config.ts` and does not rewrite the config file until the user next saves in `/tg → Config`.
 
-**这是有意的行为变更**：没有改过配置的用户（原缺省 `commands`，交互对话框只读）升级后会直接获得可操作的对话框和"谁发起谁显示"的共享行为。必须在 `CHANGELOG.md` 中以"行为变更"单列说明，并在 README 中更新对应段落。
+**This is an intentional behavior change**: users who never changed the config (the original default was `commands`, with read-only interactive dialogs) get operable dialogs and the shared "whoever initiates, displays" behavior directly after upgrading. It must be listed separately as a "behavior change" in `CHANGELOG.md`, and the matching paragraph in the README must be updated.
 
-不新增其他配置项。
+No other config items are added.
 
-`/tg → Config` 菜单（`lib/commands/tg-menu.ts`、`lib/commands/tg-config.ts` 中读取 `config.tuiBridge` 的地方）只保留 `on`/`off`。
+The `/tg → Config` menu (where `config.tuiBridge` is read in `lib/commands/tg-menu.ts` and `lib/commands/tg-config.ts`) keeps only `on`/`off`.
 
-**v6：删除 `off` 模式和 `tuiBridge` 配置项**（任务 D1），`/tg → Config` 菜单中的对应选项一并删除。
+**v6: the `off` mode and the `tuiBridge` config item are deleted** (task D1), and the matching option in the `/tg → Config` menu is deleted with them.
 
 ---
 
-### 4.11 OMP 结构化通道（v5，2026-10-24）
+### 4.11 OMP structured channel (v5, 2026-10-24)
 
-依据：OMP 18.12.5 源码（MIT，本机只读副本 `/Users/jaly/Documents/project/research/oh-my-pi-18.12.5`）和 2026-10-24 的三次可行性验证（S20 读结构、S21c 结构化操作、S22 collab 请求）。OMP 自带两套结构化接口：**collab**（远程访客回答对话框）和 **TSP**（组件把自己描述成语义树，并接收结构化事件）。OMP 上的对话框一律走这两条通道或输出截获，**不再读画面、不再模拟按键**。pi 一侧不受影响。
+Basis: the OMP 18.12.5 source (MIT, local read-only copy `/Users/jaly/Documents/project/research/oh-my-pi-18.12.5`) and three feasibility checks on 2026-10-24 (S20 read structure, S21c structured operation, S22 collab request). OMP ships two sets of structured interfaces: **collab** (remote guests answering dialogs) and **TSP** (a component describes itself as a semantic tree and receives structured events). Dialogs on OMP always go through these two channels or output interception, and **no longer read the screen and no longer simulate key presses**. The pi side is unaffected.
 
-#### 4.11.1 通道分配
+#### 4.11.1 Channel assignment
 
-| OMP 对话框 | 通道 | 读取 | 操作 |
+| OMP dialog | Channel | Read | Operate |
 |---|---|---|---|
-| 扩展 `select`、`confirm`、`input`、`editor`、`askDialog`、`approve` | 扩展 UI 竞答（§4.12，v7 取代 collab） | 调用参数 | 先回答的一方生效，另一方被关闭 |
-| 扩展 `custom`；内置选择器与仪表盘（`/model`、`/settings`、`/login`、`/resume`、`/tree`、`/agents` 等） | TSP | 焦点组件或其子组件的 `describe(cx)` 语义树 | `handleNativeEvent(event)`：`select`、`activate`、`action`（`confirm`、`close`、`submit`、`cancel` 等）、`change`、`edit` |
-| 报告（`showCommandReport`） | 输出截获（§4.4，S17/S19） | 入口参数 `title` + `body` 渲染 | — |
-| 没有 `describe()` 的组件 | `UnsupportedAdapter`：明确告知 + 取消（决定 47） | — | 取消 = Esc |
+| Extension `select`, `confirm`, `input`, `editor`, `askDialog`, `approve` | Extension UI race (§4.12, v7 replaces collab) | Call arguments | Whichever side answers first wins and the other side is closed |
+| Extension `custom`; built-in selectors and dashboards (`/model`, `/settings`, `/login`, `/resume`, `/tree`, `/agents`, etc.) | TSP | The `describe(cx)` semantic tree of the focused component or its child components | `handleNativeEvent(event)`: `select`, `activate`, `action` (`confirm`, `close`, `submit`, `cancel`, etc.), `change`, `edit` |
+| Reports (`showCommandReport`) | Output interception (§4.4, S17/S19) | Entry argument `title` + `body` rendering | — |
+| Components without `describe()` | `UnsupportedAdapter`: explicit notice + cancel (decision 47) | — | Cancel = Esc |
 
-#### 4.11.2 collab 桥接（v7 作废）
+#### 4.11.2 collab bridge (void in v7)
 
-由 §4.12 扩展 UI 竞答取代（决定 53）。S22 证明 collab 可用，但竞答不占用 `mode.collabHost`，用户自己开 `/collab` 时不需要让位，并且 pi 与 OMP 共用一套做法。
+Replaced by the §4.12 extension UI race (decision 53). S22 proved collab works, but the race does not occupy `mode.collabHost`, so there is no need to yield when the user opens `/collab` themselves, and pi and OMP share one approach.
 
-#### 4.11.3 TSP 适配器（`TspAdapter`）
+#### 4.11.3 TSP adapter (`TspAdapter`)
 
-- **识别**：焦点组件或其子组件（`children`，深度 ≤ 4）同时有 `describe` 和 `handleNativeEvent` 方法 → `TspAdapter`，在 OMP 上优先于其他适配器。
-- **上下文**：`cx = { cols: 80, reduceMotion: true, dark: true, hour12: false, supports: () => true, feature: () => false }`（启用 picker 形式）。
-- **读取**：语义树转换为 `DialogModel`：`picker` → select（项、选中项、可用动作）；`prefs` → settings；卡片 + 列表 → select；表单/输入框 → input；其余 → info（只读文本 + 关闭）。遍历要防循环引用；子节点里不是 `NativeNode` 的对象忽略。
-- **操作**：按钮动作转换为 `NativeUiEvent`（例：选项 → `{ type: "select", key: "picker", item }`，确认 → `{ type: "action", key: "picker", act: "confirm", mods: [] }`，关闭 → `act: "close"`）。文本输入在 T3.2f 验证 `edit` 事件之前，沿用现有输入路径（写入值后提交）。
-- **刷新**：每次操作后重新 `describe()`；终端侧的变化由焦点事件和重绘触发重读。
-- **版本**：见 §4.11.4。
+- **Recognition**: a focused component or one of its child components (`children`, depth ≤ 4) that has both a `describe` and a `handleNativeEvent` method → `TspAdapter`, which takes priority over the other adapters on OMP.
+- **Context**: `cx = { cols: 80, reduceMotion: true, dark: true, hour12: false, supports: () => true, feature: () => false }` (enables the picker form).
+- **Read**: the semantic tree is converted into a `DialogModel`: `picker` → select (items, selected item, available actions); `prefs` → settings; card + list → select; form/input → input; everything else → info (read-only text + close). The traversal must guard against circular references; objects among child nodes that are not a `NativeNode` are ignored.
+- **Operate**: button actions are converted into `NativeUiEvent` (example: option → `{ type: "select", key: "picker", item }`, confirm → `{ type: "action", key: "picker", act: "confirm", mods: [] }`, close → `act: "close"`). Until T3.2f verifies the `edit` event, text input keeps using the existing input path (write the value, then submit).
+- **Refresh**: re-`describe()` after each operation; changes on the terminal side trigger a re-read through focus events and redraws.
+- **Version**: see §4.11.4.
 
-#### 4.11.4 版本约束：不符即失败，不做降级
+#### 4.11.4 Version constraint: fail on mismatch, no degradation
 
-- collab 与 TSP 都是 OMP 内部接口，结构化通道只支持 OMP `18.12.x`（版本取自 `@oh-my-pi/pi-utils` 的 `VERSION`）。
-- **版本不符或读不到版本：直接失败，不退回任何其他做法**（不读画面、不走镜像、不模拟按键）。插件启动时在状态栏和 Telegram 明确提示"不支持的 OMP 版本 <x>，需要 18.12.x"，OMP 的对话框不桥接到 Telegram（用户 2026-10-24 确定："版本不对直接失败，不要搞多套"）。
-- 支持新版本的方式：拉取对应 tag 的 OMP 源码核对接口，跑通 dialogs 与 commands 套件后再放宽版本范围。
+- collab and TSP are both OMP internal interfaces, and the structured channel supports only OMP `18.12.x` (the version is taken from `VERSION` of `@oh-my-pi/pi-utils`).
+- **When the version does not match or cannot be read: fail directly, and do not fall back to any other approach** (no screen reading, no mirroring, no simulated keys). At startup the plugin says clearly in the status bar and in Telegram "Unsupported OMP version <x>, 18.12.x is required", and OMP dialogs are not bridged to Telegram (decided by the user on 2026-10-24: "if the version is wrong just fail, don't do multiple sets").
+- To support a new version: pull the OMP source of the matching tag to check the interfaces, get the dialogs and commands suites passing, and only then widen the version range.
 
-#### 4.11.5 被取代的内容
+#### 4.11.5 What is superseded
 
-- §4.6.6 例外二：OMP 的 select、confirm、approve 改走 collab/TSP 之后删除相应代码（`OMP_FRAME_VERSIONS`、OMP 路径上的 `frameRows`/`frameCursor`、approve 读按键说明）。过渡期保留，T3.2g 删除。
-- 决定 18 作废；决定 25、28、35、36 中关于 OMP 按焦点/按画面识别与操作的部分被取代。决定 30、40（progress 与 loader 的区分）不受影响。
-- broker 保留为会话和 Telegram 渲染的唯一中枢；会话来源从"焦点变化"扩展为"焦点变化 + 竞答请求"（§4.12）。OMP 上的适配器只剩：竞答模型、`TspAdapter`、`infoPanelAdapter`（无 `describe()` 的仪表盘）和 `UnsupportedAdapter`。
+- §4.6.6 exception 2: after OMP's select, confirm and approve move to collab/TSP, delete the matching code (`OMP_FRAME_VERSIONS`, `frameRows`/`frameCursor` on the OMP path, reading the key legend for approve). Kept during the transition and deleted by T3.2g.
+- Decision 18 is void; the parts of decisions 25, 28, 35, 36 about recognizing and operating OMP by focus/by screen are superseded. Decisions 30 and 40 (distinguishing progress from loader) are unaffected.
+- The broker remains the sole hub for sessions and Telegram rendering; the session source is extended from "focus change" to "focus change + race request" (§4.12). The adapters left on OMP are only: the race model, `TspAdapter`, `infoPanelAdapter` (dashboards without `describe()`) and `UnsupportedAdapter`.
 
-### 4.12 扩展 UI 竞答（v7，2026-10-25，pi 与 OMP 共用）
+### 4.12 Extension UI race (v7, 2026-10-25, shared by pi and OMP)
 
-依据：S25（OMP，pi）与 S25b（pi）实测，以及 pi 1.4.0 `core/extensions/types.ts` 的 `ExtensionUIDialogOptions.signal`（"AbortSignal to programmatically dismiss the dialog"）。宿主收到 abort 后关闭自己的对话框，原调用以 `undefined` 结束。
+Basis: measurements in S25 (OMP, pi) and S25b (pi), and `ExtensionUIDialogOptions.signal` in pi 1.4.0 `core/extensions/types.ts` ("AbortSignal to programmatically dismiss the dialog"). After the host receives an abort it closes its own dialog and the original call ends with `undefined`.
 
-- **支持竞答的方法**：pi 1.4.0 为 `select`、`confirm`、`input`（`editor` 不接受 `opts`）；OMP 18.12.x 为 `select`、`confirm`、`input`、`editor`、`askDialog`、`approve`。不接受 signal 的方法（pi 的 `editor`、两个宿主的 `custom`）不竞答，按现有适配器处理（`custom` 按 §4.6.5 明确告知，pi-goal 走例外一）。
-- **拦截位置**：扩展实际拿到的 UI 上下文对象（`extensionRunner.getUIContext()`，FocusTracker 的 `attachEntryHooks` 已经在这里挂钩入口）。
-- **归属**：沿用 broker 的归属规则（§4.3）：只有 Telegram 发起的命令作用域或 Telegram turn 里的对话框才发到 Telegram（谁发起谁显示，决定 42 保留）。
-- **流程**：
-  1. 用调用方的 signal 加上插件自己的 `AbortController`（`AbortSignal.any`）调用宿主方法，终端照常画出对话框；
-  2. 宿主照常画出对话框，broker 照常经焦点变化建会话（一个对话框只有一个会话）；模型取自入口参数（标题、选项、提示文字）；
-  3. Telegram 先回答 → 适配器不再模拟按键，而是经竞答句柄把值直接交给调用方，再 abort 宿主（宿主返回的 `undefined` 丢弃）；
-  4. 终端先回答 → 以宿主的值 resolve，broker 照常撤掉 Telegram 键盘并写摘要；
-  5. 调用方的 signal 先中止 → 宿主关闭对话框，调用以宿主的结果结束；
-  6. 竞答句柄挂在入口记录上（`EntryInfo.race`），由最外层的竞答包装在调用宿主方法之前登记；本地发起的对话框也有句柄，但只有 Telegram 的按钮会用它，所以不改变终端行为。
-- **实测结论**：两个宿主上，插件的答案都送达了扩展，宿主对话框在 abort 后约 2ms 关闭，后续 input、secret、custom、ask 步骤照常通过。S25 里 pi 的 confirm 步骤失败，S25b 查明是测试脚本的问题：`clearDialog()` 在约 400ms 内连发两次 Escape，pi 编辑器为空时这会触发双击 Escape 动作（`doubleEscapeAction`，默认 `tree`，pi 1.4.0 `interactive-mode.ts` 第 3036–3050 行），打开 Session Tree；之后发来的命令被插件按设计拒绝（"终端上有一个未完成的对话框"）。不加竞答的基线运行也打开了 6 次 Session Tree，只是时机没有挡住后续步骤。3B 第一项任务修测试脚本：在测试用的 agent 设置里写 `doubleEscapeAction: "none"`。
+- **Methods that support the race**: in pi 1.4.0 these are `select`, `confirm`, `input` (`editor` does not accept `opts`); in OMP 18.12.x they are `select`, `confirm`, `input`, `editor`, `askDialog`, `approve`. Methods that do not accept a signal (pi's `editor`, and `custom` on both hosts) do not race and are handled by the existing adapters (`custom` is reported clearly per §4.6.5, with pi-goal taking exception 1).
+- **Interception point**: the UI context object the extension actually gets (`extensionRunner.getUIContext()`, where FocusTracker's `attachEntryHooks` already hooks the entries).
+- **Ownership**: follows the broker's ownership rules (§4.3): only dialogs inside a Telegram-initiated command scope or Telegram turn are sent to Telegram (whoever initiates, displays; decision 42 is kept).
+- **Flow**:
+  1. Call the host method with the caller's signal plus the plugin's own `AbortController` (`AbortSignal.any`); the terminal draws the dialog as usual;
+  2. The host draws the dialog as usual, and the broker creates a session through the focus change as usual (one dialog has only one session); the model comes from the entry arguments (title, options, prompt text);
+  3. Telegram answers first → the adapter no longer simulates key presses, but hands the value directly to the caller through the race handle, then aborts the host (the `undefined` the host returns is discarded);
+  4. The terminal answers first → resolve with the host's value, and the broker withdraws the Telegram keyboard and writes the summary as usual;
+  5. The caller's signal aborts first → the host closes the dialog, and the call ends with the host's result;
+  6. The race handle hangs on the entry record (`EntryInfo.race`) and is registered by the outermost race wrapper before the host method is called; locally initiated dialogs also have a handle, but only Telegram's buttons use it, so terminal behavior is not changed.
+- **Measured conclusion**: on both hosts the plugin's answer reached the extension, the host dialog closed about 2ms after the abort, and the subsequent input, secret, custom and ask steps passed as usual. In S25 pi's confirm step failed, and S25b found the cause was the test script: `clearDialog()` sent two Escapes within about 400ms, which, when the pi editor is empty, triggers the double-Escape action (`doubleEscapeAction`, default `tree`, pi 1.4.0 `interactive-mode.ts` lines 3036–3050) and opens the Session Tree; commands sent afterwards were rejected by the plugin by design ("There is an unfinished dialog in the terminal"). A baseline run without the race also opened the Session Tree 6 times, but the timing did not block the later steps. The first 3B task fixes the test script: write `doubleEscapeAction: "none"` in the agent settings used by the tests.
 
-## 5. 文件改动清单
+## 5. List of file changes
 
-### 新增
+### New
 
-| 文件 | 内容 |
+| File | Content |
 |---|---|
-| `lib/tui/host.ts` | `wrapMethod`、mode 捕获（从 `tui-bridge.ts` 迁移）、`HostCapabilities`、实例 hook 的重新安装 |
-| `lib/tui/focus.ts` | FocusTracker、焦点分类、焦点校验定时器、编辑器本地输入标记 |
-| `lib/tui/origin.ts` | OriginTracker、CommandScope |
-| `lib/tui/gateway.ts` | 分发优先级、提交、草稿保护、终端专属映射、`runAsTelegramCommand` |
-| `lib/tui/output.ts` | OutputCapture、脱敏 |
-| `lib/tui/broker.ts` | DialogBroker、外部文本输入注册 |
-| `lib/tui/model.ts` | 类型 |
-| `lib/tui/find-shape.ts` | `findShape` 和形状判断 |
-| `lib/tui/adapters/*.ts` | §4.6.5 各适配器，`index.ts` 定义注册顺序 |
+| `lib/tui/host.ts` | `wrapMethod`, mode capture (migrated from `tui-bridge.ts`), `HostCapabilities`, reinstallation of instance hooks |
+| `lib/tui/focus.ts` | FocusTracker, focus classification, focus validation timer, local editor input marker |
+| `lib/tui/origin.ts` | OriginTracker, CommandScope |
+| `lib/tui/gateway.ts` | Dispatch priority, submit, draft protection, terminal-only mapping, `runAsTelegramCommand` |
+| `lib/tui/output.ts` | OutputCapture, redaction |
+| `lib/tui/broker.ts` | DialogBroker, external text input registration |
+| `lib/tui/model.ts` | Types |
+| `lib/tui/find-shape.ts` | `findShape` and shape checks |
+| `lib/tui/adapters/*.ts` | The adapters of §4.6.5, with `index.ts` defining the registration order |
 | `lib/tui/render-telegram.ts` | Renderer |
-| `lib/tui/snapshot.ts` | 快照兜底 |
-| `lib/tui/probe.ts` | 阶段 0 探测 |
+| `lib/tui/snapshot.ts` | Snapshot fallback |
+| `lib/tui/probe.ts` | Stage 0 probe |
 | `lib/__tests__/tui-*.test.ts` | §7 |
 
-### 修改
+### Modified
 
-| 文件 | 改动 |
+| File | Change |
 |---|---|
-| `lib/controller.ts` | 抽出 `holdThroughEnqueuedTurns`（§4.2.6）；`runWithTelegramUi` 的 `observePrompts` 参数改为 `uiMode`，`createPromptObserverUi` 改名 `createHostPromptUi` 并按 §4.9 修改（`notify` 只转宿主）；`on` 模式不再注册 `bridge.onLocalSubmit` 订阅（§4.9 第 5 条）；导出 `getTopTelegramTurn`；`dispatchNamedCommand` 改为 §4.2.2；消息处理在 `resolveInput` 前加 §4.5.1 的分类；回调分发加 `tgplus:dlg:`；阶段 5 删除镜像代码（`TuiMirror`、`refreshTuiMirror`、`startPromptMirror`、`promptMirrorHook`、`runTuiCommand`、`runTuiCommandInner`、`buildSelectorKeyboard`、`formatSelectorMessage`、`tuiKeyRows`、`advertisedKeys`、`formatTuiSnapshot`、`trimScreenChrome`、`snapshotLinks`、`hasInputPrompt`、`handleTuiCallback`，以及三个命令集合常量） |
-| `lib/telegram-ui.ts` | 新增 `registerExternalInput`（§4.5.1） |
-| `lib/renderer.ts` | 转换前调用 `SecretStore.redact`（§4.7.4） |
-| `lib/tui/secrets.ts`（新增） | `SecretStore`：登记、按 chat 清空、`redact` |
-| `lib/tui-bridge.ts` | 阶段 1 起内容迁移到 `lib/tui/host.ts`、`lib/tui/snapshot.ts`，本文件只保留重新导出，供未迁移的调用方使用；**阶段 5 删除** |
-| `lib/callback-protocol.ts` | dialog 回调编解码 |
-| `lib/config.ts`、`lib/types.ts` | §4.10 |
-| `lib/commands/tg-menu.ts`、`tg-config.ts` | 配置菜单 |
-| `index.ts` | 初始化顺序：`installTuiBridge` → mode 捕获后安装 focus/output/submit hook → Broker 启动 |
-| `README.md`、`CHANGELOG.md` | 新行为与行为变更说明；改写 "Interactive modals are Telegram-only during a Telegram turn" 段落和 "Mirrored dialogs arrive as one Telegram message" 段落 |
-| `docs/telegram-interactions-plan.md` | 顶部注明原则 1 已被本文取代，原则 2-4 仍有效 |
+| `lib/controller.ts` | Extract `holdThroughEnqueuedTurns` (§4.2.6); change the `observePrompts` parameter of `runWithTelegramUi` to `uiMode`, rename `createPromptObserverUi` to `createHostPromptUi` and change it per §4.9 (`notify` goes only to the host); in `on` mode no longer register the `bridge.onLocalSubmit` subscription (§4.9 item 5); export `getTopTelegramTurn`; change `dispatchNamedCommand` to §4.2.2; in message handling add the §4.5.1 classification before `resolveInput`; add `tgplus:dlg:` to callback dispatch; stage 5 deletes the mirroring code (`TuiMirror`, `refreshTuiMirror`, `startPromptMirror`, `promptMirrorHook`, `runTuiCommand`, `runTuiCommandInner`, `buildSelectorKeyboard`, `formatSelectorMessage`, `tuiKeyRows`, `advertisedKeys`, `formatTuiSnapshot`, `trimScreenChrome`, `snapshotLinks`, `hasInputPrompt`, `handleTuiCallback`, and the three command-set constants) |
+| `lib/telegram-ui.ts` | Add `registerExternalInput` (§4.5.1) |
+| `lib/renderer.ts` | Call `SecretStore.redact` before conversion (§4.7.4) |
+| `lib/tui/secrets.ts` (new) | `SecretStore`: register, clear per chat, `redact` |
+| `lib/tui-bridge.ts` | From stage 1 the content migrates to `lib/tui/host.ts` and `lib/tui/snapshot.ts`, and this file keeps only re-exports for callers not yet migrated; **deleted in stage 5** |
+| `lib/callback-protocol.ts` | dialog callback encoding/decoding |
+| `lib/config.ts`, `lib/types.ts` | §4.10 |
+| `lib/commands/tg-menu.ts`, `tg-config.ts` | Config menu |
+| `index.ts` | Initialization order: `installTuiBridge` → after the mode is captured install the focus/output/submit hooks → Broker starts |
+| `README.md`, `CHANGELOG.md` | Description of new behavior and behavior changes; rewrite the paragraph "Interactive modals are Telegram-only during a Telegram turn" and the paragraph "Mirrored dialogs arrive as one Telegram message" |
+| `docs/telegram-interactions-plan.md` | Note at the top that principle 1 is superseded by this document and principles 2-4 remain in force |
 
-### 删除（阶段 5）
+### Deleted (stage 5)
 
-- `lib/tui-selector.ts` 和 `lib/__tests__/tui-selector.test.ts`
+- `lib/tui-selector.ts` and `lib/__tests__/tui-selector.test.ts`
 - `lib/tui-bridge.ts`
 
 ---
 
-## 6. 分阶段实施
+## 6. Phased implementation
 
-每个阶段可单独合并，保持 `npm run typecheck`、`npm test` 通过。
+Each stage can be merged separately, keeping `npm run typecheck` and `npm test` passing.
 
-### 阶段 0：宿主探测（实现前必做）
+### Stage 0: host probe (must be done before implementation)
 
-目的：取得 OMP 的真实方法名、参数形状和组件字段，替代"在二进制里搜到了字符串"这种未经验证的结论；同时复核 pi 的焦点对象。
+Purpose: obtain OMP's real method names, argument shapes and component fields, replacing unverified conclusions such as "found the string in the binary"; also recheck pi's focused objects.
 
-- `lib/tui/probe.ts`：环境变量 `PITG_PROBE=<输出文件>` 打开时：
-  - 记录 `InteractiveMode.prototype` 的全部方法名、mode 实例和 `mode.ui` 实例的自有字段名；
-  - 包装 §4.1.2 表中所有入口方法，记录每次调用的参数（对象只记录字段名和基本类型值，不记录大对象）；
-  - 包装 `ui.setFocus` 和 `showOverlay`，每次记录焦点对象的 `constructor.name`、自有字段名，以及 `findShape` 的命中结果。
-- 用现有的 tmux + mock E2E 环境（`scripts/e2e/`）在 OMP 和 pi 上依次执行全部命令，以及触发一次 `ask`、一次扩展 `select/input`、一次 `approve`。
-- 安装 pi-goal（`@capyup/pi-goal`），用 mock provider 依次触发确认框、`goal_question`、`goal_questionnaire`，记录这三种 custom 组件的字段，据此填写 §4.6.6 的结论。
-- 额外记录：OMP 的默认编辑器字段名、当前焦点的读法、主循环相关字段（对应 pi 的 `pendingUserInputs`、`onInputCallback`）、聊天区中 agent 渲染组件的构造器名和字段。
-- 产出 `docs/host-probe/omp-18.12.5.json`、`docs/host-probe/pi-0.81.1.json`，并据此修订 §4.1.2、§4.6.5 的 OMP 部分和 §4.8 的 OMP 命令表。
-- **验收**：两份探测文件已提交；本文 OMP 相关的"待探测"项全部有结论。
+- `lib/tui/probe.ts`: when the environment variable `PITG_PROBE=<output file>` is set:
+  - record all method names of `InteractiveMode.prototype` and the own field names of the mode instance and the `mode.ui` instance;
+  - wrap all entry methods in the §4.1.2 table, recording the arguments of each call (for objects only field names and primitive values, not large objects);
+  - wrap `ui.setFocus` and `showOverlay`, recording for each the `constructor.name` and own field names of the focused object, and the hit result of `findShape`.
+- Using the existing tmux + mock E2E environment (`scripts/e2e/`), run all commands in turn on OMP and pi, and trigger one `ask`, one extension `select/input`, and one `approve`.
+- Install pi-goal (`@capyup/pi-goal`), use the mock provider to trigger in turn the confirmation box, `goal_question` and `goal_questionnaire`, record the fields of these three custom components, and fill in the conclusion of §4.6.6 accordingly.
+- Additionally record: OMP's default editor field name, how the current focus is read, the main-loop related fields (matching pi's `pendingUserInputs`, `onInputCallback`), and the constructor names and fields of agent-rendered components in the chat area.
+- Produce `docs/host-probe/omp-18.12.5.json` and `docs/host-probe/pi-0.81.1.json`, and revise §4.1.2, the OMP part of §4.6.5 and the OMP command table of §4.8 accordingly.
+- **Acceptance**: the two probe files are committed; all OMP-related "to be probed" items in this document have a conclusion.
 
-**阶段 0 执行结果（2026-10-23）**：两份文件已生成并提交（`docs/host-probe/pi-0.81.1.json`、`docs/host-probe/omp-18.12.5.json`）。pi 0.81.1 用 `scripts/e2e/run-probe.mjs` 跑完命令+扩展对话框，pi-goal 0.6.0 的三种形态单独跑；OMP 18.12.5 跑完 87 个内置命令、扩展 `select/confirm/input/editor/custom`、`ask` 单问/多问、`approve`。关键结论：
+**Stage 0 execution result (2026-10-23)**: the two files were generated and committed (`docs/host-probe/pi-0.81.1.json`, `docs/host-probe/omp-18.12.5.json`). pi 0.81.1 ran the commands + extension dialogs with `scripts/e2e/run-probe.mjs`, and the three shapes of pi-goal 0.6.0 were run separately; OMP 18.12.5 ran 87 built-in commands, extension `select/confirm/input/editor/custom`, `ask` single/multi question, and `approve`. Key conclusions:
 
-1. **pi 焦点**：没有 `getFocused()`；`ui.focusedComponent` 是数据字段且滞后一次事件；overlay 的 `setFocusInternal` 收到 `{component, overlayFocusRestore}`。焦点事件是权威。
-2. **OMP 焦点**：`ui.getFocused()` 可用；所有对话框都经过 `setFocus`。
-3. **OMP 入口**：扩展入口在 UI 上下文（`select`/`confirm`/`input`/`editor`/`custom`），工具上下文另有 `askDialog`/`approve`；只包 mode 原型会漏。工具上下文的方法源码已记录（`askDialog`/`approve` 的签名）。
-4. **OMP 内置选择器不透明**：model/settings/session/tree/oauth 的焦点组件没有 items/selectedIndex 字段（部分只有 `children` 或空），阶段 3 只能先按快照提供按键；这是 §11 风险表的"部分对话框退化为快照"。
-5. **OMP ask/approve**：ask 的问题/选项在入口参数里，状态在闭包；approve 的入口参数是 `{full,compact,session}`。两者都只能靠按键 + 重渲染确认，不能用字段读状态。
-6. **pi-goal**：三种形态都是 `{render,invalidate,handleInput}` 的 Object，无字段；§4.6.6 的例外按 0.6.x 收窄启用。
-7. **OMP 聊天区组件**：只有 `children`，构造器名压缩；白名单见 §4.4。
-8. **导出**：`exportToHtml`/`exportToJsonl` 返回 Promise，路径取解析值，不是同步返回值。
+1. **pi focus**: there is no `getFocused()`; `ui.focusedComponent` is a data field that lags by one event; the overlay's `setFocusInternal` receives `{component, overlayFocusRestore}`. The focus event is authoritative.
+2. **OMP focus**: `ui.getFocused()` is usable; all dialogs go through `setFocus`.
+3. **OMP entries**: extension entries are in the UI context (`select`/`confirm`/`input`/`editor`/`custom`), and the tool context additionally has `askDialog`/`approve`; wrapping only the mode prototype would miss them. The source of the tool context methods has been recorded (the signatures of `askDialog`/`approve`).
+4. **OMP built-in selectors are opaque**: the focused components of model/settings/session/tree/oauth have no items/selectedIndex fields (some have only `children` or are empty), so stage 3 can only provide keys by snapshot first; this is the "some dialogs degrade to snapshots" in the §11 risk table.
+5. **OMP ask/approve**: ask's questions/options are in the entry arguments and its state is in a closure; approve's entry arguments are `{full,compact,session}`. Both can only be confirmed by key presses + re-rendering, and state cannot be read from fields.
+6. **pi-goal**: all three shapes are Objects of `{render,invalidate,handleInput}` with no fields; the exception in §4.6.6 is enabled narrowed to 0.6.x.
+7. **OMP chat-area components**: only `children`, with minified constructor names; the whitelist is in §4.4.
+8. **Export**: `exportToHtml`/`exportToJsonl` return a Promise, and the path is the resolved value, not a synchronous return value.
 
-### 阶段 1：基础设施 + 只输出命令
+### Stage 1: infrastructure + output-only commands
 
-- `host.ts`、`focus.ts`、`origin.ts`、`gateway.ts`、`output.ts`。
-- Gateway 只对**静态白名单**中的 pi 命令启用：附录 A"只有输出"中可提交且不替换运行时的命令。白名单外的命令仍走旧路径（含旧镜像）。白名单内的命令**绝不**进入 `runTuiCommand`。`/new` 走 `ctx.newSession()`；`/reload`、`/fork`、`/clone`、`/import` 保留原生处理器（§9 决定 21、22）。OMP 的同类命令在阶段 3 接入（§9 决定 23）。
-- 本阶段不实例化 Broker；FocusTracker 只为 scope 结束判断和 OutputCapture 服务。新旧两套 hook 并存时，新 hook 是被动的（只观察，不发 Telegram 对话框消息），对话框画面仍由旧镜像负责。
-- 修复草稿覆盖问题（白名单命令）。
-- **验收**：pi 上 `/session`、`/compact`、`/name x`、`/new`、`/changelog`、`/share`、`/export` 从 Telegram 执行，宿主状态与终端执行一致，输出完整回传（含 `/compact` 完成后的结果），本地草稿不丢。**OMP 的同类命令不在本阶段验收范围，移到阶段 3。**
+- `host.ts`, `focus.ts`, `origin.ts`, `gateway.ts`, `output.ts`.
+- The Gateway is enabled only for pi commands on a **static whitelist**: the commands in the "output only" part of Appendix A that can be submitted and do not replace the runtime. Commands off the whitelist still go through the old path (including old mirroring). Commands on the whitelist **never** enter `runTuiCommand`. `/new` goes through `ctx.newSession()`; `/reload`, `/fork`, `/clone`, `/import` keep the native handlers (§9 decisions 21, 22). OMP's similar commands are connected in stage 3 (§9 decision 23).
+- This stage does not instantiate the Broker; FocusTracker serves only the scope-end judgment and OutputCapture. While the old and new hooks coexist, the new hooks are passive (observe only, send no Telegram dialog messages), and the dialog screen is still handled by the old mirroring.
+- Fix the draft overwrite problem (for whitelisted commands).
+- **Acceptance**: on pi, `/session`, `/compact`, `/name x`, `/new`, `/changelog`, `/share`, `/export` run from Telegram give the same host state as running in the terminal, the output is sent back in full (including the result after `/compact` completes), and the local draft is not lost. **OMP's similar commands are not in this stage's acceptance scope and move to stage 3.**
 
-### 阶段 2：Broker + 扩展对话框
+### Stage 2: Broker + extension dialogs
 
-- `broker.ts`、`model.ts`、`render-telegram.ts`、`find-shape.ts`；适配器 1-4、10、11、12、13。
-- §4.2.6 的持有逻辑抽取与接入；§4.5.1 的文本路由；§4.9。
-- **验收**：
-  - mock provider 触发 `ask`（现有 E2E 场景）和扩展 `select/confirm/input`：分别从 Telegram 和终端作答，另一端都自动关闭，agent 拿到的答案一致；
-  - 从 Telegram 发 `/goals <topic>`，`propose_goal_draft` 的确认出现在 Telegram；
-  - OMP `ask` 多问题从 Telegram 完整作答（走插件原有的 Telegram 作答路径即可，broker 化见 T3.0 与 §9 决定 25）。
+- `broker.ts`, `model.ts`, `render-telegram.ts`, `find-shape.ts`; adapters 1-4, 10, 11, 12, 13.
+- Extraction and hookup of the holding logic of §4.2.6; the text routing of §4.5.1; §4.9.
+- **Acceptance**:
+  - mock provider triggers `ask` (the existing E2E scenario) and extension `select/confirm/input`: answered from Telegram and from the terminal respectively, the other side closes automatically in both cases, and the answer the agent gets is the same;
+  - sending `/goals <topic>` from Telegram, the confirmation of `propose_goal_draft` appears in Telegram;
+  - OMP `ask` multi-question can be fully answered from Telegram (going through the plugin's original Telegram answering path is enough; brokering is in T3.0 and §9 decision 25).
 
 
-**实测（2026-10-24，`npm run test:e2e:dialogs`，README 有该套件的说明）**
+**Measurements (2026-10-24, `npm run test:e2e:dialogs`, the README describes this suite)**
 
-- pi 全绿：`select`/`confirm`/`input`/secret/`custom` 全部走 broker 方言，Telegram 与终端任一端都能作答，先作答者生效、另一侧键盘被撤销。
-- OMP 此前从来不是 broker 方言，根因与 §4.6 无关：宿主把本包解析成两个模块实例，先打补丁的那份看到 TUI 模式，服务聊天的那份却看到 `host: unknown`，于是 `tuiBridge: full` 对它等于不存在。已修：捕获状态挂到进程级键上共享（`lib/tui-bridge.ts`）。
-- 共享后实测：OMP 的 confirm/custom 变成 broker 方言且"终端先作答"通过；但 select/输入/`ask` 组件渲染进 overlay 且不夺取焦点，FocusTracker 只看到编辑器与 `progress`，适配器读不到条目，Telegram 只剩方向键。因此 `hostOwnsPrompts()` 暂时只对 pi 打开，OMP 的这些对话框继续由插件在 Telegram 作答。阶段 2 收尾补充：只关 `hostOwnsPrompts()` 不够，broker 仍在 OMP 上跟踪并接管交互（命令套件从 132/132 掉到 119/126，`/exit`、`/tg-cwd-disconnect` 失败），所以 broker 与它共用同一个宿主开关，OMP 整体回到收口前的行为（决定 27）。
-- 剩余 OMP 缺口 = §4.6 适配器要认识 OMP 组件。实测结论与原先设想不同：不需要去 overlay 子树里猜字段——OMP 的 hook 对话框**确实**夺焦点，缺的是①分类（行标签在私有字段、类名被压缩，形状判定落空）与②读取（`render(80)` 去色帧里解析标题/行/`❯` 当前行）。两者落地后 `hostOwnsPrompts` 里的主机限制已删除，OMP 与 pi 共用同一个开关（决定 28）。
-- 宿主模式下 Telegram 发起的命令拿的是**宿主自己的 context**(`setUIContext` 换的是 runner 的 UI,命令上下文是它的代理)。插件独有的 UI 成员在宿主侧不存在,代理必须回落给插件实现:嵌套 `menu` 键盘(以及它的逆操作 `closeMenu`)是插件控件,`/tg` 的管理界面靠它在宿主模式下逐层展开,否则 `ctx.ui.menu` 是 `undefined`,菜单直接消失。
-- 插件自己的管理命令(`/tg` 系列)背后没有宿主组件,不参与 broker;宿主模式改变的只是宿主组件与扩展对话框由谁作答。
-- 入口 hook 必须打在**宿主的 UI context**上：`attachEntryHooks` 原来只在捕获宿主时跑一次，读的是"当时 runner 里装着的 context"。如果那一刻插件的交换正生效，宿主的真 context 就被跳过了，之后所有对话框都没有 `EntryInfo`，适配器只能给快照（`modelKind:"snapshot"`），输入类对话框变成一堆方向键、按键送不进去。现在代理暴露 `__piTelegramPlusRoutedBaseUi` 供解包，并且 FocusTracker 每秒的 verify tick 重跑一次 hook（`hookEntryMethods` 按对象打标记，重复调用无副作用）。
+- pi all green: `select`/`confirm`/`input`/secret/`custom` all go through the broker dialect, either Telegram or the terminal can answer, whoever answers first wins and the keyboard on the other side is withdrawn.
+- OMP had never been in the broker dialect before; the root cause is unrelated to §4.6: the host resolves this package into two module instances, and the one that patched first sees the TUI mode while the one serving the chat sees `host: unknown`, so `tuiBridge: full` effectively did not exist for it. Fixed: the capture state is hung on a process-level key and shared (`lib/tui-bridge.ts`).
+- Measured after sharing: OMP's confirm/custom become the broker dialect and "terminal answers first" passes; but the select/input/`ask` components render into an overlay and do not take focus, FocusTracker sees only the editor and `progress`, the adapters cannot read the entries, and Telegram is left with only arrow keys. So `hostOwnsPrompts()` was opened only for pi for now, and these OMP dialogs continue to be answered by the plugin in Telegram. Stage 2 closing addition: turning off only `hostOwnsPrompts()` is not enough, because the broker still tracks and takes over interaction on OMP (the commands suite dropped from 132/132 to 119/126, with `/exit` and `/tg-cwd-disconnect` failing), so the broker shares the same host switch with it, and OMP as a whole returns to its behavior before the closing (decision 27).
+- The remaining OMP gap = the §4.6 adapters must recognize OMP components. The measured conclusion differs from the original idea: there is no need to guess fields in the overlay subtree. OMP's hook dialogs **do** take focus, and what is missing is ① classification (row labels are in private fields and class names are minified, so shape checks miss) and ② reading (parse the title/rows/`❯` current row from the color-stripped `render(80)` frame). After both landed, the host restriction in `hostOwnsPrompts` was deleted, and OMP and pi share the same switch (decision 28).
+- In host mode a command initiated from Telegram gets the **host's own context** (`setUIContext` swaps the runner's UI, and the command context is a proxy of it). UI members unique to the plugin do not exist on the host side, so the proxy must fall back to the plugin implementation: the nested `menu` keyboard (and its inverse `closeMenu`) are plugin controls, and the management interface of `/tg` relies on them to expand level by level in host mode; otherwise `ctx.ui.menu` is `undefined` and the menu disappears.
+- The plugin's own management commands (the `/tg` family) have no host component behind them and do not take part in the broker; what host mode changes is only who answers the host components and extension dialogs.
+- The entry hooks must go on the **host's UI context**: `attachEntryHooks` originally ran only once when capturing the host, reading "the context installed in the runner at that moment". If the plugin's swap was in effect at that moment, the host's real context was skipped, and afterwards no dialog had an `EntryInfo`, so adapters could only give snapshots (`modelKind:"snapshot"`), and input-type dialogs became a pile of arrow keys with no way to send keys in. Now the proxy exposes `__piTelegramPlusRoutedBaseUi` for unwrapping, and FocusTracker's once-per-second verify tick re-runs the hook (`hookEntryMethods` marks per object, so repeated calls have no side effects).
 
-### 阶段 3：列表、设置、登录
+### Stage 3: lists, settings, login
 
-**v6 拆分**：阶段 3 拆为 3A 清理与对齐 → 3B 扩展对话框 → 3C OMP 内置选择器 → 3D pi 内置选择器 → 3E 收尾验收，3A 再拆为 4 个检查点，详见任务清单"阶段 3 拆分"。下面的原始描述保留作背景。
+**v6 split**: stage 3 is split into 3A cleanup and alignment → 3B extension dialogs → 3C OMP built-in selectors → 3D pi built-in selectors → 3E final acceptance, and 3A is split again into 4 checkpoints; see "Stage 3 breakdown" in the task list. The original description below is kept as background.
 
-- 适配器 5-9；所有命令切换到 Gateway；删除三个命令集合常量。
-- **OMP 只有输出的命令接入 Gateway**：先实现 `InfoPanelAdapter`/快照面板截获，覆盖 `showCommandReport`、`showDebugSelector`、`showUsageDashboard`、`showExtensionsDashboard`、`showAgentsDashboard` 等全屏报告；再把 `/status`、`/usage`、`/stats`、`/context`、`/changelog`、`/help`、`/skills`、`/plugins`、`/extensions`、`/tools`、`/agents`、`/mcp`、`/plan`、`/jobs`、`/todo`、`/memory` 加入 OMP 白名单。面板必须能在 Telegram 看到正文，不能只回 ack。
-- **验收**：`/model`（含搜索、翻页、当前值）、`/resume`、`/settings`（含切换值、子菜单）、`/login`（多步，含 API key 输入且 Telegram 上不出现明文）、`/logout`、`/scoped-models`、`/tree`、`/fork`（编辑器文本发到 Telegram，本地草稿恢复）在 pi 和 OMP 上可用，结果状态与终端一致；**OMP 的只有输出命令从 Gateway 执行且面板正文被截获**。
+- Adapters 5-9; switch all commands to the Gateway; delete the three command-set constants.
+- **OMP output-only commands connected to the Gateway**: first implement `InfoPanelAdapter`/snapshot panel interception, covering full-screen reports such as `showCommandReport`, `showDebugSelector`, `showUsageDashboard`, `showExtensionsDashboard`, `showAgentsDashboard`; then add `/status`, `/usage`, `/stats`, `/context`, `/changelog`, `/help`, `/skills`, `/plugins`, `/extensions`, `/tools`, `/agents`, `/mcp`, `/plan`, `/jobs`, `/todo`, `/memory` to the OMP whitelist. The panel body must be visible in Telegram and must not reply with only an ack.
+- **Acceptance**: `/model` (with search, paging, current value), `/resume`, `/settings` (with value toggling, submenu), `/login` (multi-step, including API key input, with no plaintext appearing in Telegram), `/logout`, `/scoped-models`, `/tree`, `/fork` (editor text sent to Telegram, local draft restored) work on pi and OMP, and the resulting state matches the terminal; **OMP's output-only commands are executed from the Gateway and the panel body is intercepted**.
 
-### 阶段 4：终端专属命令与收尾
+### Stage 4: terminal-only commands and wrap-up
 
-- §4.8 映射表全部落地；快照兜底在未知组件上验证。
-- **验收**：`/copy`、`/export`、`/hotkeys`、`/quit` 的等价行为；构造一个未知 custom 组件，Telegram 能看到截图并能取消。
+- The §4.8 mapping table all lands; the snapshot fallback is verified on an unknown component.
+- **Acceptance**: the equivalent behavior of `/copy`, `/export`, `/hotkeys`, `/quit`; construct an unknown custom component, and Telegram can see a screenshot and can cancel.
 
-### 阶段 5：清理
+### Stage 5: cleanup
 
-- 删除旧镜像代码、`tui-selector.ts`、`tui-bridge.ts`；旧回调前缀改为"已过期"；配置迁移；文档更新。
-- **验收**：§7.2 的 parity 测试在 pi `1.4.0` 和 OMP `18.12.x` 上通过，"待迁移"清单为空（§0.1）。
-
----
-
-## 7. 测试方案
-
-### 7.1 单元测试
-
-- **假宿主**（`lib/__tests__/_fake-host.ts`）：最小 mode 对象，含 `ui`（`setFocus`、`showOverlay`、`hideOverlay`、`requestRender`、`focusedComponent`/`getFocused`、可模拟的 `setFocusInternal` 绕过路径）、`editor`（`getText`、`setText`、`handleInput`、`onSubmit`）、`chatContainer`、`session`、`showStatus`/`showError`/`showWarning`。命令处理器分别模拟 await 型和立即返回型。
-- **真实组件契约测试**：pi 的组件类可从 `@earendil-works/pi-coding-agent` import。每个适配器至少用一个真实实例测 `detect/read/act`（包括 `SettingsSelectorComponent` 的子菜单、`SessionSelectorComponent` 的嵌套 `sessionList`）。依赖太重无法实例化的，测字段形状并在测试中写明原因。作用：宿主升级改字段时测试先失败。
-- **焦点分类**：editor / inert / progress / dialog；`setFocusInternal` 绕过时靠校验发现关闭。
-- **Broker 状态机**：Telegram 先操作、终端先操作、回调在焦点离开后到达、generation 过期、按 key 找不到、`/stop`、对话框被替换、子菜单嵌套。
-- **scope 结束**：await 型长任务的完成输出不丢；立即返回型对话框期间 scope 不结束；多步对话框之间短暂回到编辑器不结束；30 分钟上限。
-- **草稿保护**：§4.2.4 表中四种情况各一个用例。
-- **文本路由**：§4.5.1 表中四种文本各一个用例；不同 thread 不受影响。
-- **密钥**：输入被删除、摘要不含明文；OutputCapture、Broker、renderer 三个来源的文本都被脱敏；Telegram turn 中输入的密钥同样生效；含 `& < >` 的密钥被正确替换且 HTML 结构完好；短于 8 字符的输入不登记；`/new` 后清空。
-- **对话框守卫**：Broker 会话或原生输入流活动时，`/tg`、`/cwd` 和宿主命令被拒绝，`/stop`、`/status` 放行。
-- **文本输入**：回复其他消息的文本不被当作输入。
-- **消息复用**：命令 scope 内的多步对话框和 progress 复用同一条消息；turn 内的对话框各自新发；progress 结束后消息被改为完成状态并移除键盘。
-- **内容域**：Telegram turn 期间宿主加入的 assistant/tool 组件不被截获（renderer 已发送）；`notify` 在 `on` 模式下只发一次；`chatContainer.clear()` 后的历史重建不被截获；单个 scope 超过 20 个组件时被折叠。
-- **扩展命令完成信号**：空闲路径下 `onSubmit` 先返回、`session.prompt` 稍后开始并弹出对话框，scope 不提前结束；主循环忙、文本在 `pendingUserInputs` 中排队超过 2 秒时仍能匹配；流式路径中 `session.prompt` 在 `onSubmit` 内同步调用时能被匹配；内置命令（`/session`）提交后不等待，下一条 Telegram 命令不会被误判为 busy。
-- **输出内容域**：agent 流式时从 Telegram 发 `/session`，信息块被截获；同时 assistant/tool 组件不被截获。
-- **hook 重新安装**：替换 `mode.editor`（模拟 `setCustomEditorComponent`）和 `mode.session` 后，tick 能重新包装，提交、本地输入标记和 `session.prompt` 匹配继续有效。
-- **entry 关联**：`showExtensionConfirm` 嵌套 `showExtensionSelector` 时 kind 为 `confirm`；异步 custom 工厂延迟 1 秒返回时 entry 仍能关联。
-- **分发优先级**：`pluginOnly`、映射表、宿主内置（含 `/debug` 重名）、兜底、拒绝。
-- **回调编码**：所有组合 ≤ 64 字节。
-
-### 7.2 E2E parity（改造 `scripts/e2e/audit-parity.mjs`）
-
-现在的判定是"Telegram 收到的是不是纯文本或无效按钮"。改为**状态等价**：
-
-1. 每个命令在两个全新的隔离宿主中分别执行：A 用 tmux 发按键在终端操作，B 从 mock Telegram 发命令并点按钮，两边执行相同的操作序列。
-2. 执行后导出宿主状态快照：当前模型、思考档位、会话文件、settings 文件、认证文件中对应字段。
-3. A 和 B 的快照必须一致。
-4. 额外断言：Telegram 上列出的选项集合等于组件的完整列表。
-
-保留现有的 Bot API 契约校验（`scripts/e2e/telegram-contract.mjs`）。
+- Delete the old mirroring code, `tui-selector.ts`, `tui-bridge.ts`; the old callback prefix becomes "expired"; config migration; documentation update.
+- **Acceptance**: the parity test of §7.2 passes on pi `1.4.0` and OMP `18.12.x`, and the "to be migrated" list is empty (§0.1).
 
 ---
 
-## 8. 风险与降级
+## 7. Test plan
 
-| 风险 | 影响 | 缓解 |
+### 7.1 Unit tests
+
+- **Fake host** (`lib/__tests__/_fake-host.ts`): a minimal mode object containing `ui` (`setFocus`, `showOverlay`, `hideOverlay`, `requestRender`, `focusedComponent`/`getFocused`, a simulable `setFocusInternal` bypass path), `editor` (`getText`, `setText`, `handleInput`, `onSubmit`), `chatContainer`, `session`, `showStatus`/`showError`/`showWarning`. The command handlers simulate the await type and the return-immediately type respectively.
+- **Real component contract tests**: pi's component classes can be imported from `@earendil-works/pi-coding-agent`. Each adapter tests `detect/read/act` with at least one real instance (including the submenu of `SettingsSelectorComponent` and the nested `sessionList` of `SessionSelectorComponent`). For those whose dependencies are too heavy to instantiate, test the field shape and state the reason in the test. Purpose: when a host upgrade changes fields, the test fails first.
+- **Focus classification**: editor / inert / progress / dialog; a `setFocusInternal` bypass is found to close by validation.
+- **Broker state machine**: Telegram operates first, terminal operates first, a callback arrives after the focus has left, generation expired, not found by key, `/stop`, dialog replaced, submenu nesting.
+- **Scope end**: the completion output of long await-type tasks is not lost; the scope does not end during a return-immediately dialog; it does not end when briefly returning to the editor between multi-step dialogs; the 30-minute cap.
+- **Draft protection**: one case for each of the four situations in the table of §4.2.4.
+- **Text routing**: one case for each of the four kinds of text in the table of §4.5.1; other threads are unaffected.
+- **Secrets**: the input is deleted and the summary contains no plaintext; the text from all three sources, OutputCapture, Broker and renderer, is redacted; secrets entered during a Telegram turn also take effect; secrets containing `& < >` are replaced correctly with the HTML structure intact; input shorter than 8 characters is not registered; cleared after `/new`.
+- **Dialog guard**: while a Broker session or a native input flow is active, `/tg`, `/cwd` and host commands are rejected, and `/stop`, `/status` pass.
+- **Text input**: text replying to another message is not treated as input.
+- **Message reuse**: multi-step dialogs and progress within a command scope reuse the same message; dialogs within a turn each send a new one; after progress ends the message is changed to the finished state and the keyboard is removed.
+- **Content domain**: assistant/tool components the host adds during a Telegram turn are not intercepted (already sent by the renderer); `notify` is sent only once in `on` mode; history rebuild after `chatContainer.clear()` is not intercepted; a single scope with more than 20 components is collapsed.
+- **Extension command completion signal**: on the idle path `onSubmit` returns first and `session.prompt` starts shortly after and pops up a dialog, and the scope does not end early; when the main loop is busy and the text queues in `pendingUserInputs` for over 2 seconds it still matches; in the streaming path, when `session.prompt` is called synchronously inside `onSubmit` it can be matched; after a built-in command (`/session`) is submitted there is no waiting, and the next Telegram command is not misjudged as busy.
+- **Output content domain**: while the agent is streaming, `/session` sent from Telegram has its info block intercepted; at the same time assistant/tool components are not intercepted.
+- **Hook reinstallation**: after replacing `mode.editor` (simulating `setCustomEditorComponent`) and `mode.session`, the tick can re-wrap, and submit, the local input marker and `session.prompt` matching keep working.
+- **Entry association**: when `showExtensionConfirm` nests `showExtensionSelector` the kind is `confirm`; when an async custom factory returns after a 1-second delay the entry can still be associated.
+- **Dispatch priority**: `pluginOnly`, the mapping table, host built-in (including the `/debug` name clash), fallback, rejection.
+- **Callback encoding**: all combinations ≤ 64 bytes.
+
+### 7.2 E2E parity (rework `scripts/e2e/audit-parity.mjs`)
+
+The current criterion is "whether what Telegram received is plain text or an invalid button". Change it to **state equivalence**:
+
+1. Execute each command in two fresh isolated hosts: A is operated in the terminal by sending keys through tmux, B sends the command from mock Telegram and clicks buttons, and both sides perform the same sequence of operations.
+2. After execution export a host state snapshot: current model, thinking level, session file, settings file, and the corresponding fields in the auth file.
+3. The snapshots of A and B must be identical.
+4. An extra assertion: the set of options listed on Telegram equals the component's full list.
+
+Keep the existing Bot API contract check (`scripts/e2e/telegram-contract.mjs`).
+
+---
+
+## 8. Risks and degradation
+
+| Risk | Impact | Mitigation |
 |---|---|---|
-| 宿主升级改了私有字段或方法名 | 适配器识别失败 | 只支持固定版本（pi `1.4.0`、OMP `18.12.x`），版本不符启动即报错；升级前先读新版本源码、跑通契约测试和 E2E 再放开版本（§0.1） |
-| OMP 的实际结构与预期不同 | OMP 部分对话框退化为快照 | 阶段 0 已探测：OMP 内置 model/settings/session/tree/oauth 组件没有可读字段，阶段 3 先按快照实现；扩展入口参数仍提供结构化模型（§4.6.5） |
-| 两端同时操作 | 竞争 | 宿主模态对话框只生效一次；Broker 操作前做焦点校验；回调带 sessionId + generation；按 key 定位 |
-| Telegram 提交命令时终端开着对话框或上一个命令未结束 | 命令落不到编辑器 | Gateway 拒绝并提示（§4.2.3） |
-| 宿主绕过 `setFocus` 改变焦点 | 关闭事件丢失 | 焦点校验（§4.1.3） |
-| 输出与 agent 消息重复 | 刷屏 | 只截获有归属的 scope 输出 |
-| Telegram 端连续操作导致编辑超频 | 429 | 每 chat 1 次/秒；模型无变化不编辑；终端变化不触发编辑 |
-| hook 代码抛异常 | 影响宿主 | 原则 7 |
-| 密钥经过 Telegram | 泄露 | §4.7.4（固定行为） |
-| 宿主为发起者写入编辑器的文本（`/fork`） | 覆盖本地草稿 | §4.2.4 |
-| 缺省值迁移改变老用户行为 | 用户意外 | CHANGELOG 单列行为变更 |
+| A host upgrade changes private fields or method names | Adapter recognition fails | Support only fixed versions (pi `1.4.0`, OMP `18.12.x`), and error out at startup when the version does not match; before upgrading, read the new version's source, get the contract tests and E2E passing, and only then open the version (§0.1) |
+| OMP's actual structure differs from expectation | Some OMP dialogs degrade to snapshots | Stage 0 has probed it: OMP's built-in model/settings/session/tree/oauth components have no readable fields, so stage 3 implements them by snapshot first; the extension entry arguments still provide a structured model (§4.6.5) |
+| Both sides operate at the same time | Race | A host modal dialog takes effect only once; the Broker validates focus before operating; callbacks carry sessionId + generation; locate by key |
+| When a command is submitted from Telegram the terminal has a dialog open or the previous command has not ended | The command cannot land in the editor | The Gateway rejects it and shows a notice (§4.2.3) |
+| The host changes focus bypassing `setFocus` | Close event lost | Focus validation (§4.1.3) |
+| Output duplicates agent messages | Flooding | Intercept only output of scopes that have an owner |
+| Consecutive Telegram-side operations cause edits to exceed the rate limit | 429 | 1 per second per chat; no edit if the model is unchanged; terminal changes do not trigger edits |
+| Hook code throws | Affects the host | Principle 7 |
+| Secrets pass through Telegram | Leak | §4.7.4 (fixed behavior) |
+| Text the host writes into the editor for the initiator (`/fork`) | Overwrites the local draft | §4.2.4 |
+| Default-value migration changes behavior for existing users | Surprises users | CHANGELOG lists the behavior change separately |
 
 ---
 
-## 9. 已确认的决定
+## 9. Confirmed decisions
 
-| # | 问题 | 决定 |
+| # | Question | Decision |
 |---|---|---|
-| 1 | 本地发起的对话框是否推送到 Telegram | **不推送**。谁发起，谁显示。本地 agent turn 中的 `ask` 也不推送 |
-| 2 | `tuiBridge` 是否保留 `off` | ~~本次保留，不清理~~ **v6 推翻：立即删除 `off` 模式和插件原生实现**（决定 48） |
-| 3 | `/quit` 能否从 Telegram 执行 | **允许**，二次确认 |
-| 4 | 终端变化是否同步到 Telegram | **不同步**。执行前按实时状态和 key 定位 |
-| 5 | 命令 scope 何时结束 | `onSubmit` 和持有都结束 + 无活动会话 + 焦点在编辑器 + 1.5 秒无输出；30 分钟上限（§4.3） |
-| 6 | 草稿何时恢复 | scope 结束时；本地用户已在编辑则不动；宿主为发起者写入的文本发到 Telegram 后恢复草稿（§4.2.4） |
-| 7 | enqueued turn 的归属 | Gateway 复用现有持有逻辑；归属按 Telegram UI 栈顶判断（§4.2.6、§4.3） |
-| 8 | 缺省值迁移 | `commands`/`full`/未设置 → `on`，作为行为变更写进 CHANGELOG（§4.10） |
-| 9 | OutputCapture 截获什么 | agent 消息、工具调用只由 `renderer.ts` 发送；OutputCapture 负责宿主状态/错误/警告（含 `notify`），以及命令 scope 内、非流式、非重建、非消息类的聊天区内容（§4.4）。`on` 模式下 `notify` 不再直发 Telegram（§4.9） |
-| 10 | 扩展命令的完成信号 | hook `session.prompt`，匹配本次提交文本的那次调用，其结束计入 scope 结束条件（§4.3） |
-| 11 | 本地命令镜像 | 按决定 1 删除（§4.9 第 5 条） |
-| 12 | pi-goal 的不透明 custom 组件 | 先按阶段 0 探测结构化；探测证明无可用字段时，按 §4.6.6 开**唯一、收窄**的例外：仅白名单形态，文本只用于识别和读选项，操作全部走按键，绑定版本 |
-| 13 | 输出截获判据 | 不用 `isStreaming`；按组件身份排除 agent 渲染的组件（§4.4） |
-| 14 | 脱敏层位置 | 在三个发送源转换前替换，传输层不替换；短于 8 字符不登记（§4.7.4） |
-| 15 | 完成信号适用范围 | 只对非内置命令登记，先登记后提交；过期按"空闲 + 无排队 + 主循环等待输入"连续 500ms，60 秒上限（§4.3） |
-| 16 | 对话框打开期间的 Telegram 命令 | 只放行 `/stop` 和 `/status`，其余回复"请先处理当前对话框"（§4.2.2 第 0' 步） |
-| 17 | OMP 扩展入口 hook 打在哪 | **UI 上下文**，不是 `InteractiveMode` 原型。OMP 的扩展/工具通过各自的 `ctx.ui` 调用（`select/confirm/input/editor/custom/askDialog/approve`），阶段 0 证明 mode 原型的 `showHook*` 不会为扩展上下文触发 |
-| 18 | OMP 内置选择器（model/settings/session/tree/oauth）没有可读字段 | **先降级为快照**，只提供 ↑↓/Enter/Esc；不解析渲染文本伪造原生列表。若后续 OMP 版本暴露字段，再按探测结果升级 |
-| 19 | OMP 的 `mode.editor.onSubmit` 在捕获时不存在 | 交给 §4.1.1 的每秒 tick 安装；捕获只记录字段名，不假设初始化顺序 |
-| 20 | `/export` 的路径来源 | `exportToHtml`/`exportToJsonl` 返回 **Promise**；等待解析后的字符串作为路径。`/share` 内部调用同一方法，按 scope 标签区分（§4.8） |
-| 21 | `/reload`、`/fork`、`/clone`、`/import` 是否提交给宿主编辑器 | **不提交，保留原生处理器。** 提交给编辑器会走 `runtimeHost` 的会话替换路径，绕过 pi 的 `withSession` 顺序；扩展运行时会被重新加载，而旧轮询实例尚未释放，单例协调器会拒绝新实例（"another local pi instance is already polling this bot token"）。原生处理器已经在宿主控制 API 内完成同样的状态变更。 **（v6 修订：`/fork`、`/clone` 改为交给宿主，见决定 52；`/reload`、`/import` 不变）** |
-| 22 | `/new` 如何执行 | **调用宿主 `ctx.newSession()`，不提交编辑器。** 编辑器路径走 `handleClearCommand()` → `runtimeHost.newSession()`，同样会绕过 `withSession` 并触发轮询实例交接；命令上下文里的 `ctx.newSession()` 是宿主支持的替换入口。命令 scope 仍需保存/恢复草稿。 |
-| 23 | OMP 何时接入 Gateway | **推迟到阶段 3。** 阶段 0 证明 OMP 的 `/status`、`/usage`、`/stats`、`/context`、`/skills` 等走 `showCommandReport` 全屏面板，面板内容不在 `chatContainer` 的 `addChild` 流里；阶段 1 没有 `InfoPanelAdapter`，接入只会回一条 ack 而没有正文。阶段 3 先做面板截获，再把 OMP 的只有输出命令加入白名单。 |
-| 24 | `session.prompt` 完成信号放在哪一步实现 | 决定 10 和 15 不变，但随 Gateway 接线（§4.2.3、§4.3）一起实现：只对非内置命令登记，内置命令立即置 `promptDone = true`，另有 500ms 安静窗口和 60 秒上限。此前 `origin.ts` 里的半成品对所有命令都等 prompt，而且没有安装 hook，会让每个只输出命令空等到 60 秒上限，因此删除，不留半个机制。 |
-| 25 | OMP 的扩展 `select`/`input`/`ask` 何时走 broker | **移到阶段 3 的 T3.0，且更正原先的前提。** 阶段 2 收尾复测（`docs/host-probe/omp-18.12.5.json` 的 `focusEvents` 与 `conclusions.dialogFrames`）：OMP 的 hook 对话框**会**切换焦点——`select`/`confirm`/`input` 入口调用之后紧接 `via:"setFocus"`，焦点组件是 `children` 容器（`QT`、`FD`、`Fy`），`askDialog` 的组件带 `callbacks`+`options`（`Ej`），扩展自定义对话框是带 `render`/`handleInput` 的普通对象；原先记录的"不调用 `setFocus`"复测不再出现（那次采集时插件在 Telegram 原生作答，宿主的对话框有没有真的建起来无法确认），以本次数据为准。缺的不是焦点，而是识别与读取：OMP 把标签放在私有字段里（行组件 own keys 为空），`lib/tui/focus.ts` 的 `classify` 形状判定全部落空、构造函数名又是压缩产物，于是分类落到 `"progress"`，适配器也读不到条目。所以 §4.1.3"按焦点识别对话框"的接口不用改：绑定了入口条目的焦点组件就是对话框；标签取自组件画出的帧（probe 已按组件形状记录去色帧文本），操作继续走 `act()` 的按键注入。在那之前 `hostOwnsPrompts()` 只对 pi 打开（决定 27），阶段 2 验收里"OMP `ask` 多问题从 Telegram 完整作答"允许继续由插件在 Telegram 作答；阶段 2 其余验收不变。 |
-| 26 | 插件原生提示和镜像对话框同时在等同一条文本时给谁 | **给插件在这个 chat 里发起的原生提示**：控制器先 `deps.ui.resolveInput`，再问 Broker。与 §4.5.1 单表模型的"最新流优先"一致——谁最后问，谁拿答案。实测故障（合并前）：终端里遗留的快照镜像把密钥提示的回答当搜索词吃掉，那条提示接着把下一条 `/probe-custom` 命令当成自己的回答删掉，两个步骤一起失败。`registerExternalInput` 合并两张表的工作随 T3.6 一起做（§4.5.1 实现现状）。 |
-| 27 | Broker 何时启用 | **和 `hostOwnsPrompts()` 共用同一个宿主开关。** 只关 `hostOwnsPrompts()` 时 broker 照旧跟踪焦点、建模对话框、抢等同一条文本：阶段 2 实测 OMP 命令套件从 132/132 掉到 119/126，`/exit` 与 `/tg-cwd-disconnect` 也失败。收口条件是 `tuiBridge: full` + 宿主桥可用（`lib/controller.ts` 里 DialogBroker 的 `enabled` 直接调用 `lib/tui-bridge.ts` 的 `hostOwnsPrompts`）。该开关曾短暂只对 pi 打开（`getHost() === "pi"`），因为当时 broker 读不懂 OMP 的对话框；分类与读取补齐后该条件已删除，打开的验收线仍是命令套件不低于阶段 1 基线 132/132（任务清单 T3.0 完成标准，决定 28）。 |
-| 28 | OMP 的对话框怎么分类、什么时候算关闭 | **分类看入口条目，关闭要等确认。** 焦点组件绑定了入口条目、或落在"入口调用未结束"窗口内的首次聚焦，即判为 `dialog`（`FocusTracker.entryFor`；OMP 的 UI context 入口没有组件字段，靠待决条目关联），不再依赖类名或形状。行藏在私有字段里的组件由按帧读取的适配器处理：`render(80)` 去色文本解析标题、行、`❯` 标记的当前行与页脚按键，操作仍走按键注入，不要求宿主暴露私有字段。**关闭**：焦点回到编辑器必须持续 250ms 才算关闭（§4.1.3 分类表已按此补充），直接跳到另一个对话框则立即算关闭。**progress 不建会话**：带 `signal`/`abortController` 的 spinner 不是对话框，broker 不为它发 Telegram 消息（理由见 §4.1.3），镜像照旧显示。broker 正在画对话框时，镜像继续播报画面但不再给出自己的方向键键盘（同一问题只有一副键盘）。**为什么关闭看焦点而不看入口 Promise**：入口 Promise 结束只用来让入口记录失效（`lib/tui/entry.ts` 的 `retire`），会话关闭仍以焦点为准；确认窗口取 250ms（`lib/tui/focus.ts` 的 `FOCUS_CLOSE_GRACE_MS`）而不是 1.5 秒，因为实测 OMP 重绘时焦点只回编辑器一帧，250ms 足以过滤，更长的窗口会让对话框真正关闭后 Telegram 键盘多停留。多题 `ask` 两题之间不会被提前关闭，已由 `test:e2e:dialogs`（OMP、pi）验证。pi 与 OMP 用同一规则。 |
-| 29 | 焦点交给容器组件时会话怎么办 | **换按键目标,不换会话。** OMP 打开 overlay 后会把焦点从对话框交给承载它的 `children` 容器(`QT`),两者的入口条目是同一个对象。若按新组件重建会话,已发到聊天里的按钮全部作废(点一下回"这个菜单已经过期"),多步流程原地死掉。所以 broker 比较 `FocusTracker.entryFor(component)` 与会话记录的 `entry`:同一个条目就只改 `session.focus`(按键目标),消息、键盘、`generation`、pending 输入全部保留,并新增 `session.subject` 记录真正持有状态的组件——读取、适配器 `act`、按键注入都发给 `subject`,因为容器只是转发。 |
-| 30 | progress 抢焦点算不算对话框关闭 | **不算。** spinner(`BorderedLoader` 一类)拿焦点是为了让 Esc 能打断回合,它后面的问题还开着。旧实现看到 `progress` 就 retire,把键盘从正在等的消息上撤走:OMP 的多题 `ask` 里"下一题/Submit"永远点不到。现在 `progress` 既不建会话也不镜像(决定 28 不变),但已有会话继续存活并可注入(`canDrive` 允许"焦点是 progress"),真正的关闭仍由焦点回到编辑器(250ms 确认)或跳到别的对话框判定。 |
-| 31 | 对话框没答完又来了新命令 | **只替本聊天按 Esc;别处的对话框只说明,不代答。** 宿主把一个未答的对话框排在所有后续命令之前,所以命令到达而未答的对话框仍在时,必须分清它是谁的。收窄成三条:① 会话的 Telegram 消息就在本聊天 → 替用户按一次 Esc、只摘掉那条消息上的死键盘(不覆盖正文:新命令按 §4.7.3 就在同一条消息上作答),并在聊天里补一句"已关闭未回答的对话框:<标题>";焦点已回到编辑器(会话只是被还没结束的命令作用域吊着)时改为**静默回收**,不按 Esc 也不播报,否则通知会抢在命令输出前面到。② 不是本聊天的对话框——包括终端自己打开的、以及从没发给任何聊天的——**一律不代答**:`abandonFor` 返回 `blocked`,controller 回"终端上有一个未完成的对话框,请先在终端处理,或发 /stop。",并且**不把这条命令提交给宿主**(刚开的作用域以 `error` 结束),免得它排在别人的问题后面静默等 30 秒。原先"没人认领的对话框算成本聊天的、顺手关掉"的做法废弃:那是替别人做决定,而且会吃掉终端里正要看的答案。 |
-| 32 | 镜像与 broker 怎么分工 | **按消息划分所有权,不按聊天。** 旧写法是"本聊天有 broker 会话 → 镜像整体不启动",一个被遗留的对话框能让之后每条命令都没有输出。现在镜像照常启动,只在 broker 正画的那条消息上让位;键盘仍只有一副:`mirrorsFor` 只统计**画过本聊天消息**的会话,终端自己拥有的会话不得夺走镜像按键。命令回执改成"选择器已在上面的消息里"的条件同样收紧为"本次命令打开、且画在本聊天"(比较 `DialogSession.openedAt` 与提交时刻),否则照常镜像输出。 |
-| 33 | `ui.menu` 归谁 | **宿主有 `menu` 就用宿主的。** 代理层曾把 `menu`/`closeMenu` 强行留给插件的原生键盘,于是同一个问题既有插件键盘又有宿主对话框(宿主那份由 broker 镜像),点击落到哪一边看运气,管理菜单(`/tg` 系列)整条链路时好时坏。删掉这条特例后:宿主没有 `menu` 时代理仍回落到插件实现,宿主有则交给宿主,只有 broker 一个出口。 |
-| 34 | 没有适配器能建模的屏幕 | **交回屏幕镜像,broker 不建会话。** 走 `SnapshotAdapter` 的对话框只能显示整屏文本,给不出能真正作答的按钮;broker 把它发到聊天里,等于用一副假键盘抢走消息,同时按 §4.5 让真能注入按键的镜像闭嘴(实测 `/tg` 系列出现"broker 版菜单 + 插件原生菜单"两副键盘,点击落到哪边看运气)。现在 `open()` 选中 snapshot 适配器就直接返回(只留一条 debug),屏幕仍由镜像播报并可用方向键操作。 |
-| 35 | 宿主给的选项串带缩进和"当前值"点,怎么和帧上的行对上 | **两边都去掉装饰再比。** OMP 递给扩展的选项串自带缩进和当前值标记(如 `"  hidden"`、`"● brief"`),帧里画的是光标标记加同样的文本,逐字比较永远对不上:`act` 只能拒绝(`frame marks no known row`),`/tg` 的配置子菜单和 `/model` 整组点不动。`longestLabelMatch` 先把标签去掉前导空白与前导状态符号再比,仍取最长匹配(一行的文本可能以另一行开头)。 |
-| 36 | 方向键按几下按什么算 | **按帧上真正显示的行算。** 数据在私有字段里时,选项全集和屏幕上的行不是一回事:终端搜索或翻页后再按全集计数,Enter 会打在错误的行上。`frameRows` 给出可见行与高亮行的位置,步数在两者之间计;不在屏幕上的行直接拒绝,不猜。 |
-| 37 | generation 什么时候递增 | **用户能按的按钮变了才递增。** 旧写法每次 redraw 都 +1,而 OMP 会反复重绘同一个问题(焦点闪一下也算),于是用户眼前的键盘被判"列表已变化,请重新选择",实际什么都没动,多题 `ask` 走不到 Submit。现在比较两次绘制的"按钮面"(按钮文字 + 回调 arg→key):相同就保留原 generation;比较前去掉 `▸`/`❯`/`→` 这类终端自己的光标标记——它嵌在按钮文字里,但每个按钮都按自己的 key 解析到实时模型,移动它不改变任何按钮的含义。换页会改变按钮面,照常递增,而 arg 里带页码,旧按钮仍按自己的 arg 解析。 |
-| 38 | 宿主接管提示后,只发通知的命令怎么回到聊天 | **命令上下文的 `ui` 换成路由代理,但只在宿主自己不投聊天时。** `hostOwnsPrompts` 对 OMP 放开后,`runCommandHandler` 把命令上下文原样交给宿主,`ctx.ui` 成了宿主的原始 UI:`notify` 只打在终端,`/changelog`、`/copy`、`/debug` 这类只回一句通知的命令在 Telegram 端变成 30 秒超时。现在 host 模式下也用 `createHostPromptUi(hostUi, telegramUi)` 包住命令上下文:提示仍归宿主(终端能答)。但 pi 交给命令上下文的 `ui` 本来就是插件的路由上下文(带 `__piTelegramPlusRoutedUi` 标记),它的 notify 已经会投给聊天,再复制一份就变成同一条消息发两三遍;`createHostPromptUi` 因此先看这个标记,已投聊天的直接透传,通知每条只发一次。 |
-| 39 | 编辑消息失败要不要顺手摘掉键盘 | **不摘。** `show()` 重绘失败时原先会补一次 `removeInlineKeyboard`,理由是"内容没变或被限流"——可这两种失败都说明不了对话框的死活,问题还开着,却把唯一能作答的按钮撤了,聊天里从此只能干等。现在失败只记日志,下一次重绘自然补上;真正该摘键盘的只有 `publish()`(对话框确实结束)和 `abandonFor`(替用户按了 Esc)。 |
-| 40 | "有 entry 就算对话框"和"是 loader 就算进度"谁先 | **loader 先。** 认出一个没有可读行的对话框,靠的是去认领宿主记下的 entry(`entryFor` 会把它绑到当前组件上),这个动作是有代价的:转圈面板先拿到焦点时,它会带着问题的身份被判成 dialog,还顺手把 entry 用掉,真正的对话框随后到达就变成无名快照(决定 28/30 想防的正是这个)。所以 `classify` 的顺序改成:形状判定 → loader/signal 判定 → 才允许 entry 认领。 |
-| 41 | OMP 对话框通过什么读取和操作 | **collab + TSP，不读画面、不模拟按键**（§4.11，用户 2026-10-24 确定）。依据 OMP 源码与 S20/S21c/S22 实测：扩展 select/editor/ask/approve 走 `mode.collabHost.requestGuestUi`；其余对话框与内置选择器走组件的 `describe()`/`handleNativeEvent()`。取代决定 18，以及决定 25、28、35、36 中关于 OMP 画面读取的部分。 |
-| 42 | 本地发起的对话框会不会经 collab 推到 Telegram | **不会。** 只有存在 Telegram 发起的命令作用域或 Telegram turn 时，桥接才接管；否则返回 `null`，只在终端显示（决定 1）。 |
-| 43 | 用户自己开 `/collab` 时怎么办 | **让位给真实 collab 宿主，不另找路径。** 桥接发现 `mode.collabHost` 被替换就停止接管；期间 Telegram 发起的 select/editor/ask/approve 直接回复"终端正在 /collab 协作，请在终端或协作端处理"；collab 结束后重新挂上。 |
-| 44 | OMP 结构化通道的版本约束 | **绑定 `18.12.x`，不符即失败，不做降级**（用户 2026-10-24 确定："版本不对直接失败，不要搞多套"）。版本不符或读不到版本时插件明确报错，OMP 对话框不桥接；支持新版本须先核对源码并跑通 E2E（§4.11.4）。同理废弃 S8（`558d574`）"版本不符退回快照"的做法，相关代码随 T3.2g 删除。 |
-| 45 | 现有 broker 在 OMP 上怎么调整 | **保留为中枢，适配器换成结构化来源**（用户 2026-10-24 要求现有 broker 也改为新方案）。会话来源增加 collab 请求；OMP 上的焦点 + 画面 + 按键路径在 T3.2g 删除。 |
-| 46 | 支持哪些宿主版本 | **只支持 pi `1.4.0` 与 OMP `18.12.x`，不兼容多个版本**（用户 2026-10-24：只对齐 1.4.0，不再兼容多个版本）。版本不符启动报错；删除多版本测试矩阵与仅为旧版本存在的兼容代码。 |
-| 47 | 识别不了的对话框怎么办 | **明确告知，不做半吊子操作**（用户 2026-10-24）。取消快照方向键与"交回屏幕镜像"（决定 34 作废），由 `UnsupportedAdapter` 告知并只提供"取消"。 |
-| 48 | `off` 模式与插件原生实现 | **立即删除**（用户 2026-10-24，推翻决定 2）。桥接不可用时启动报错；`pluginOnly` 管理命令保留。 |
-| 49 | 旧路径什么时候删 | **现在删，先于迁移**（用户 2026-10-24：当前不在使用，删除不影响）。未迁移命令暂无输出，由 E2E"待迁移"清单区分预期失败与回归。 |
-| 50 | 宿主行为以什么为准 | **以宿主源码为准**：先读 pi `1.4.0` / OMP `18.12.5` 源码确定前提，运行时实验只用于验证（此前两次在未读源码的情况下靠运行时实验摸索，浪费多轮）。 |
-| 51 | Telegram 发来的 `!命令` / `!!命令` 由谁执行 | **交给宿主执行，插件只保留危险命令确认**（用户 2026-10-25 同意）。pi 1.4.0 与 OMP 的编辑器都原生支持 `!`/`!!`，宿主执行前会先发 `user_bash` 事件让扩展接管或拒绝（pi `interactive-mode.ts` 的 `handleBashCommand`）；插件直接调用 `session.executeBash` 会**绕过这个扩展钩子**（例如沙箱、权限类扩展）。因此插件不再直接调用 bash 执行器，而是先按 `bashConfirm` 策略在 Telegram 确认（插件自己的远程执行安全闸门，宿主没有对应概念），确认后经 gateway 把原文提交给宿主编辑器，输出照常回传。任务 D3b。 |
-| 52 | `/fork`、`/clone` 交给谁 | **交给宿主执行**（用户 2026-10-25 同意；修订决定 21）。决定 21 的理由（编辑器提交会替换运行时、轮询单例冲突）已被 `e046a98`（同进程锁接管）与 `bf81fd5`（破坏性调用前提交游标）消除。规则统一为：有选择界面的命令（`/fork`、`/clone`）交给宿主，其选择器由适配器接管（pi：`UserMessageSelectorComponent`；OMP：TSP），之后删除插件自带的消息列表；没有界面、只调用控制接口的命令（`/new`、`/reload`、`/import`）继续调用宿主控制 API。分别并入 3C、3D，3E 用 E2E 验证运行时替换。 |
-| 53 | 扩展对话框在两个宿主上怎么接到 Telegram | **扩展 UI 竞答（§4.12），取代 collab 桥接**（用户 2026-10-24 选定竞答方向；S25/S25b 2026-10-25 在两个宿主上证实）。修订决定 41：扩展 select/confirm/input/editor/ask/approve 走竞答，TSP 只用于内置选择器、`custom` 与仪表盘。决定 43（`/collab` 让位）作废：竞答不占用 `collabHost`。 |
-| 54 | 对话框开着时，Telegram 发来的普通文字怎么处理 | **对话框收文字（输入框、带搜索的列表）就交给对话框；不收文字时不提交为提示词，回复"终端上有一个对话框正在等待（<标题>），请点按钮作答，或发 /stop 取消"。** `/` 命令照 §4.5 规则 6 先关掉本聊天的对话框再执行（3E 发现 D2 后 gateway 路径漏了这一步，F9 `a4a2dbe` 补上）。依据：与终端一致——对话框占着焦点时终端里发不出提示词；主控 2026-10-25 定（F8 `7589384`），用户可改。 |
-| 55 | OMP 子代理会话里插件做什么 | **子代理里什么都不做，主会话独占运行时**（2026-10-26，issue #13/#15）。OMP 为每个子代理在同一进程里再次调用扩展工厂（`ctx.agent.kind === "sub"`，OMP `extensibility/extensions/types.ts`）。`lib/main-only-pi.ts` 把 `pi.on` 的处理器包成子代理里不执行；"接管运行时"（拆旧运行时、写 `runtimeState.dispose`）只在主会话的 `session_start` 里发生，工厂开头不再无条件拆除。pi 没有子代理、也没有 `ctx.agent`，缺字段一律当主会话。**已知未处理**：pi 上第三方扩展用 SDK 开嵌套会话会再次加载本插件，pi 没有可区分的字段，不补防护（没有可靠判据，不做猜测式防护）。工厂里直接做的事（协调定时器、controller 内的 broker/gateway 定时器）在子代理实例里也会启动：`mainOnlyEvents` 第一次被子代理上下文触发时调用 `disposeInertRuntime` 只拆这个实例自己的定时器和 controller，不碰共享状态（状态栏、进程级菜单刷新、协调器租约、`runtimeState`）（e97081a，真实 OMP 追踪：子代理实例创建 8ms 后被清理，其协调定时器 0 次触发）。命令/工具注册仍留在子代理自己的运行器上。 |
-| 56 | 宿主对话框方法的包装怎么去重 | **按 FocusTracker 实例限定作用域；宿主读取不稳定时才用对象标记**（2026-10-26 初版，2026-10-27 修订；issue #16，及其引起的 pi 回归）。两个宿主的事实（都已实测）：OMP 给扩展的工具 UI 对象、pi 的 TUI 对象的 `setFocus`，**每次读取都返回一个新函数**（读取不稳定）；pi 会在同一进程里重建插件运行时（`/new`、`/reload`），每次新建一个 FocusTracker（`lib/controller.ts` 的 `new FocusTracker()`）。要求：同一个跟踪器对同一个对象的同一个方法只包一层（否则 OMP 上每个 tick 叠一层，约 3000 次后栈溢出）；而每个新跟踪器必须装上自己的一层（否则事件只送到已销毁的旧跟踪器）。实现（`lib/tui/install-marks.ts`）：三类钩子——入口钩子 `hookEntryMethods`、竞答 `installRace`、`hookMethod`——的去重状态都按 `scope`（FocusTracker 实例）存放在 `globalThis[Symbol.for("pi-telegram-plus.install-marks…")]` 下（跨模块实例共享）；函数身份（被包的函数和包装函数都登记）挡住读取稳定的宿主上的重复包装，对象标记 `hasStickyMark` 只在连续两次读取得到不同函数时生效。`output.ts` 的 `hookMethod` 调用不传 `scope`，仍按进程级去重。**初版的错误**：初版把去重做成"按（对象，方法）、进程级共享、不分跟踪器"，并删掉了按跟踪器的函数身份去重。在 pi 上造成三处回归（均已用追踪定位）：入口钩子在运行时重建后不再装上（旧版每个 `showExtension*` 装 4 次，初版 1 次）；`installRace` 登记全局集合而入口钩子查跟踪器集合，`select/confirm/input` 每个 tick 叠一层（425 次 vs 约 45 次）；`setFocus` 等焦点钩子被粘性对象标记挡住（`stableRead=false, sticky=true -> SKIP`），新跟踪器收不到焦点事件，`/model` 对话框被登记为无来源并一直开着，挡住后续所有命令。修复：1e44c29、8e1ba00、b09184b、c5a9030、8d989f7；`pi:main` 由 53/64 恢复为 75/75。**教训**：改"谁和谁共享状态"的范围时，要在两个宿主上把命令、对话框、TUI bridge 三套 E2E 都跑完。 |
-| 57 | OMP 登录对话框怎么接到 Telegram | **专用适配器 `tsp-login`，两阶段同一个适配器**（2026-10-26，issue #14）。真实 OMP 上依次发现并修了四层问题：焦点分类把带 `signal` 的登录对话框判成 progress（`describesLoginSheet`）；适配器在对话框刚出现（只有链接）时就选定，后出现的输入框不会再换适配器；文字在 `p.spans` 而不是 `p.text`、标题在内层 `overlay.p.head`、状态在 `spinner.p.label`；输入框 `TextFormField` 只有 `describe()` 没有 `handleNativeEvent()`，读取下钻只要求 `describe`（`describableChild`），发事件仍用 `asComponent`。只有链接的阶段用 `progress` 模型（普通文本，链接可点；`info` 用 `<pre>`），有输入框后复用 `tspInputAdapter` 的读写；`input` 模型新增可选 `detail`（说明、设备码、链接）。 |
-| 58 | 对话框中途才变成密钥输入时，用户消息要不要删 | **按当前模型判断，而不是对话框打开时的快照**（2026-10-26）。`isSecretSession`：有 `pendingInput` 用它，没有就看当前模型的 `secret`。因此对话框仍显示密钥输入框时，后续消息（例如输错后重试）也按密钥处理：记住并删除；模型变成非密钥后不删。修订了既有用例中"密钥答复后第二条消息不算密钥"的期望（那是 `pendingInput` 被清空的副产物）。 |
-| 59 | Telegram 发起的 `!` 命令：结果与终端输入框 | **结果总是送回这条命令自己的消息；上一条还在运行就拒绝；结束后输入框恢复成命令之前的样子**（2026-10-27，issue #17；用户确认"连发时与 TUI 一致，拒绝并提示"）。三个原因都由 E2E 复现并用追踪/宿主源码定位：(1) agent 回合进行中，两个宿主都把 bash 输出组件放进 `pendingMessagesContainer`（pi `interactive-mode.js` `isDeferred = this.session.isStreaming`；OMP `command-controller.ts` `handleBashCommand`），直到下一次提交才移进对话区；插件只监听对话区，作用域静默 1.5 秒即结束，结果永远不到 Telegram。修法：`output.ts` 在 `"!"` 作用域里也认领待发区的 bash 组件（`output-pending-add-child`），由 `hasRunningBash` 保持作用域到 `setComplete`；组件稍后被移进对话区时按 `bashTracked/bashPushed` 去重（1623a64）。(2) 上一条 bash 还在运行时宿主拒绝新的 `!` 并把文本放回输入框，而插件为新命令开的作用域替换了上一条的，导致输出串到新消息上。修法：提交前检查 `session.isBashRunning || bashSubmitInFlight`，命中就直接回复提示、不提交（37e693a）；`bashSubmitInFlight` 覆盖插件并发处理消息时"已提交但宿主约 60ms 后才置位 isBashRunning"的空窗（追踪数据，256e0c0）。(3) 插件把命令写进编辑器提交（`tui-bridge.ts` `submitToHostResult` 绕过编辑器自己的回车清空），`restoreDraft` 原先只在草稿非空时写回，草稿为空时命令文本留在输入框。修法：输入框为空或等于命令文本时一律写回草稿（含空串）；命令执行期间用户自己改了输入框则不覆盖（e35f15e）。验收：`Telegram ! commands leave the TUI input clean`（12 次 + 草稿变体）与 `Telegram ! command results under load`（回合中、连发、长输出、对话框打开、`!!`）在 OMP 和 pi 上均通过；修复前分别为 0/12 与回合中/连发失败。 |
+| 1 | Whether locally initiated dialogs are pushed to Telegram | **Not pushed**. Whoever initiates, displays. An `ask` in a local agent turn is not pushed either |
+| 2 | Whether `tuiBridge` keeps `off` | ~~Keep for now, no cleanup~~ **Overturned in v6: delete the `off` mode and the plugin's native implementation immediately** (decision 48) |
+| 3 | Whether `/quit` can be run from Telegram | **Allowed**, with a second confirmation |
+| 4 | Whether terminal changes are synced to Telegram | **Not synced**. Before executing, locate by live state and key |
+| 5 | When a command scope ends | `onSubmit` and the hold both ended + no active session + focus on the editor + 1.5 seconds without output; 30-minute cap (§4.3) |
+| 6 | When the draft is restored | At scope end; untouched if the local user is already editing; text the host wrote for the initiator is sent to Telegram and then the draft is restored (§4.2.4) |
+| 7 | Ownership of enqueued turns | The Gateway reuses the existing holding logic; ownership is decided by the top of the Telegram UI stack (§4.2.6, §4.3) |
+| 8 | Default-value migration | `commands`/`full`/unset → `on`, written into the CHANGELOG as a behavior change (§4.10) |
+| 9 | What OutputCapture intercepts | Agent messages and tool calls are sent only by `renderer.ts`; OutputCapture handles host status/error/warning (including `notify`), plus chat-area content inside a command scope that is non-streaming, non-rebuild and not message-type (§4.4). In `on` mode `notify` is no longer sent directly to Telegram (§4.9) |
+| 10 | Completion signal of extension commands | Hook `session.prompt`, match the call with this submit's text, and count its end in the scope end condition (§4.3) |
+| 11 | Local command mirroring | Deleted per decision 1 (§4.9 item 5) |
+| 12 | pi-goal's opaque custom component | Structure it per the stage 0 probe first; when the probe proves there are no usable fields, open the **single, narrowed** exception of §4.6.6: whitelisted shapes only, text used only for recognition and reading options, all operations through key presses, version bound |
+| 13 | Criterion for output interception | Do not use `isStreaming`; exclude agent-rendered components by component identity (§4.4) |
+| 14 | Position of the redaction layer | Replace before conversion at the three send sources, not at the transport layer; do not register secrets shorter than 8 characters (§4.7.4) |
+| 15 | Scope of the completion signal | Register only for non-built-in commands, register first and then submit; expiry is "idle + nothing queued + main loop waiting for input" holding continuously for 500ms, with a 60-second cap (§4.3) |
+| 16 | Telegram commands while a dialog is open | Let through only `/stop` and `/status`; reply "Please handle the current dialog first" to all others (§4.2.2 step 0') |
+| 17 | Where OMP's extension entry hook goes | **The UI context**, not the `InteractiveMode` prototype. OMP extensions/tools call through their own `ctx.ui` (`select/confirm/input/editor/custom/askDialog/approve`), and stage 0 proved that the `showHook*` of the mode prototype is not triggered for the extension context |
+| 18 | OMP built-in selectors (model/settings/session/tree/oauth) have no readable fields | **Degrade to snapshot first**, offering only ↑↓/Enter/Esc; do not parse rendered text to fake native lists. If a later OMP version exposes fields, upgrade according to the probe results |
+| 19 | OMP's `mode.editor.onSubmit` does not exist at capture time | Handed to the once-per-second tick of §4.1.1 to install; capture only records field names and assumes no initialization order |
+| 20 | Source of the `/export` path | `exportToHtml`/`exportToJsonl` return a **Promise**; the string it resolves to is used as the path. `/share` calls the same method internally, so they are told apart by scope label (§4.8) |
+| 21 | Whether `/reload`, `/fork`, `/clone`, `/import` are submitted to the host editor | **Not submitted; keep the native handlers.** Submitting to the editor takes the `runtimeHost` session replacement path and bypasses pi's `withSession` ordering; the extension runtime is reloaded while the old polling instance has not yet been released, and the singleton coordinator rejects the new instance ("another local pi instance is already polling this bot token"). The native handlers already complete the same state change inside the host control API. **(v6 revision: `/fork` and `/clone` are changed to be handed to the host, see decision 52; `/reload` and `/import` unchanged)** |
+| 22 | How `/new` is executed | **Call the host `ctx.newSession()`, do not submit to the editor.** The editor path goes `handleClearCommand()` → `runtimeHost.newSession()`, which likewise bypasses `withSession` and triggers a polling instance handover; `ctx.newSession()` in the command context is the host-supported replacement entry. The command scope still needs to save/restore the draft. |
+| 23 | When OMP is connected to the Gateway | **Postponed to stage 3.** Stage 0 proved that OMP's `/status`, `/usage`, `/stats`, `/context`, `/skills` etc. go through the full-screen `showCommandReport` panel, whose content is not in the `addChild` stream of `chatContainer`; stage 1 has no `InfoPanelAdapter`, so connecting would only reply with an ack and no body. Stage 3 first does panel interception, then adds OMP's output-only commands to the whitelist. |
+| 24 | In which step the `session.prompt` completion signal is implemented | Decisions 10 and 15 are unchanged, but it is implemented together with the Gateway wiring (§4.2.3, §4.3): register only for non-built-in commands, set `promptDone = true` immediately for built-in commands, plus a 500ms quiet window and a 60-second cap. The half-finished version previously in `origin.ts` waited for a prompt for every command and installed no hook, which would make every output-only command wait idly up to the 60-second cap, so it was deleted rather than leaving half a mechanism. |
+| 25 | When OMP's extension `select`/`input`/`ask` go through the broker | **Moved to T3.0 in stage 3, and the earlier premise is corrected.** The stage 2 closing retest (`focusEvents` and `conclusions.dialogFrames` of `docs/host-probe/omp-18.12.5.json`): OMP's hook dialogs **do** switch focus — after the `select`/`confirm`/`input` entry calls comes `via:"setFocus"` right away, the focused component is a `children` container (`QT`, `FD`, `Fy`), the `askDialog` component carries `callbacks`+`options` (`Ej`), and an extension custom dialog is a plain object with `render`/`handleInput`; the earlier note "does not call `setFocus`" no longer appears in the retest (in that collection the plugin was answering natively in Telegram, so whether the host dialog was really built cannot be confirmed), and this data is authoritative. What is missing is not focus but recognition and reading: OMP keeps labels in private fields (the row component's own keys are empty), every shape check in `classify` of `lib/tui/focus.ts` misses, and the constructor names are minified output, so the classification lands on `"progress"` and adapters cannot read the entries either. So the interface of §4.1.3 "identify dialogs by focus" needs no change: a focused component bound to an entry is a dialog; labels are taken from the frame the component draws (the probe has recorded the color-stripped frame text by component shape), and operations keep using the key injection of `act()`. Until then `hostOwnsPrompts()` is opened only for pi (decision 27), and "OMP `ask` multi-question fully answered from Telegram" in the stage 2 acceptance may continue to be answered by the plugin in Telegram; the rest of the stage 2 acceptance is unchanged. |
+| 26 | Who gets the text when a plugin-native prompt and a mirrored dialog are both waiting for the same text | **The plugin-native prompt started in this chat**: the controller first calls `deps.ui.resolveInput`, then asks the Broker. This is consistent with "latest flow first" in the single-table model of §4.5.1 — whoever asked last gets the answer. Measured failure (before merging): a snapshot mirror left over in the terminal swallowed the answer to a secret prompt as a search term, and that prompt then deleted the next `/probe-custom` command as if it were its own answer, so the two steps failed together. The work of merging the two tables with `registerExternalInput` is done together with T3.6 (§4.5.1 implementation status). |
+| 27 | When the Broker is enabled | **It shares the same host switch as `hostOwnsPrompts()`.** With only `hostOwnsPrompts()` off, the broker still tracks focus, models dialogs and competes for the same text: in stage 2 testing the OMP commands suite dropped from 132/132 to 119/126, and `/exit` and `/tg-cwd-disconnect` also failed. The closing condition is `tuiBridge: full` + host bridge available (the `enabled` of DialogBroker in `lib/controller.ts` directly calls `hostOwnsPrompts` of `lib/tui-bridge.ts`). That switch was briefly opened only for pi (`getHost() === "pi"`), because at that time the broker could not read OMP's dialogs; once classification and reading were completed that condition was deleted, and the acceptance line for opening is still that the commands suite not fall below the stage 1 baseline of 132/132 (completion criteria of T3.0 in the task list, decision 28). |
+| 28 | How OMP dialogs are classified and when they count as closed | **Classify by the entry, wait for confirmation to close.** A focused component bound to an entry, or first focused within the "entry call not yet finished" window, is classified as `dialog` (`FocusTracker.entryFor`; OMP's UI context entries have no component field and are associated through the pending entry), no longer relying on class names or shapes. Components whose rows are hidden in private fields are handled by the adapter that reads per frame: the color-stripped text of `render(80)` is parsed for the title, rows, the current row marked by `❯`, and the footer keys, and operations still use key injection, without requiring the host to expose private fields. **Closing**: focus returning to the editor must last 250ms to count as closed (the §4.1.3 classification table has been supplemented accordingly), while jumping straight to another dialog counts as closed immediately. **progress creates no session**: a spinner with `signal`/`abortController` is not a dialog, and the broker sends no Telegram message for it (reason in §4.1.3), while mirroring continues to show it as before. While the broker is drawing a dialog, mirroring keeps broadcasting the screen but no longer offers its own arrow-key keyboard (one keyboard per question). **Why closing looks at focus rather than the entry Promise**: the end of the entry Promise is only used to invalidate the entry record (`retire` in `lib/tui/entry.ts`), while session closing is still decided by focus; the confirmation window is 250ms (`FOCUS_CLOSE_GRACE_MS` in `lib/tui/focus.ts`) rather than 1.5 seconds, because in testing OMP's focus returns to the editor for just one frame during a redraw, 250ms is enough to filter that, and a longer window would leave the Telegram keyboard lingering after the dialog really closed. A multi-question `ask` is not closed early between two questions, verified by `test:e2e:dialogs` (OMP, pi). pi and OMP use the same rule. |
+| 29 | What the session does when focus is handed to a container component | **Change the key target, not the session.** After OMP opens an overlay it hands the focus from the dialog to the `children` container (`QT`) that carries it, and the two share the same entry object. If the session were rebuilt for the new component, all buttons already sent to the chat would be voided (a click replies "this menu has expired") and multi-step flows would die on the spot. So the broker compares `FocusTracker.entryFor(component)` with the entry recorded in the session: if it is the same entry it only changes `session.focus` (the key target), and keeps the message, keyboard, `generation` and pending input unchanged, and adds `session.subject` to record the component that really holds the state — reading, adapter `act` and key injection all go to `subject`, because the container only forwards. |
+| 30 | Whether a progress component grabbing focus counts as the dialog closing | **No.** A spinner (the `BorderedLoader` kind) takes focus so that Esc can interrupt the turn, and the question behind it is still open. The old implementation retired the session on seeing `progress` and withdrew the keyboard from the message being waited on: in OMP's multi-question `ask` "Next question/Submit" could never be clicked. Now `progress` neither creates a session nor mirrors (decision 28 unchanged), but an existing session stays alive and drivable (`canDrive` allows "focus is progress"), and the real close is still decided by focus returning to the editor (250ms confirmation) or jumping to another dialog. |
+| 31 | A new command arrives before the dialog is fully answered | **Press Esc only for this chat; a dialog elsewhere is only explained, not answered on someone's behalf.** The host queues an unanswered dialog before all subsequent commands, so when a command arrives while an unanswered dialog is still there, it must be clear whose it is. Narrowed to three rules: ① the session's Telegram message is in this chat → press Esc once for the user, only remove the dead keyboard from that message (do not overwrite the body: the new command answers on the same message per §4.7.3), and add in the chat "Closed an unanswered dialog: <title>"; when focus has already returned to the editor (the session is only held up by a command scope that has not ended) **reclaim silently** instead, without pressing Esc or announcing, otherwise the notice would arrive ahead of the command output. ② A dialog that is not this chat's — including one the terminal opened itself, and one never sent to any chat — **is never answered on its behalf**: `abandonFor` returns `blocked`, the controller replies "There is an unfinished dialog in the terminal. Please handle it in the terminal first, or send /stop." and **does not submit the command to the host** (the scope just opened ends with `error`), so it does not sit silently behind someone else's question for 30 seconds. The earlier approach of "an unclaimed dialog counts as this chat's and is closed in passing" was dropped: it decides on behalf of others and would swallow an answer the terminal is about to read. |
+| 32 | How mirroring and the broker divide the work | **Divide ownership by message, not by chat.** The old way was "this chat has a broker session → mirroring does not start at all", so a leftover dialog could leave every later command without output. Now mirroring starts as usual and yields only on the message the broker is drawing; there is still only one keyboard: `mirrorsFor` counts only sessions that **have drawn a message in this chat**, and a session owned by the terminal itself must not take away the mirror keys. The condition that the command receipt becomes "the selector is in the message above" is tightened in the same way to "opened by this command and drawn in this chat" (comparing `DialogSession.openedAt` with the submit time); otherwise the output is mirrored as usual. |
+| 33 | Who owns `ui.menu` | **If the host has `menu`, use the host's.** The proxy layer had forcibly kept `menu`/`closeMenu` for the plugin's native keyboard, so the same question had both a plugin keyboard and a host dialog (the host one mirrored by the broker), and where a click landed was luck; the whole chain of the management menu (the `/tg` family) worked on and off. After deleting this special case: when the host has no `menu` the proxy still falls back to the plugin implementation, when the host has one it goes to the host, with the broker as the single exit. |
+| 34 | A screen no adapter can model | **Hand back to screen mirroring; the broker creates no session.** A dialog going through `SnapshotAdapter` can only show the whole-screen text and cannot give buttons that really answer; sending it to the chat from the broker amounts to grabbing the message with a fake keyboard while, per §4.5, silencing the mirror that can really inject keys (the `/tg` family was measured to show two keyboards, "broker menu + plugin native menu", with clicks landing on one side by luck). Now when `open()` selects the snapshot adapter it returns directly (leaving only a debug note), and the screen is still broadcast by the mirror and can be operated with arrow keys. |
+| 35 | The option strings given by the host carry indentation and a "current value" dot; how to match them to the rows on the frame | **Strip decoration from both sides, then compare.** The option strings OMP hands to extensions carry their own indentation and current-value marker (such as `"  hidden"`, `"● brief"`), and the frame draws a cursor marker plus the same text, so a character-by-character comparison never matches: `act` can only refuse (`frame marks no known row`), and the config submenu of `/tg` and the whole `/model` group cannot be clicked. `longestLabelMatch` first strips leading whitespace and leading status symbols from the label before comparing, still taking the longest match (one row's text may start with another row's). |
+| 36 | How many arrow key presses, and counted by what | **Counted by the rows actually shown on the frame.** When the data is in private fields, the full option set and the rows on screen are not the same thing: counting by the full set after searching or paging in the terminal makes Enter land on the wrong row. `frameRows` gives the position of the visible rows and the highlighted row, and the step count is computed between the two; a row not on screen is refused directly, without guessing. |
+| 37 | When generation increments | **Only when the buttons the user can press change.** The old way incremented +1 on every redraw, and OMP repeatedly redraws the same question (a focus flicker counts too), so the keyboard in front of the user was judged "The list has changed, please select again" when nothing had actually moved, and a multi-question `ask` could not reach Submit. Now the "button surface" of two draws is compared (button text + callback arg→key): if identical the original generation is kept; before comparing, terminal cursor markers such as `▸`/`❯`/`→` are stripped — they are embedded in the button text, but each button resolves to the live model by its own key, so moving them does not change the meaning of any button. A page change alters the button surface and increments as usual, and since the arg carries the page number, old buttons still resolve by their own arg. |
+| 38 | After the host takes over prompts, how commands that only send a notification get back into the chat | **Replace the `ui` of the command context with a routing proxy, but only when the host itself does not deliver to the chat.** After `hostOwnsPrompts` was opened for OMP, `runCommandHandler` hands the command context to the host as is, and `ctx.ui` became the host's raw UI: `notify` only prints in the terminal, and commands such as `/changelog`, `/copy`, `/debug` that reply with just one notification turn into a 30-second timeout on the Telegram side. Now in host mode the command context is also wrapped with `createHostPromptUi(hostUi, telegramUi)`: prompts still belong to the host (the terminal can answer). But the `ui` pi hands to the command context is already the plugin's routing context (carrying the `__piTelegramPlusRoutedUi` marker), and its notify already delivers to the chat, so copying it again would send the same message two or three times; `createHostPromptUi` therefore checks this marker first, passes through directly if it already delivers to the chat, and each notification is sent only once. |
+| 39 | Whether to remove the keyboard in passing when editing a message fails | **No.** When a `show()` redraw failed it used to follow up with a `removeInlineKeyboard`, on the grounds of "content unchanged or rate limited" — but neither failure says whether the dialog is alive; the question is still open, and withdrawing the only buttons that can answer leaves the chat with nothing to do but wait. Now a failure only logs, and the next redraw naturally catches up; the only things that should remove the keyboard are `publish()` (the dialog really ended) and `abandonFor` (pressed Esc on the user's behalf). |
+| 40 | Which comes first, "has an entry means dialog" or "is a loader means progress" | **Loader first.** Recognizing a dialog with no readable rows depends on claiming the entry the host recorded (`entryFor` binds it to the current component), and that action has a cost: when a spinner panel gets focus first, it is classified as a dialog carrying the question's identity and also uses up the entry, so the real dialog arriving later becomes a nameless snapshot (exactly what decisions 28/30 sought to prevent). So the order in `classify` is changed to: shape check → loader/signal check → only then entry claiming is allowed. |
+| 41 | By what OMP dialogs are read and operated | **collab + TSP, no screen reading and no simulated key presses** (§4.11, decided by the user on 2026-10-24). Based on the OMP source and the S20/S21c/S22 measurements: extension select/editor/ask/approve go through `mode.collabHost.requestGuestUi`; the other dialogs and built-in selectors go through the component's `describe()`/`handleNativeEvent()`. Supersedes decision 18, and the parts of decisions 25, 28, 35, 36 about OMP screen reading. |
+| 42 | Whether locally initiated dialogs are pushed to Telegram through collab | **No.** The bridge takes over only when there is a Telegram-initiated command scope or Telegram turn; otherwise it returns `null` and the dialog shows only in the terminal (decision 1). |
+| 43 | What to do when the user opens `/collab` themselves | **Yield to the real collab host, find no other path.** The bridge stops taking over when it finds `mode.collabHost` has been replaced; in the meantime Telegram-initiated select/editor/ask/approve reply directly "The terminal is in /collab collaboration, please handle it in the terminal or on the collaboration side"; after collab ends it is hooked back on. |
+| 44 | Version constraint of the OMP structured channel | **Bound to `18.12.x`, fail on mismatch, no degradation** (decided by the user on 2026-10-24: "if the version is wrong just fail, don't do multiple sets"). When the version does not match or cannot be read the plugin reports an explicit error and OMP dialogs are not bridged; supporting a new version requires checking the source and getting E2E passing first (§4.11.4). Likewise the S8 (`558d574`) approach of "fall back to snapshot on version mismatch" is abandoned, and the related code is deleted with T3.2g. |
+| 45 | How the existing broker is adjusted on OMP | **Kept as the hub, with the adapters switched to structured sources** (the user asked on 2026-10-24 that the existing broker also be moved to the new plan). Collab requests are added as a session source; the focus + screen + key path on OMP is deleted in T3.2g. |
+| 46 | Which host versions are supported | **Only pi `1.4.0` and OMP `18.12.x`, no compatibility with multiple versions** (user 2026-10-24: align only with 1.4.0, no more compatibility with multiple versions). Error out at startup on version mismatch; delete the multi-version test matrix and the compatibility code that exists only for old versions. |
+| 47 | What to do with a dialog that cannot be recognized | **Say so clearly, do no half-baked operations** (user 2026-10-24). Remove snapshot arrow keys and "hand back to screen mirroring" (decision 34 is void); `UnsupportedAdapter` gives the notice and offers only "Cancel". |
+| 48 | The `off` mode and the plugin's native implementation | **Delete immediately** (user 2026-10-24, overturning decision 2). Error out at startup when the bridge is unavailable; `pluginOnly` management commands are kept. |
+| 49 | When to delete the old paths | **Delete now, before migration** (user 2026-10-24: not currently in use, deletion has no effect). Unmigrated commands temporarily have no output, and the E2E "to be migrated" list distinguishes expected failures from regressions. |
+| 50 | What host behavior is based on | **Host source is authoritative**: first read the pi `1.4.0` / OMP `18.12.5` source to establish the premises, and use runtime experiments only for verification (twice before, groping by runtime experiments without reading the source wasted many rounds). |
+| 51 | Who executes `!command` / `!!command` sent from Telegram | **Handed to the host to execute, with the plugin keeping only the dangerous-command confirmation** (user agreed 2026-10-25). The editors of pi 1.4.0 and OMP both natively support `!`/`!!`, and before executing, the host sends a `user_bash` event so extensions can take over or refuse (`handleBashCommand` in pi `interactive-mode.ts`); having the plugin call `session.executeBash` directly would **bypass this extension hook** (for example sandbox and permission extensions). So the plugin no longer calls the bash executor directly, but first confirms in Telegram per the `bashConfirm` policy (the plugin's own remote-execution safety gate, with no counterpart concept in the host), and after confirmation submits the original text to the host editor through the gateway, with output sent back as usual. Task D3b. |
+| 52 | Who `/fork` and `/clone` are handed to | **Handed to the host to execute** (user agreed 2026-10-25; revises decision 21). The reasons of decision 21 (an editor submit replaces the runtime, polling singleton conflict) have been eliminated by `e046a98` (in-process lock takeover) and `bf81fd5` (commit the cursor before destructive calls). The rule is unified: commands with a selection interface (`/fork`, `/clone`) are handed to the host and their selectors are taken over by adapters (pi: `UserMessageSelectorComponent`; OMP: TSP), after which the plugin's own message list is deleted; commands with no interface that only call the control interface (`/new`, `/reload`, `/import`) continue to call the host control API. Folded into 3C and 3D respectively, with 3E verifying runtime replacement through E2E. |
+| 53 | How extension dialogs are connected to Telegram on the two hosts | **Extension UI race (§4.12), replacing the collab bridge** (user chose the race direction on 2026-10-24; S25/S25b confirmed on both hosts on 2026-10-25). Revises decision 41: extension select/confirm/input/editor/ask/approve go through the race, and TSP is used only for built-in selectors, `custom` and dashboards. Decision 43 (`/collab` yields) is void: the race does not occupy `collabHost`. |
+| 54 | How plain text from Telegram is handled while a dialog is open | **If the dialog takes text (an input box, a list with search), hand it to the dialog; if it does not, do not submit it as a prompt, and reply "There is a dialog waiting in the terminal (<title>); please answer with the buttons, or send /stop to cancel".** A `/` command first closes this chat's dialog per §4.5 rule 6 and then executes (3E found that the gateway path missed this step after D2, and F9 `a4a2dbe` added it). Basis: consistent with the terminal — while a dialog holds focus no prompt can be sent in the terminal; decided by the controller 2026-10-25 (F8 `7589384`), the user may change it. |
+| 55 | What the plugin does in OMP sub-agent sessions | **Nothing in sub-agents; the main session owns the runtime exclusively** (2026-10-26, issues #13/#15). OMP calls the extension factory again in the same process for each sub-agent (`ctx.agent.kind === "sub"`, OMP `extensibility/extensions/types.ts`). `lib/main-only-pi.ts` wraps `pi.on` handlers so that they do not run in sub-agents; "taking over the runtime" (tearing down the old runtime, writing `runtimeState.dispose`) happens only in the main session's `session_start`, and the factory no longer tears down unconditionally at its start. pi has no sub-agents and no `ctx.agent`, so a missing field is always treated as the main session. **Known and unhandled**: on pi, a third-party extension opening a nested session with the SDK will load this plugin again, pi has no distinguishing field, and no guard is added (there is no reliable criterion, and no guessing-based guard is made). Things done directly in the factory (the coordinator timer, the broker/gateway timers inside the controller) also start in sub-agent instances: the first time `mainOnlyEvents` is triggered by a sub-agent context it calls `disposeInertRuntime`, which tears down only this instance's own timers and controller and does not touch shared state (status bar, process-level menu refresh, the coordinator lease, `runtimeState`) (e97081a, real OMP trace: the sub-agent instance was cleaned up 8ms after creation, and its coordinator timer fired 0 times). Command/tool registration remains on the sub-agent's own runner. |
+| 56 | How wrapping of host dialog methods is de-duplicated | **Scoped per FocusTracker instance; use object marks only when the host's reads are unstable** (initial version 2026-10-26, revised 2026-10-27; issue #16, and the pi regression it caused). Two facts about the hosts (both measured): the tool UI object OMP gives extensions and the `setFocus` of pi's TUI object **return a new function on every read** (unstable reads); pi rebuilds the plugin runtime inside the same process (`/new`, `/reload`), creating a new FocusTracker each time (`new FocusTracker()` in `lib/controller.ts`). Requirements: the same tracker wraps the same method of the same object only one layer (otherwise on OMP one layer is stacked per tick, and the stack overflows after about 3000 times); while each new tracker must install its own layer (otherwise events are delivered only to the destroyed old tracker). Implementation (`lib/tui/install-marks.ts`): the de-duplication state of the three kinds of hooks — entry hook `hookEntryMethods`, race `installRace`, `hookMethod` — is stored per `scope` (the FocusTracker instance) under `globalThis[Symbol.for("pi-telegram-plus.install-marks…")]` (shared across module instances); function identity (both the wrapped function and the wrapper are registered) blocks repeated wrapping on hosts with stable reads, and the object mark `hasStickyMark` only takes effect when two consecutive reads give different functions. The `hookMethod` calls in `output.ts` pass no `scope` and are still de-duplicated process-wide. **Mistakes of the initial version**: it made de-duplication "by (object, method), shared process-wide, not distinguishing trackers", and removed per-tracker function-identity de-duplication. On pi this caused three regressions (all located by tracing): entry hooks were no longer installed after a runtime rebuild (the old version installed 4 times per `showExtension*`, the initial version 1); `installRace` registered a global set while the entry hook consulted the tracker set, so `select/confirm/input` stacked a layer per tick (425 times vs about 45); focus hooks such as `setFocus` were blocked by the sticky object mark (`stableRead=false, sticky=true -> SKIP`), the new tracker received no focus events, and the `/model` dialog was registered as sourceless and stayed open, blocking all later commands. Fixes: 1e44c29, 8e1ba00, b09184b, c5a9030, 8d989f7; `pi:main` recovered from 53/64 to 75/75. **Lesson**: when changing the scope of "who shares state with whom", run all three E2E suites for commands, dialogs and the TUI bridge on both hosts. |
+| 57 | How the OMP login dialog is connected to Telegram | **A dedicated adapter `tsp-login`, one adapter for both phases** (2026-10-26, issue #14). On real OMP four layers of problems were found and fixed in turn: focus classification judged the login dialog carrying a `signal` as progress (`describesLoginSheet`); the adapter was chosen when the dialog had just appeared (with only a link) and the input box appearing later did not change the adapter; the text is in `p.spans` rather than `p.text`, the title is in the inner `overlay.p.head`, and the status is in `spinner.p.label`; the input `TextFormField` has only `describe()` and no `handleNativeEvent()`, so the read descends requiring only `describe` (`describableChild`), while sending events still uses `asComponent`. The link-only phase uses the `progress` model (plain text, the link is clickable; `info` uses `<pre>`), and once an input box exists it reuses the reading and writing of `tspInputAdapter`; the `input` model gains an optional `detail` (description, device code, link). |
+| 58 | Whether to delete the user's message when a dialog turns into a secret input midway | **Judge by the current model, not by the snapshot at dialog opening** (2026-10-26). `isSecretSession`: use `pendingInput` if there is one, otherwise look at the `secret` of the current model. So while the dialog still shows a secret input box, later messages (for example a retry after a typo) are also treated as secrets: remembered and deleted; once the model becomes non-secret they are not deleted. The expectation in an existing case that "the second message after a secret reply does not count as a secret" is revised (that was a by-product of `pendingInput` being cleared). |
+| 59 | Telegram-initiated `!` commands: the result and the terminal input box | **The result always goes back to this command's own message; reject if the previous one is still running; when finished the input box is restored to what it was before the command** (2026-10-27, issue #17; the user confirmed "when sent back to back, be consistent with the TUI: reject with a notice"). All three causes were reproduced by E2E and located by tracing/host source: (1) while an agent turn is in progress, both hosts put the bash output component into `pendingMessagesContainer` (pi `interactive-mode.js` `isDeferred = this.session.isStreaming`; OMP `command-controller.ts` `handleBashCommand`), and it is moved into the chat area only at the next submit; the plugin listened only to the chat area, the scope ended after 1.5 seconds of silence, and the result never reached Telegram. Fix: `output.ts` also claims bash components in the pending area inside the `"!"` scope (`output-pending-add-child`), `hasRunningBash` keeps the scope open until `setComplete`; when the component is later moved into the chat area it is de-duplicated by `bashTracked/bashPushed` (1623a64). (2) While the previous bash was still running the host refused the new `!` and put the text back into the input box, while the scope the plugin opened for the new command replaced the previous one's, so output got attached to the new message. Fix: before submitting check `session.isBashRunning || bashSubmitInFlight`, and on a hit reply with a notice directly and do not submit (37e693a); `bashSubmitInFlight` covers the gap, when the plugin handles messages concurrently, of "submitted but the host sets isBashRunning only about 60ms later" (trace data, 256e0c0). (3) The plugin wrote the command into the editor and submitted it (`submitToHostResult` in `tui-bridge.ts` bypassing the editor's own clearing on Enter), and `restoreDraft` originally wrote back only when the draft was non-empty, so when the draft was empty the command text stayed in the input box. Fix: when the input box is empty or equals the command text always write the draft back (including the empty string); if the user edited the input box themselves while the command ran, it is not overwritten (e35f15e). Acceptance: `Telegram ! commands leave the TUI input clean` (12 runs + draft variants) and `Telegram ! command results under load` (during a turn, back to back, long output, dialog open, `!!`) pass on both OMP and pi; before the fixes they were 0/12 and failing during a turn/back to back respectively. |
 
-"谁发起，谁显示"与"共享所有权"的关系：Telegram 发起的对话框由宿主画在终端里，所以终端上一定也能看到并操作（共享，先操作者生效）；但终端上的变化不会主动推到 Telegram，本地发起的对话框也不会出现在 Telegram。
-
----
-
-## 10. 后续 TODO（不在本次重构范围内）
-
-- [x] ~~清理 `off` 模式~~：v6 改为立即删除，见 §0.1 第 4 条与任务 D1–D4。
-
-- [x] ~~E2E：`settings mirror matches the host screen`（OMP）偶发失败~~：屏幕镜像已在 D2 删除，该步骤不再存在。
-- [x] ~~**运行时被替换时，队列里未发出的 Telegram 调用被静默丢弃。** `lib/active-transport.ts` 在 `isActive()` / lease 不匹配时直接返回兜底结果（`sendButtons` 返回 `message_id: 0`），调用方拿不到错误，看起来像"菜单没发出去"。2026-10-24 S5 测量时每个阶段结束的最后一秒都有几条。应改为显式失败或在新运行时补发。~~：Z1 `736e794`：`/new`、`/reload` 的结果改由新运行时发出（`lib/pending-notices.ts`）；丢弃规则本身保留（防止非活跃实例发消息）。
-
-- [x] ~~**OMP 内置选择器剩余核对**（T3.2e/T3.2f）：`/model`、`/settings`、`/login`、`/agents`、`/hub` 已在 E2E 证实；OMP 的 `/resume`、`/tree` 以及内置对话框里的文字输入框（TSP `edit` 事件）尚未专门验证。~~：Z2 `f346ee3`（标签页、范围、动作栏、搜索）、Z4 `704c595` + Z4b `a5ab7cf`（内置文字输入框）；E2E 已覆盖 `/tree` 切换标签、有历史会话时的 `/resume`（Z6 `23cf7ab`）。
-- [x] ~~**OMP 设置页的其他控件**：数字、文字、多选、快捷键类设置在 Telegram 上只显示"请在终端修改"。~~：Z3 `ec48a21` + Z3b `a8be6ba` + Z8 `f0a8b27`：数字、文字、多选、动作类均可在 Telegram 修改，设置页可搜索；快捷键类仍只在终端修改（只在终端有意义）。
-- [x] ~~**插件命令与宿主同名**：`/status`、`/debug` 由插件处理，会遮住宿主的同名命令；`/tg → Config` 的 Thinking level 与宿主自己的 `/thinking` 重复。~~：`/debug` 移入 `/tg`（N1 `fd4cb1f`）；两个宿主都没有顶层 `/status`（只有 OMP 子命令），不冲突；pi 上隐藏 Config 的 Thinking level（Z5 `2dabd41`），OMP 没有 `/thinking` 命令，保留。
-
-- [x] ~~对话框底部按钮一行超过 8 个时 Telegram 拒收~~：Z7 `c7b4da0` 每行最多 3 个，渲染出口再保证不超过 8 个；E2E 断言改为跳过被拒收的调用（Z7、Z8）。
+On the relation between "whoever initiates, displays" and "shared ownership": a dialog initiated from Telegram is drawn by the host in the terminal, so it can certainly also be seen and operated in the terminal (shared, whoever operates first wins); but changes in the terminal are not actively pushed to Telegram, and locally initiated dialogs do not appear in Telegram either.
 
 ---
 
-## 11. 修订说明
+## 10. Follow-up TODO (not in the scope of this refactor)
 
-### v6（相对 v5，2026-10-24）
+- [x] ~~Clean up the `off` mode~~: v6 changed it to immediate deletion, see §0.1 item 4 and tasks D1–D4.
 
-用户确定：只支持 pi `1.4.0` 与 OMP `18.12.x`；识别不了的对话框明确告知；立即删除 `off` 模式、插件原生实现、旧屏幕镜像与快照方向键；E2E 用"待迁移"清单区分预期失败。新增 §0.1 与决定 46–50；决定 2、34 作废；原则 1、5 与 §4.2.5、§4.6.5 #13、§4.10、§8、§10 相应改写。文中 pi 0.81.1 的行号引用待任务 A1 核对 1.4.0 源码后更新。
+- [x] ~~E2E: `settings mirror matches the host screen` (OMP) fails occasionally~~: screen mirroring was deleted in D2, and this step no longer exists.
+- [x] ~~**When the runtime is replaced, Telegram calls queued but not yet sent are silently dropped.** `lib/active-transport.ts` returns a fallback result directly when `isActive()` / the lease does not match (`sendButtons` returns `message_id: 0`), the caller gets no error, and it looks like "the menu was not sent". In the S5 measurement on 2026-10-24 there were a few in the last second of each stage. It should be changed to fail explicitly or to resend in the new runtime.~~: Z1 `736e794`: the results of `/new` and `/reload` are now sent by the new runtime (`lib/pending-notices.ts`); the dropping rule itself is kept (to prevent inactive instances from sending messages).
 
-### v5（相对 v4，2026-10-24）
+- [x] ~~**Remaining checks of OMP built-in selectors** (T3.2e/T3.2f): `/model`, `/settings`, `/login`, `/agents`, `/hub` have been confirmed by E2E; OMP's `/resume`, `/tree` and the text input boxes in built-in dialogs (TSP `edit` event) have not been specifically verified.~~: Z2 `f346ee3` (tabs, scope, action bar, search), Z4 `704c595` + Z4b `a5ab7cf` (built-in text input boxes); E2E already covers switching tabs in `/tree` and `/resume` with historical sessions (Z6 `23cf7ab`).
+- [x] ~~**Other controls on OMP's settings page**: number, text, multi-select and hotkey settings show only "Please change in the terminal" on Telegram.~~: Z3 `ec48a21` + Z3b `a8be6ba` + Z8 `f0a8b27`: number, text, multi-select and action types can all be changed in Telegram, and the settings page is searchable; hotkey settings are still changed only in the terminal (meaningful only in the terminal).
+- [x] ~~**Plugin commands have the same names as host commands**: `/status` and `/debug` are handled by the plugin and shadow the host's same-named commands; the Thinking level in `/tg → Config` duplicates the host's own `/thinking`.~~: `/debug` moved into `/tg` (N1 `fd4cb1f`); neither host has a top-level `/status` (only an OMP subcommand), so there is no conflict; on pi the Thinking level in Config is hidden (Z5 `2dabd41`), OMP has no `/thinking` command, so it is kept.
 
-依据 OMP 18.12.5 源码（此前误以为 OMP 只有编译后的二进制，未查源码）和三次可行性验证，OMP 一侧改为结构化通道：新增 §4.11 与决定 41–45；§4.6.6 例外二进入过渡期，T3.2g 删除；决定 18 作废。pi 一侧不变。
+- [x] ~~Telegram rejects a dialog when a bottom button row has more than 8 buttons~~: Z7 `c7b4da0` at most 3 per row, and the render exit guarantees no more than 8; the E2E assertion is changed to skip rejected calls (Z7, Z8).
 
-### v4（相对 v3）
+---
 
-依据第三轮评审（6 个高、6 个中、若干细节），全部经源码核实成立。pi-goal 未安装在本机，其组件字段无法核实，因此第 1 条改为"阶段 0 探测后决定"。阶段 0（2026-10-23）已完成：pi 0.81.1、OMP 18.12.5、pi-goal 0.6.0 的探测文件见 `docs/host-probe/`，结论回填到 §4.1.2、§4.1.3、§4.3、§4.4、§4.6.5、§4.6.6、§4.8 和 §6。
+## 11. Revision notes
 
-| 评审点 | 修改位置 |
+### v6 (relative to v5, 2026-10-24)
+
+Decided by the user: support only pi `1.4.0` and OMP `18.12.x`; dialogs that cannot be recognized are reported clearly; delete immediately the `off` mode, the plugin's native implementation, the old screen mirroring and snapshot arrow keys; E2E uses a "to be migrated" list to distinguish expected failures. Added §0.1 and decisions 46–50; decisions 2 and 34 are void; principles 1 and 5 and §4.2.5, §4.6.5 #13, §4.10, §8, §10 are rewritten accordingly. The pi 0.81.1 line number citations in the text await updating after task A1 checks the 1.4.0 source.
+
+### v5 (relative to v4, 2026-10-24)
+
+Based on the OMP 18.12.5 source (it had mistakenly been thought that OMP had only a compiled binary and the source was not consulted) and three feasibility checks, OMP's side is changed to a structured channel: added §4.11 and decisions 41–45; §4.6.6 exception 2 enters a transition period and is deleted by T3.2g; decision 18 is void. The pi side is unchanged.
+
+### v4 (relative to v3)
+
+Based on the third review round (6 high, 6 medium, and several details), all verified against the source. pi-goal is not installed on this machine and its component fields cannot be verified, so item 1 was changed to "decide after the stage 0 probe". Stage 0 (2026-10-23) is complete: the probe files for pi 0.81.1, OMP 18.12.5 and pi-goal 0.6.0 are in `docs/host-probe/`, and the conclusions are filled back into §4.1.2, §4.1.3, §4.3, §4.4, §4.6.5, §4.6.6, §4.8 and §6.
+
+| Review point | Where changed |
 |---|---|
-| CustomGoalAdapter 违反原则 2 | §2 原则 2 指向例外；新增 §4.6.6；阶段 0 加 pi-goal 探测；§9 决定 12 |
-| `isStreaming` 粗筛丢命令输出 | §4.4 去掉该条件；§9 决定 13 |
-| 消息类组件字段判断错误 | §4.4 改为 `streamingComponent` + 构造器名 + `lastMessage`/`hasToolCalls`/`toolCallId` |
-| 传输层脱敏漏匹配、破坏 HTML | §4.7.4 改为源头替换、8 字符下限；§5 文件清单；§9 决定 14 |
-| `expect` 时机与适用范围 | §4.2.3 代码先登记后提交、内置命令不登记；§4.3；§9 决定 15 |
-| 2 秒窗口错过排队 prompt | §4.3 过期条件改为状态判断 + 60 秒上限 |
-| `/more`、`/pair` 不在 `pluginOnly` | §4.2.1、§4.2.2 第 0 步 |
-| pi 的 `hostBuiltin` 无法推导 | §4.2.1 改为附录 A 静态列表 |
-| `pluginOnly` 绕过焦点检查 | §4.2.2 第 0' 步守卫；§4.2.3 检查 `hasPendingInput`；§9 决定 16 |
-| "回复其他消息也算输入"与 `resolveInput` 冲突 | §4.5.1 表格 |
-| progress 无关闭语义 | §4.5 规则 7 |
-| 消息复用与 turn 新发矛盾 | §4.5 规则 2、4.1；§4.7.3 按 owner 类型区分 |
-| 细节 | 删除 `CommandScope.secrets`；§4.3 规则 3 措辞；owner 按 `chatId + messageThreadId` 比较；`keyMap` 保留 3 代；`entryStack` 在 `finally` 出栈；SecretStore `/new` 清空与局限说明；`/export` 包装按 scope 标签生效 |
+| CustomGoalAdapter violates principle 2 | §2 principle 2 points to the exception; new §4.6.6; stage 0 adds a pi-goal probe; §9 decision 12 |
+| `isStreaming` pre-filter loses command output | §4.4 drops that condition; §9 decision 13 |
+| Wrong field checks for message-type components | §4.4 changed to `streamingComponent` + constructor name + `lastMessage`/`hasToolCalls`/`toolCallId` |
+| Transport-layer redaction misses matches and breaks HTML | §4.7.4 changed to source replacement and an 8-character lower bound; §5 file list; §9 decision 14 |
+| Timing and scope of `expect` | §4.2.3 code registers first and submits after, built-in commands not registered; §4.3; §9 decision 15 |
+| The 2-second window misses a queued prompt | §4.3 expiry condition changed to state checks + a 60-second cap |
+| `/more`, `/pair` are not in `pluginOnly` | §4.2.1, §4.2.2 step 0 |
+| pi's `hostBuiltin` cannot be derived | §4.2.1 changed to the static list in Appendix A |
+| `pluginOnly` bypasses the focus check | §4.2.2 step 0' guard; §4.2.3 checks `hasPendingInput`; §9 decision 16 |
+| "A reply to another message also counts as input" conflicts with `resolveInput` | §4.5.1 table |
+| progress has no close semantics | §4.5 rule 7 |
+| Message reuse contradicts new-message-per-turn | §4.5 rules 2, 4.1; §4.7.3 distinguishes by owner type |
+| Details | Delete `CommandScope.secrets`; §4.3 rule 3 wording; owner compared by `chatId + messageThreadId`; `keyMap` keeps 3 generations; `entryStack` pops in `finally`; SecretStore `/new` clearing and limitation notes; the `/export` wrapper takes effect by scope label |
 
-### v3（相对 v2）
+### v3 (relative to v2)
 
-依据第二轮评审（4 个结构问题、7 个中等或细节问题），全部经源码核实成立。另外补充了评审未提到的两点：现有本地命令镜像违反决定 1；`/resume`、`/fork` 的聊天区重建会被 `addChild` 截获造成刷屏。
+Based on the second review round (4 structural issues, 7 medium or detail issues), all verified against the source. Two more points not raised by the review were added: the existing local command mirroring violates decision 1; and the chat-area rebuild of `/resume` and `/fork` would be intercepted by `addChild` and cause flooding.
 
-| 评审点 | 修改位置 |
+| Review point | Where changed |
 |---|---|
-| agent/工具输出会被 OutputCapture 和 renderer 双发 | §4.4 内容域划分与 `addChild` 截获条件；§9 决定 9 |
-| `notify` 双发 | §4.9 第 1 条：`on` 模式下 `notify` 只转宿主 |
-| Gateway 与 `runCommandHandler` 的 UI 模式矛盾；`pluginOnly` 是例外 | §0、§2 原则 1、§4.2.1、§4.2.6（`uiMode`） |
-| 扩展命令没有完成信号 | §4.1.2 新增 `session.prompt` hook；§4.3 第二完成信号；§9 决定 10 |
-| 实例 hook 变旧 | §4.1.1 tick 重新包装；提交 hook 改打在 `defaultEditor.onSubmit` |
-| `mode.editor.editor` 不存在；`focusedComponent` 是私有字段 | §4.1.3 分类表；§4.1.2 焦点读法 |
-| 本地提交抑制范围过大 | §4.2.3 只包同步调用 |
-| 30 分钟上限的收尾 | §4.3 |
-| InfoPanel 让 Snapshot 不可达 | §4.6.5 #12 改为白名单 |
-| entry 关联窗口、confirm 嵌套 | §4.1.2 entry 关联（`WeakMap` + 栈 + 包装工厂） |
-| 密钥作用域与脱敏范围 | §4.7.4 `SecretStore` + transport 层脱敏 |
-| 对话框替换时的摘要优先级 | §4.5 规则 4 |
-| settings cycle 计算 | §4.6.5 #5 |
-| `findShape` 跳过 `editor` | §4.6.3 |
-| ExtensionEditor 提交键 | §4.6.5 #3（已确认 Enter） |
-| `hideOverlay` 路径措辞 | §4.1.3 |
-| `registerExternalInput` 细节 | §4.5.1 |
-| （补充）本地命令镜像 | §4.9 第 5 条；§9 决定 11 |
-| （补充）聊天区重建刷屏 | §4.1.2 `chatContainer.clear` hook；§4.4 |
+| Agent/tool output is sent twice by OutputCapture and renderer | §4.4 content domain split and `addChild` interception conditions; §9 decision 9 |
+| `notify` is sent twice | §4.9 item 1: in `on` mode `notify` goes only to the host |
+| The UI mode of the Gateway contradicts `runCommandHandler`; `pluginOnly` is the exception | §0, §2 principle 1, §4.2.1, §4.2.6 (`uiMode`) |
+| Extension commands have no completion signal | §4.1.2 adds the `session.prompt` hook; §4.3 second completion signal; §9 decision 10 |
+| Instance hooks go stale | §4.1.1 tick re-wraps; the submit hook moves to `defaultEditor.onSubmit` |
+| `mode.editor.editor` does not exist; `focusedComponent` is a private field | §4.1.3 classification table; §4.1.2 how focus is read |
+| The scope of local submit suppression is too large | §4.2.3 wraps only the synchronous call |
+| Wrap-up of the 30-minute cap | §4.3 |
+| InfoPanel makes Snapshot unreachable | §4.6.5 #12 changed to a whitelist |
+| Entry association window, confirm nesting | §4.1.2 entry association (`WeakMap` + stack + wrapped factory) |
+| Secret scope and redaction range | §4.7.4 `SecretStore` + transport-layer redaction |
+| Summary priority when a dialog is replaced | §4.5 rule 4 |
+| settings cycle computation | §4.6.5 #5 |
+| `findShape` skips `editor` | §4.6.3 |
+| ExtensionEditor submit key | §4.6.5 #3 (Enter confirmed) |
+| `hideOverlay` path wording | §4.1.3 |
+| `registerExternalInput` details | §4.5.1 |
+| (Added) local command mirroring | §4.9 item 5; §9 decision 11 |
+| (Added) chat-area rebuild flooding | §4.1.2 `chatContainer.clear` hook; §4.4 |
 
-### v2（相对 v1）
+### v2 (relative to v1)
 
-依据一次针对 pi 0.81.1 源码和插件代码的评审，全部 14 条意见经核实成立（"OMP 未安装"一条除外：OMP 安装在 `~/.local/bin/omp`，但为编译后的二进制，确实无法直接复核，因此新增阶段 0）。主要修改：
+Based on one review of the pi 0.81.1 source and the plugin code, all 14 comments were verified as valid (except "OMP is not installed": OMP is installed at `~/.local/bin/omp`, but as a compiled binary it indeed cannot be directly rechecked, so stage 0 was added). Main changes:
 
-| 评审点 | 修改位置 |
+| Review point | Where changed |
 |---|---|
-| `onSubmit` 只对部分命令挂起 | §4.2.3 列出 await 型与立即返回型；草稿恢复移到 scope 结束（§4.2.4）；scope 结束条件重写（§4.3） |
-| SettingsList 子菜单不调 `setFocus` | §4.6.5 #5：子菜单为同一会话内的嵌套状态；`ThemeSubmenu` 降级 |
-| 字段位置、焦点对象 | §4.1.3 会话身份以焦点对象为准；§4.6.3 新增 `findShape`；附录 B 修正 |
-| 焦点 ≠ 对话框；非捕获浮层；`setFocusInternal` | §4.1.3 焦点分类、焦点校验；非捕获浮层列为非目标 |
-| scope 过早结束丢输出 | §4.3 |
-| `/fork` 写编辑器 | §4.2.4 |
-| enqueued turn 归属 | §4.2.6、§4.3 规则 2 |
-| 文本输入路由、密钥来源 | §4.5.1、§4.7.4、`LoginDialogAdapter` |
-| 快照回调串台 | §4.7.1 快照统一用 `tgplus:dlg:` |
-| 多问题问卷、approve | `questionnaire`、`approval` 模型；适配器 #4、#10 |
-| 插件命令优先级、`/debug` 重名 | §4.2.1、§4.2.2 |
-| 缺省值迁移、配置矛盾 | §4.10；§8 删除"可配置禁用密钥" |
-| 阶段 1 事后判定 | 阶段 1 改为静态白名单；新 hook 在阶段 1 只观察 |
-| 零碎项 | 文档头改为"取代原则 1"；`/export` 改为取宿主方法返回值；`tui-bridge.ts` 统一为"阶段 5 删除"；插件代码引用改为函数名 |
+| `onSubmit` hangs only for some commands | §4.2.3 lists the await type and the return-immediately type; draft restoration moved to scope end (§4.2.4); scope end conditions rewritten (§4.3) |
+| SettingsList submenu does not call `setFocus` | §4.6.5 #5: a submenu is nested state within the same session; `ThemeSubmenu` degrades |
+| Field locations, focused object | §4.1.3 session identity is based on the focused object; §4.6.3 adds `findShape`; Appendix B corrected |
+| Focus ≠ dialog; non-capturing overlays; `setFocusInternal` | §4.1.3 focus classification, focus validation; non-capturing overlays listed as a non-goal |
+| Scope ends too early and loses output | §4.3 |
+| `/fork` writes the editor | §4.2.4 |
+| Ownership of enqueued turns | §4.2.6, §4.3 rule 2 |
+| Text input routing, secret sources | §4.5.1, §4.7.4, `LoginDialogAdapter` |
+| Snapshot callback cross-talk | §4.7.1 snapshots uniformly use `tgplus:dlg:` |
+| Multi-question questionnaire, approve | `questionnaire`, `approval` models; adapters #4, #10 |
+| Plugin command priority, `/debug` name clash | §4.2.1, §4.2.2 |
+| Default-value migration, config contradiction | §4.10; §8 deletes "configurable disabling of secrets" |
+| Post-hoc judgment in stage 1 | Stage 1 changed to a static whitelist; new hooks only observe in stage 1 |
+| Miscellany | Doc header changed to "supersedes principle 1"; `/export` changed to take the host method's return value; `tui-bridge.ts` unified as "deleted in stage 5"; plugin code citations changed to function names |
 
 ---
 
-## 附录 A：pi 内置命令分类（0.81.1，`setupEditorSubmitHandler` L2085-2218）
+## Appendix A: pi built-in command classification (0.81.1, `setupEditorSubmitHandler` L2085-2218)
 
-| 类别 | 命令 | `onSubmit` 行为 |
+| Category | Commands | `onSubmit` behavior |
 |---|---|---|
-| 打开对话框 | `/settings`、`/fork`、`/tree`、`/trust`、`/logout`、`/resume` | 立即返回 |
-| 打开对话框 | `/scoped-models`、`/login`、`/model`（无参数，或参数无精确匹配） | await |
-| 只有输出 | `/name`、`/session`、`/changelog`、`/debug`、彩蛋命令 | 立即返回 |
-| 只有输出 | `/export`、`/share`、`/compact`、`/model <精确名>` | await |
-| 宿主控制（原生处理器） | `/reload`、`/fork`、`/clone`、`/import` | await 或立即返回；**不提交编辑器**（§9 决定 21） |
-| 宿主控制（会话替换） | `/new` | 走 `ctx.newSession()`，不提交编辑器（§9 决定 22） |
-| 终端专属（§4.8） | `/copy`、`/hotkeys`、`/quit` | — |
-| 前缀 | `!`/`!!` | 保留现有 `runTelegramBash` |
+| Opens a dialog | `/settings`, `/fork`, `/tree`, `/trust`, `/logout`, `/resume` | Returns immediately |
+| Opens a dialog | `/scoped-models`, `/login`, `/model` (no argument, or the argument has no exact match) | await |
+| Output only | `/name`, `/session`, `/changelog`, `/debug`, Easter egg commands | Returns immediately |
+| Output only | `/export`, `/share`, `/compact`, `/model <exact name>` | await |
+| Host control (native handler) | `/reload`, `/fork`, `/clone`, `/import` | await or returns immediately; **not submitted to the editor** (§9 decision 21) |
+| Host control (session replacement) | `/new` | Goes through `ctx.newSession()`, not submitted to the editor (§9 decision 22) |
+| Terminal-only (§4.8) | `/copy`, `/hotkeys`, `/quit` | — |
+| Prefix | `!`/`!!` | Keep the existing `runTelegramBash` |
 
-`/model <词>`：`handleModelCommand`（L3586）精确匹配到模型时直接切换并 `showStatus`，否则打开带搜索词的选择器。
+`/model <term>`: when `handleModelCommand` (L3586) matches a model exactly it switches directly and calls `showStatus`; otherwise it opens the selector with the search term.
 
-扩展命令、提示词模板、技能不在这个 `if` 链中，会落到后面的通用提交逻辑（压缩中 L2236、流式中 L2248、空闲时 `onInputCallback` L2262），同样适用 Gateway 的"直接提交"。
+Extension commands, prompt templates and skills are not in this `if` chain and fall through to the generic submit logic after it (while compacting L2236, while streaming L2248, when idle `onInputCallback` L2262), and the Gateway's "submit directly" applies to them equally.
 
-阶段 1 的白名单取"只有输出"两行中可提交且不替换运行时的命令：`/name`、`/session`、`/changelog`、`/debug`、`/export`、`/share`、`/compact` 和彩蛋命令；`/new` 走 `ctx.newSession()`；`/reload`、`/fork`、`/clone`、`/import` 保留原生处理器。OMP 的命令在阶段 3 接入。
+The stage 1 whitelist takes the commands in the two "output only" rows that can be submitted and do not replace the runtime: `/name`, `/session`, `/changelog`, `/debug`, `/export`, `/share`, `/compact` and the Easter egg commands; `/new` goes through `ctx.newSession()`; `/reload`, `/fork`, `/clone`, `/import` keep the native handlers. OMP's commands are connected in stage 3.
 
-## 附录 B：pi 对话框组件结构（0.81.1）
+## Appendix B: pi dialog component structure (0.81.1)
 
-| 对话框 | 焦点对象 | 数据所在 |
+| Dialog | Focused object | Where the data is |
 |---|---|---|
-| 扩展 select/confirm | `ExtensionSelectorComponent` | 自身：`options`、`selectedIndex`、`onSelectCallback` |
-| 扩展 input | `ExtensionInputComponent` | 自身：`input`（Input）、`onSubmitCallback` |
-| `/settings` | `selector.getSettingsList()`（SettingsList） | SettingsList 自身：`items`、`filteredItems`、`selectedIndex`、`onChange`；打开子菜单时为 `submenuComponent`（子菜单类内部多为 SelectList，`ThemeSubmenu` 例外）。`SettingsSelectorComponent` 只持有一个主 `settingsList` |
-| theme / thinking / show-images | 各自组件 | 内部 `SelectList`：`items`、`filteredItems`、`selectedIndex`、`setSelectedIndex()`、`getSelectedItem()` |
-| `/model` | `ModelSelectorComponent` | 自身：`filteredModels`、`selectedIndex`、`currentModel`、`searchInput`、`scope` |
-| `/logout`、`/login` 服务商 | `OAuthSelectorComponent` | 自身：`filteredProviders`、`selectedIndex`、`searchInput` |
-| `/resume` | `SessionSelectorComponent` | 字段 `sessionList`（普通类 `SessionList`，不是组件）：`filteredSessions`、`selectedIndex`、`searchInput`、`sortMode`、`nameFilter` |
-| `/fork` | `selector.getMessageList()` | 消息列表对象（实现时确认字段） |
-| `/login` 输入 | `LoginDialogComponent` | `Input`；提交后输入框被替换为 `> value` 文本 |
-| `/share` 等 | `BorderedLoader` | 进度，不是对话框 |
-| `/reload` | `reloadBox`（Box） | 无 `handleInput`，忽略 |
-| `/tree`、`/scoped-models`、`/trust`、config | 各自组件 | 实现时用 `findShape` 确认 |
+| Extension select/confirm | `ExtensionSelectorComponent` | On itself: `options`, `selectedIndex`, `onSelectCallback` |
+| Extension input | `ExtensionInputComponent` | On itself: `input` (Input), `onSubmitCallback` |
+| `/settings` | `selector.getSettingsList()` (SettingsList) | On the SettingsList itself: `items`, `filteredItems`, `selectedIndex`, `onChange`; when a submenu is open it is `submenuComponent` (mostly a SelectList inside the submenu class, with `ThemeSubmenu` the exception). `SettingsSelectorComponent` holds only one main `settingsList` |
+| theme / thinking / show-images | Each component | Internal `SelectList`: `items`, `filteredItems`, `selectedIndex`, `setSelectedIndex()`, `getSelectedItem()` |
+| `/model` | `ModelSelectorComponent` | On itself: `filteredModels`, `selectedIndex`, `currentModel`, `searchInput`, `scope` |
+| `/logout`, `/login` provider | `OAuthSelectorComponent` | On itself: `filteredProviders`, `selectedIndex`, `searchInput` |
+| `/resume` | `SessionSelectorComponent` | Field `sessionList` (an ordinary class `SessionList`, not a component): `filteredSessions`, `selectedIndex`, `searchInput`, `sortMode`, `nameFilter` |
+| `/fork` | `selector.getMessageList()` | A message list object (fields to be confirmed during implementation) |
+| `/login` input | `LoginDialogComponent` | `Input`; after submit the input box is replaced by `> value` text |
+| `/share` etc. | `BorderedLoader` | Progress, not a dialog |
+| `/reload` | `reloadBox` (Box) | No `handleInput`, ignored |
+| `/tree`, `/scoped-models`, `/trust`, config | Each component | Confirm with `findShape` during implementation |
 
-结论：pi-tui 的基础控件（`SelectList` / `SettingsList`）只覆盖设置类对话框；模型、会话、登录等高频选择器是自绘列表，大多遵循"`filtered*` 数组 + `selectedIndex` + 选中回调"的约定，但数据可能在非组件的嵌套对象上，由 `findShape` + 通用 `FilteredListAdapter` 处理，再按需补专用适配器。
+Conclusion: pi-tui's base controls (`SelectList` / `SettingsList`) cover only settings-type dialogs; high-frequency selectors such as model, session and login are self-drawn lists that mostly follow the convention "a `filtered*` array + `selectedIndex` + a selection callback", but the data may be on nested non-component objects, handled by `findShape` + the generic `FilteredListAdapter`, with dedicated adapters added as needed.
