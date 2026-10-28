@@ -42,6 +42,11 @@ reimplementation and several settings, so read **Breaking changes** before upgra
 
 ### Added
 
+- **Message mode is back in `/tg` → Config** (📨 Message mode). `steer` (default) injects your message into the
+  running main turn; `queue` sends it as a follow-up after the turn ends. The choice applies to the next
+  message and is saved per project. Only these two values exist; an invalid `messageMode` in a config file is
+  an error, not ignored. While background agents run with the main loop idle, messages are still held and
+  delivered as a fresh main-thread turn in either mode.
 - **Host dialogs in Telegram.** A dialog raised by a command or turn started from Telegram is drawn by the
   host in the terminal and shown in the chat at the same time; whoever answers first wins, and the other
   side's dialog or keyboard is withdrawn.

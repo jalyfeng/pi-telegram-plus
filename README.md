@@ -74,7 +74,7 @@ Shell commands work the same way: `!cmd` and `!!cmd` (output kept out of the mod
 ### 📨 Message Delivery (TUI Parity)
 Messages sent from Telegram behave **exactly like typing in the pi terminal**:
 
-- **Main thread running** — the message steers into the main turn, like typing while the agent works.
+- **Main thread running** — by default the message steers into the main turn, like typing while the agent works. Set **Message mode** to `queue` (`/tg` → Config) to send it as a follow-up after the turn ends instead.
 - **Background workflow running** (main loop idle) — the message is held (`⏳ π is busy — holding your message…`) and delivered as a **fresh main-thread turn** with a plain prompt once the main loop settles. It is never injected into a workflow agent's conversation.
 - **Everything idle** — the message starts a fresh main-thread turn immediately.
 
