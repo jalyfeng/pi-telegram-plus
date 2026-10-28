@@ -810,6 +810,8 @@ export function createTelegramController(deps: {
     enabled: () => hostOwnsPrompts(bridge),
   });
   dialogBroker.start();
+  // Output too long for the command's message is paged on it by the broker.
+  outputCapture.attachPager((target, title, html) => dialogBroker.showPaged(target, title, html));
 
   /**
    * §4.2.6 item 2: while the DialogBroker is live, prompts raised by work this

@@ -53,9 +53,13 @@ export type OutputTelegram = {
   chatId: number;
   messageThreadId?: number;
   messageId: number;
-  /** Header already sent by the gateway; the first edit keeps it. */
+  /** Header already sent by the gateway; every render of the message starts with it. */
   ackHtml: string;
 };
+
+/** Shows a command's output that does not fit one message on that message, as
+ * pages (the DialogBroker draws them with its ◀ / ▶ buttons). */
+export type OutputPager = (target: { chatId: number; messageThreadId?: number; messageId: number }, title: string, html: string) => void;
 
 type OutputTransport = Pick<TelegramTransport, "sendText" | "editText" | "sendDocument">;
 
@@ -66,10 +70,10 @@ type Binding = {
   dropped: number;
   /** BashExecutionComponents claimed by a "!" scope (D3b); final render once. */
   bashComponents: Record<string, unknown>[];
-  /** Output already rendered into the ack message (non-overflow case). */
+  /** All output collected so far, as Telegram HTML (one entry per component). */
   outputHtml: string;
-  /** True once the ack message could not hold the output and tails were sent. */
-  overflowed: boolean;
+  /** True once the final content was handed to the pager (it no longer fits one message). */
+  paged: boolean;
   lastText?: string;
   lastEditAt: number;
   timer?: NodeJS.Timeout;
@@ -104,12 +108,18 @@ export class OutputCapture {
   private readonly presentClaimed = new WeakSet<object>();
   /** Mode objects that already carry the `presentCommandOutput` stage. */
   private readonly presentHooked = new WeakSet<object>();
+  private pager?: OutputPager;
 
   constructor(
     private readonly transport: OutputTransport,
     private readonly origin: OriginTracker,
     private readonly secrets?: SecretStore,
   ) {}
+
+  /** Where the final output goes when it does not fit one message. */
+  attachPager(pager: OutputPager): void {
+    this.pager = pager;
+  }
 
   start(): void {
     if (this.unsubscribe) return;
@@ -132,7 +142,7 @@ export class OutputCapture {
       dropped: 0,
       bashComponents: [],
       outputHtml: "",
-      overflowed: false,
+      paged: false,
       lastEditAt: 0,
       flushing: false,
       finalPending: false,
@@ -162,6 +172,8 @@ export class OutputCapture {
       else outputLog.debug("bash component unfinished at scope end; running frame dropped", { scope: binding.scope.id });
     }
     binding.finished = true;
+    // The scope is over: whatever dialog stood on the message has no say in its final content.
+    binding.scope.dialogOpen = false;
     if (binding.timer) {
       clearTimeout(binding.timer);
       binding.timer = undefined;
@@ -430,12 +442,18 @@ export class OutputCapture {
     binding.timer.unref?.();
   }
 
+  /** One command, one message (plan §0.0 #2): the ack message is the only
+   * place output goes. A dialog that owns the message keeps it, so output waits
+   * until the dialog closes; the final render composes the header, the dialog
+   * summaries and the output, and pages the result on the message when it
+   * does not fit. Nothing is ever sent as an extra message. */
   private async flush(binding: Binding, final: boolean): Promise<void> {
     if (binding.flushing) {
       if (final) binding.finalPending = true;
       return;
     }
     if (binding.entries.length === 0 && !final) return;
+    if (!final && binding.scope.dialogOpen) return;
     binding.flushing = true;
     try {
       let added = binding.entries.splice(0).join("\n\n").trim();
@@ -445,44 +463,8 @@ export class OutputCapture {
         const tail = `…${dropped} more output entries; see the terminal`;
         added = added ? `${added}\n\n${tail}` : tail;
       }
-      const combined = added
-        ? (binding.outputHtml ? `${binding.outputHtml}\n\n${added}` : added)
-        : binding.outputHtml;
-      const header = binding.telegram.ackHtml;
-      // Empty output must not append the separator: the final ack would
-      // otherwise carry three blank lines before `✓ Done`.
-      const single = splitTelegramHtml(combined ? `${header}\n\n${combined}` : header, 3400);
-      if (single.length === 1 && !binding.overflowed) {
-        let text = single[0];
-        if (final && !text.includes("✓ Done")) text += "\n\n<i>✓ Done</i>";
-        if (text !== binding.lastText) {
-          binding.lastText = text;
-          binding.lastEditAt = Date.now();
-          await this.transport.editText(binding.telegram.chatId, binding.telegram.messageId, text)
-            .catch(outputLog.swallow("debug", "edit command output failed", { chatId: binding.telegram.chatId }));
-        }
-        binding.outputHtml = combined;
-      } else {
-        const body = binding.overflowed ? added : combined;
-        if (body) {
-          for (const chunk of splitTelegramHtml(body, 3400)) {
-            await this.transport.sendText(
-              binding.telegram.chatId,
-              chunk,
-              binding.telegram.messageThreadId,
-            ).catch(outputLog.swallow("warn", "send command output tail failed", { chatId: binding.telegram.chatId }));
-          }
-        }
-        binding.overflowed = true;
-        binding.outputHtml = "";
-        if (final) {
-          await this.transport.sendText(
-            binding.telegram.chatId,
-            "<i>✓ Done</i>",
-            binding.telegram.messageThreadId,
-          ).catch(outputLog.swallow("debug", "send command completion failed", { chatId: binding.telegram.chatId }));
-        }
-      }
+      if (added) binding.outputHtml = binding.outputHtml ? `${binding.outputHtml}\n\n${added}` : added;
+      await this.render(binding, final);
     } finally {
       binding.flushing = false;
       if (binding.finalPending) {
@@ -490,6 +472,32 @@ export class OutputCapture {
         void this.flush(binding, true);
       }
     }
+  }
+
+  private async render(binding: Binding, final: boolean): Promise<void> {
+    const summaries = binding.scope.dialogSummaries.map((line) => escapeHtml(line));
+    const body = [...summaries, binding.outputHtml].filter((part) => part.length > 0).join("\n\n");
+    const header = binding.telegram.ackHtml;
+    const whole = body ? `${header}\n\n${body}` : header;
+    if (splitTelegramHtml(whole, 3400).length > 1) {
+      // Too long for one message: the final content is paged on the message itself.
+      // Interim renders wait for the final one.
+      if (!final || binding.paged) return;
+      binding.paged = true;
+      if (this.pager) {
+        this.pager(binding.telegram, `▶️ ${binding.scope.commandText}`, body);
+      } else {
+        outputLog.warn("no output pager attached; command output too long for one message", { scope: binding.scope.id });
+      }
+      return;
+    }
+    // ✓ Done only when there is nothing else to show.
+    const text = !body && final ? `${header}\n\n<i>✓ Done</i>` : whole;
+    if (text === binding.lastText) return;
+    binding.lastText = text;
+    binding.lastEditAt = Date.now();
+    await this.transport.editText(binding.telegram.chatId, binding.telegram.messageId, text)
+      .catch(outputLog.swallow("debug", "edit command output failed", { chatId: binding.telegram.chatId }));
   }
 
   /** Send the file an `/export` just produced back to the scope that asked for

@@ -144,6 +144,8 @@ export class CommandGateway {
     if (messageId === undefined) return true;
 
     const scope = this.deps.origin.begin(origin, label, commandText, draft);
+    // One command, one message: a dialog the command opens is drawn on this ack.
+    scope.telegramMessageId = messageId;
     this.deps.output.bind(scope, {
       chatId: origin.chatId,
       messageThreadId: origin.messageThreadId,

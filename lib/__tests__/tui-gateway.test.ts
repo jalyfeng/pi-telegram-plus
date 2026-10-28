@@ -183,7 +183,9 @@ describe("command gateway", () => {
     expect(text).toContain("second");
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
-    expect(transport.edits.at(-1)?.text).toContain("✓ Done");
+    // Done is shown only when there is nothing else to show.
+    expect(transport.edits.at(-1)?.text).toContain("second");
+    expect(transport.edits.at(-1)?.text).not.toContain("✓ Done");
     origin.end(scope, "idle");
   });
 
