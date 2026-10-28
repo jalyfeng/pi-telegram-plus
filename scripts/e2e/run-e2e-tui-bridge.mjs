@@ -7,7 +7,7 @@
  * provider. Each run proves:
  *
  *   1. BotMenu includes commands discovered from the live host catalog.
- *   2. A local TUI command is mirrored to Telegram without opening a selector.
+ *   2. A local TUI command is not mirrored to Telegram (it stays in the terminal).
  *   3. Telegram `/settings` opens the real dialog brokered by the plugin:
  *      `tgplus:dlg:` semantic rows (the screen-mirror keyboard was removed in D2).
  *   4. Rows/keys/cancel reach the real host input path and mirror their
@@ -335,18 +335,25 @@ async function runHost(host, piCli, label) {
     record("BotMenu merges the host command catalog", false, String(error.message).slice(0, 400));
   }
 
-  // ── Local TUI → Telegram mirror ────────────────────────────────────────
+  // ── Local TUI command is not mirrored to Telegram ──────────────────────
+  // A command typed in the local terminal stays local: nothing about it may
+  // reach the chat (the old local-command mirror was removed on purpose).
   try {
     await sleep(800);
+    const sinceLocal = (await controlGet("/_control/log")).calls.length;
     const typed = tmux("send-keys", "-t", session, "-l", "!true");
     if (typed.status !== 0) throw new Error(typed.stderr || "send-keys failed");
     tmux("send-keys", "-t", session, "Enter");
-    await waitFor("local command mirrored to Telegram", (state) => messages(state)
-      .some((call) => String(call.body?.text ?? "").includes("TUI command")
-        && String(call.body?.text ?? "").includes("!true")));
-    record("local TUI command is mirrored to Telegram", true);
+    await sleep(4000);
+    const leaked = messages({ calls: (await controlGet("/_control/log")).calls.slice(sinceLocal) })
+      .filter((call) => String(call.body?.text ?? "").includes("!true")
+        || String(call.body?.text ?? "").includes("TUI command"));
+    if (leaked.length > 0) {
+      throw new Error(`local command leaked to Telegram: ${leaked.map((call) => String(call.body?.text ?? "").slice(0, 120)).join(" | ")}`);
+    }
+    record("local TUI command is not mirrored to Telegram", true, "nothing sent within 4 s");
   } catch (error) {
-    record("local TUI command is mirrored to Telegram", false, String(error.message).slice(0, 400));
+    record("local TUI command is not mirrored to Telegram", false, String(error.message).slice(0, 400));
   }
 
   // ── Telegram /settings → interactive TUI selector ──────────────────────

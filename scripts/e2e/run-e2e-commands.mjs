@@ -196,16 +196,21 @@ async function runHost(host, label, phase = "main") {
 
   let updateId = 5000;
   let messageId = 9000;
-  const injectMessage = (text) => controlPost("/_control/inject", {
-    updates: [{
-      update_id: updateId++,
-      message: {
-        message_id: messageId++, date: Math.floor(Date.now() / 1000),
-        chat: { id: 42, type: "private" }, from: { id: 42, is_bot: false, first_name: "E2E" },
-        text,
-      },
-    }],
-  });
+  const injectMessage = async (text) => {
+    const id = messageId++;
+    await controlPost("/_control/inject", {
+      updates: [{
+        update_id: updateId++,
+        message: {
+          message_id: id, date: Math.floor(Date.now() / 1000),
+          chat: { id: 42, type: "private" }, from: { id: 42, is_bot: false, first_name: "E2E" },
+          text,
+        },
+      }],
+    });
+    return id;
+  };
+
   const injectCallback = async (data, targetMessageId) => {
     const callbackId = `cb-${updateId}`;
     await controlPost("/_control/inject", {
@@ -246,22 +251,62 @@ async function runHost(host, label, phase = "main") {
   const cursor = async () => (await controlGet()).calls.length;
 
   /**
-   * Dispatch a command and wait for its visible response. `match` picks which response is
-   * the command's own: a command that had to close an unanswered dialog is preceded by the
-   * notice about it, and taking the first message would read that notice as the answer.
+   * Latest state of one Telegram message, folded from every later send and edit of it.
+   * Telegram semantics: an edit without reply_markup removes the keyboard.
    */
-  const dispatch = async (command, { timeoutMs = STEP_TIMEOUT_MS, match } = {}) => {
+  const foldState = (calls, messageId) => {
+    let current;
+    for (const entry of calls) {
+      if (wasRejected(entry) || !entry.body) continue;
+      if (entry.method === "sendMessage") {
+        if (entry.message_id !== messageId) continue;
+        current = { text: String(entry.body.text ?? ""), rows: entry.body.reply_markup?.inline_keyboard ?? [] };
+      } else if (entry.method === "editMessageText" || entry.method === "editMessageReplyMarkup") {
+        if (entry.body.message_id !== messageId) continue;
+        current = {
+          text: entry.method === "editMessageText" ? String(entry.body.text ?? "") : (current?.text ?? ""),
+          rows: entry.body.reply_markup?.inline_keyboard ?? [],
+        };
+      }
+    }
+    return current
+      ? {
+        method: "sendMessage",
+        message_id: messageId,
+        body: { message_id: messageId, text: current.text, reply_markup: { inline_keyboard: current.rows } },
+      }
+      : undefined;
+  };
+  const latestState = async (messageId) => foldState((await controlGet()).calls, messageId);
+  /** Wait until a command's own message (the ack, edited in place) satisfies `predicate`. */
+  const awaitMessage = (label, messageId, predicate, timeoutMs = STEP_TIMEOUT_MS) => waitFor(label, (state) => {
+    const current = foldState(state.calls, messageId);
+    return current && predicate(current) ? current : false;
+  }, timeoutMs);
+  const isNav = (button) => /^tgplus:dlg:[^:]+:\d+:p(?::|$)/.test(String(button.callback_data ?? ""));
+  const isCancel = (button) => DIALOG_CANCEL.test(String(button.callback_data ?? ""));
+  /** Buttons that choose something: no paging, no cancel, no `n/m` marker. */
+  const choicesOf = (call) => buttonsOf(call).filter((b) => !isNav(b) && !isCancel(b) && !/^\d+\/\d+$/.test(String(b.text ?? "")));
+  /** Visible text of a command message without its `▶️ /cmd` header and `✓ Done` marker. */
+  const panelBody = (text) => String(text ?? "")
+    .replace(/^\s*<b>▶️[^<]*<\/b>/, "")
+    .replace(/✓ Done/g, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  /**
+   * Dispatch a command and return its acknowledgement: the sendMessage that replies to the
+   * injected update. The command's dialog or result is an edit of that same message, read
+   * with awaitMessage/latestState.
+   */
+  const dispatch = async (command, { timeoutMs = STEP_TIMEOUT_MS } = {}) => {
     const since = await cursor();
-    await injectMessage(command);
-    const call = await waitFor(`response to ${command}`, (state) => {
-      const hit = state.calls.slice(since).find((entry) =>
-        RESPONSE_METHODS.has(entry.method)
-        && entry.body
-        && (typeof entry.body.text === "string" || Array.isArray(entry.body.reply_markup?.inline_keyboard))
-        && (!match || match.test(String(entry.body.text ?? ""))));
-      return hit ?? false;
-    }, timeoutMs);
-    return call;
+    const injectedId = await injectMessage(command);
+    return waitFor(`response to ${command}`, (state) => state.calls.slice(since).find((entry) =>
+      entry.method === "sendMessage"
+      && !wasRejected(entry)
+      && entry.body?.reply_parameters?.message_id === injectedId) ?? false, timeoutMs);
   };
 
   /** Click a button and wait for the next keyboard/text produced for it. */
@@ -281,25 +326,82 @@ async function runHost(host, label, phase = "main") {
     }, timeoutMs);
     return call;
   };
+  /** A cancel whose follow-up may legitimately not come: never throws, short wait. */
+  const cancelQuietly = (button, messageId) => click(button, messageId, { timeoutMs: 6_000 }).catch(() => undefined);
+
+  /**
+   * Wait until a command's own message stops changing: its dialog or result arrives as edits
+   * after the ack, so settling before that would miss the dialog it opens.
+   */
+  const quiesce = async (messageId, { quietMs = 1500, maxMs = 15_000 } = {}) => {
+    const started = Date.now();
+    let key;
+    let changedAt = Date.now();
+    while (Date.now() - started < maxMs) {
+      const current = await latestState(messageId);
+      const next = JSON.stringify(current?.body ?? null);
+      if (next !== key) {
+        key = next;
+        changedAt = Date.now();
+      } else if (Date.now() - changedAt >= quietMs) {
+        return;
+      }
+      await sleep(300);
+    }
+  };
 
   const findButton = (call, pattern) => buttonsOf(call).find((b) => pattern.test(String(b.text ?? "")));
 
-  /** Leave any open menu/mirror so the next command starts clean. */
+  /**
+   * Leave any open dialog or menu so the next command starts clean. Every message the bot
+   * sent is checked, newest first: a dialog is an edit of its command's message, so an open
+   * dialog can sit on any of them. Page-only keyboards are ignored.
+   */
   const settle = async () => {
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    const tried = new Set();
+    let clicks = 0;
+    let escaped = false;
+    while (clicks < 8) {
       const state = await controlGet();
-      const call = lastKeyboardCall(state);
-      if (!call) return;
-      const target = call.body?.message_id ?? call.message_id;
-      if (hasDialog(call)) {
-        const cancel = buttonsOf(call).find((b) => DIALOG_CANCEL.test(String(b.callback_data ?? "")));
-        if (!cancel) return;
-        await click(cancel, target).catch(() => undefined);
+      // Recovery: a dialog the host opened that Telegram never brokered blocks every later
+      // command, and the plugin then says so. Close it in the terminal (Escape) once per settle.
+      const blocked = state.calls.slice(-6).some((c) => c.method === "sendMessage"
+        && /unanswered dialog/i.test(String(c.body?.text ?? "")));
+      if (blocked && !escaped) {
+        escaped = true;
+        tmux("send-keys", "-t", session, "Escape");
+        await sleep(800);
         continue;
       }
+      const sent = [...new Set(state.calls
+        .filter((c) => c.method === "sendMessage" && !wasRejected(c))
+        .map((c) => c.message_id))].reverse();
+      let open;
+      for (const id of sent) {
+        const current = foldState(state.calls, id);
+        const cancel = current && buttonsOf(current).find(isCancel);
+        if (cancel && !tried.has(`${id}|${cancel.callback_data}`)) {
+          open = { id, cancel };
+          break;
+        }
+      }
+      if (open) {
+        tried.add(`${open.id}|${open.cancel.callback_data}`);
+        clicks += 1;
+        await cancelQuietly(open.cancel, open.id);
+        continue;
+      }
+      // Plain keyboards (the /tg menus): Back, Close or Cancel as before.
+      const call = lastKeyboardCall(state);
+      if (!call || hasDialog(call)) return;
       const back = findButton(call, /^(⬅️ Back|❌ Close|Cancel)$/);
       if (!back) return;
-      await click(back, target).catch(() => undefined);
+      const target = call.body?.message_id ?? call.message_id;
+      const key = `menu|${target}|${back.callback_data}`;
+      if (tried.has(key)) return;
+      tried.add(key);
+      clicks += 1;
+      await cancelQuietly(back, target);
     }
   };
 
@@ -611,6 +713,18 @@ async function runHost(host, label, phase = "main") {
 
   // ── Every advertised command ──────────────────────────────────────────
   const terminating = new Set(["/quit", "/exit"]);
+  // What one command sent back to its own update, and to its own ack message.
+  const footprintOf = (command, calls, replyId, ackId) => {
+    const own = calls.filter((c) => !wasRejected(c) && c.body && (
+      (c.method === "sendMessage" && replyId !== undefined && c.body.reply_parameters?.message_id === replyId)
+      || ((c.method === "editMessageText" || c.method === "editMessageReplyMarkup") && c.body.message_id === ackId)));
+    return {
+      command,
+      sends: own.filter((c) => c.method === "sendMessage").length,
+      boxed: own.filter((c) => /[╭╮╰╯│─]/.test(String(c.body.text ?? ""))).length,
+    };
+  };
+  const footprints = [];
   // Network commands are advertised but never sent; see NETWORK_COMMANDS.
   for (const command of menuCommands) {
     if (terminating.has(command)) continue; // covered by their own phases
@@ -619,11 +733,17 @@ async function runHost(host, label, phase = "main") {
       continue;
     }
     try {
-      const call = await dispatch(command);
-      const text = String(call.body?.text ?? "").replace(/\s+/g, " ").slice(0, 80);
-      const buttons = buttonsOf(call).length;
-      record(`command ${command}`, true, `${text}${buttons ? ` [${buttons} buttons]` : ""}`);
+      const since = await cursor();
+      const ack = await dispatch(command);
+      await quiesce(ack.message_id);
       await settle();
+      await sleep(500);
+      const calls = (await controlGet()).calls;
+      const final = foldState(calls, ack.message_id);
+      const shown = panelBody(final?.body.text ?? ack.body?.text).slice(0, 80);
+      const buttons = final ? buttonsOf(final).length : 0;
+      record(`command ${command}`, true, `${shown}${buttons ? ` [${buttons} buttons]` : ""}`);
+      footprints.push(footprintOf(command, calls.slice(since), ack.body?.reply_parameters?.message_id, ack.message_id));
     } catch (error) {
       record(`command ${command}`, false, String(error.message).slice(0, 240));
     }
@@ -631,6 +751,69 @@ async function runHost(host, label, phase = "main") {
       record(`host alive after ${command}`, false, "tmux session went away");
       return { results, ok: false, session, runDir };
     }
+  }
+
+  // ── Goal: one message per command ─────────────────────────────────────
+  {
+    const bad = footprints.filter((f) => f.sends > 1 || f.boxed > 0);
+    record("goal: one message per command", bad.length === 0,
+      bad.length === 0
+        ? `${footprints.length} commands: each sent at most one message, no box drawing`
+        : `${bad.length}/${footprints.length} commands: ${bad.slice(0, 8).map((f) => `${f.command} sent=${f.sends} box=${f.boxed}`).join(" · ")}`);
+  }
+
+  // ── Goal: command text panels carry content (OMP) / Session Info (pi) ─
+  {
+    const panelCommands = host === "omp" ? ["/session", "/changelog", "/jobs"] : ["/session"];
+    const panels = [];
+    for (const command of panelCommands) {
+      if (!menuCommands.includes(command)) {
+        panels.push({ command, text: "", ok: false, why: "not advertised" });
+        continue;
+      }
+      try {
+        const ack = await dispatch(command);
+        const filled = await awaitMessage(`${command} panel content`, ack.message_id,
+          (cur) => panelBody(cur.body.text).length > 0, 20_000).catch(() => undefined);
+        await settle();
+        const final = filled ?? await latestState(ack.message_id);
+        const text = panelBody(final?.body.text);
+        panels.push({ command, text, ok: text.length > 0, why: "" });
+      } catch (error) {
+        panels.push({ command, text: "", ok: false, why: String(error.message).slice(0, 120) });
+      }
+    }
+    const describe = (p) => `${p.command}: ${p.ok ? `"${p.text.slice(0, 70)}"` : `empty${p.why ? ` (${p.why})` : ""}`}`;
+    if (host === "omp") {
+      record("goal: OMP text panels have content", panels.every((p) => p.ok), panels.map(describe).join(" · "));
+    } else {
+      const session = panels.find((p) => p.command === "/session");
+      record("goal: pi chat-area command text", Boolean(session?.text.includes("Session Info")), session ? describe(session) : "no /session");
+    }
+  }
+
+  // ── Goal: long output is paged in place (one message, Next ▶ edits it) ─
+  try {
+    const since = await cursor();
+    const ack = await dispatch("/changelog");
+    const replyId = ack.body?.reply_parameters?.message_id;
+    const paged = await awaitMessage("changelog pages", ack.message_id,
+      (cur) => buttonsOf(cur).some((b) => /Next ▶/.test(String(b.text ?? ""))), 25_000).catch(() => undefined);
+    const sends = (await controlGet()).calls.slice(since)
+      .filter((c) => c.method === "sendMessage" && !wasRejected(c) && replyId !== undefined && c.body?.reply_parameters?.message_id === replyId).length;
+    const next = paged ? findButton(paged, /^Next ▶$/) : undefined;
+    let page2;
+    if (next) {
+      await click(next, ack.message_id).catch(() => undefined);
+      await sleep(1000);
+      page2 = foldState((await controlGet()).calls, ack.message_id);
+    }
+    const onPage2 = /Page 2\//.test(String(page2?.body.text ?? ""));
+    record("goal: long output is paged in place", Boolean(paged) && sends === 1 && Boolean(next) && onPage2,
+      `sendMessage replies=${sends} · ${next ? "Next ▶ present" : "no Next ▶ button"} · after tap: ${onPage2 ? "Page 2 in same message" : `"${panelBody(page2?.body.text).slice(0, 80)}"`}`);
+    await settle();
+  } catch (error) {
+    record("goal: long output is paged in place", false, String(error.message).slice(0, 220));
   }
 
   // ── Nested menus: /tg → level 2 → level 3 → level 4 ───────────────────
@@ -793,24 +976,35 @@ async function runHost(host, label, phase = "main") {
 
   // ── Provider/model menus ──────────────────────────────────────────────
   try {
-    const since = await cursor();
     const ack = await dispatch("/model");
-    // D2/D3: the gateway only acks ("▶️ /model"); the host raises the picker,
-    // so the dialog arrives afterwards as its own `tgplus:dlg:` message.
-    const dialog = isControllable(ack) ? ack : await waitFor("model dialog after ack", (state) =>
-      state.calls.slice(since).findLast((entry) => !wasRejected(entry) && Array.isArray(rowsOf(entry)) && isControllable(entry)) ?? false, 15_000)
-      .catch(() => undefined);
+    const ackId = ack.message_id;
+    // D2/D3 + one message: the host's picker is an edit of the command's own message.
+    const dialog = await awaitMessage("model dialog after ack", ackId, hasDialog, 15_000).catch(() => undefined);
     if (!dialog) {
       record("menu /model selects", false, "no dialog after ack");
+      record("goal: /model is a paged button list", false, "no picker on the command message");
     } else {
-      const dialogMessageId = dialog.body?.message_id ?? dialog.message_id;
-      const picks = buttonsOf(dialog).filter((b) => !DIALOG_CANCEL.test(String(b.callback_data ?? "")));
-      const option = picks.find((b) => /mock/i.test(String(b.text ?? ""))) ?? picks[0];
+      const dialogMessageId = ackId;
+      const models = choicesOf(dialog);
+      const paged = /Page \d+\/\d+/.test(String(dialog.body.text ?? ""));
+      const pagedDetail = `${models.length} model buttons · ${paged ? "Page x/y marker" : "no Page x/y marker"} · ${panelBody(dialog.body.text).slice(0, 60)}`;
+      const option = models.find((b) => /mock/i.test(String(b.text ?? ""))) ?? models[0];
       if (!option) {
         record("menu /model selects", false, `no model buttons: ${buttonsOf(dialog).map((b) => b.text).join(" / ").slice(0, 90)}`);
+        record("goal: /model is a paged button list", false, pagedDetail);
       } else {
+        // Labels carry picker markers (▸ cursor, ✓ current); the model name is the part after the provider.
+        const modelLabel = String(option.text ?? "").replace(/^[▸●✓\s]+/, "").trim();
+        const modelName = modelLabel.split("/").pop();
         const clickCursor = await cursor();
         await click(option, dialogMessageId).catch(() => undefined);
+        // Goal check right after the tap: the same message names the model and drops its keyboard.
+        await sleep(1500);
+        const picked = foldState((await controlGet()).calls, dialogMessageId);
+        const pickedButtons = picked ? buttonsOf(picked).length : -1;
+        const named = Boolean(picked) && panelBody(picked.body.text).includes(modelName);
+        record("goal: /model is a paged button list", paged && models.length > 0 && named && pickedButtons === 0,
+          `${pagedDetail} · tap "${modelLabel}" → ${pickedButtons === 0 ? "keyboard removed" : `keyboard still has ${pickedButtons} buttons`} · ${named ? "names the model" : "no model name"} · text: "${panelBody(picked?.body.text).slice(0, 100)}"`);
         // F5: OMP asks for a purpose after the model — the model click opens
         // a second dialog ("Assign <model> to", first item `default`) and
         // nothing applies until that is answered too (3E).
@@ -858,7 +1052,7 @@ async function runHost(host, label, phase = "main") {
             && !buttonsOf(entry).some((b) => String(b.callback_data ?? "").startsWith("tgplus:dlg:")));
         }, 15_000).catch(() => undefined);
         record("menu /model selects", Boolean(applied),
-          applied ? `dialog${purposeLabel ? ` +purpose:${purposeLabel}` : ""} · ${String(dialog.body?.text ?? "").replace(/\s+/g, " ").slice(0, 60)}` : "selection not confirmed");
+          applied ? `dialog${purposeLabel ? ` +purpose:${purposeLabel}` : ""} · ${panelBody(dialog.body.text).slice(0, 60)}` : "selection not confirmed");
       }
     }
   } catch (error) {
@@ -872,11 +1066,8 @@ async function runHost(host, label, phase = "main") {
     record("menu /scoped-models opens", true, "skipped: OMP has no /scoped-models");
   } else {
     try {
-      const since = await cursor();
-      const call = await dispatch("/scoped-models");
-      const dialog = isControllable(call) ? call : await waitFor("scoped-models dialog after ack", (state) =>
-        state.calls.slice(since).findLast((entry) => !wasRejected(entry) && Array.isArray(rowsOf(entry)) && isControllable(entry)) ?? false, 15_000)
-        .catch(() => undefined);
+      const ack = await dispatch("/scoped-models");
+      const dialog = await awaitMessage("scoped-models dialog after ack", ack.message_id, hasDialog, 15_000).catch(() => undefined);
       record("menu /scoped-models opens", Boolean(dialog) && buttonsOf(dialog).length > 0,
         dialog ? `dialog · ${buttonsOf(dialog).slice(0, 3).map((b) => b.text).join(" / ").slice(0, 60)}` : "no dialog after ack");
       await settle();
@@ -887,38 +1078,37 @@ async function runHost(host, label, phase = "main") {
 
   // ── Login / logout / settings ─────────────────────────────────────────
   try {
-    const call = await dispatch("/login");
-    const isDialog = hasDialog(call);
-    const isNative = hasUi(call);
-    record("menu /login opens", isDialog || isNative || /login|provider/i.test(String(call.body?.text ?? "")),
-      `${isDialog ? "dialog" : isNative ? "native" : "text"} · ${buttonsOf(call).map((b) => b.text).join(" / ").slice(0, 90)}`);
+    const ack = await dispatch("/login");
+    const current = await awaitMessage("login menu", ack.message_id,
+      (cur) => buttonsOf(cur).length > 0 || panelBody(cur.body.text).length > 0, 15_000).catch(() => ack);
+    const isDialog = hasDialog(current);
+    const isNative = hasUi(current);
+    record("menu /login opens", isDialog || isNative || /login|provider/i.test(panelBody(current.body.text)),
+      `${isDialog ? "dialog" : isNative ? "native" : "text"} · ${buttonsOf(current).map((b) => b.text).join(" / ").slice(0, 90)}`);
     await settle();
   } catch (error) {
     record("menu /login opens", false, String(error.message).slice(0, 200));
   }
 
   try {
-    const call = await dispatch("/logout");
-    record("menu /logout opens", /logout|credential|No stored/i.test(String(call.body?.text ?? "")) || buttonsOf(call).length > 0,
-      String(call.body?.text ?? "").replace(/\s+/g, " ").slice(0, 70));
+    const ack = await dispatch("/logout");
+    const current = await awaitMessage("logout result", ack.message_id,
+      (cur) => buttonsOf(cur).length > 0 || panelBody(cur.body.text).length > 0, 15_000).catch(() => ack);
+    record("menu /logout opens", /logout|credential|No stored/i.test(panelBody(current.body.text)) || buttonsOf(current).length > 0,
+      panelBody(current.body.text).slice(0, 70));
     await settle();
   } catch (error) {
     record("menu /logout opens", false, String(error.message).slice(0, 200));
   }
 
   try {
-    const since = await cursor();
-    const first = await dispatch("/settings");
-    // The gateway acks the command ("▶️ /settings"); the dialog itself arrives
-    // as the brokered `tgplus:dlg:` keyboard (§0.1 #4: the host executes, the
-    // Broker presents the dialog it raises).
-    const mirror = isControllable(first) ? first : await waitFor("settings dialog", (state) => {
-      const hit = state.calls.slice(since).findLast((entry) => !wasRejected(entry) && Array.isArray(rowsOf(entry)) && isControllable(entry));
-      return hit ?? false;
-    }, 15_000).catch(() => undefined);
-    const native = buttonsOf(first).length > 0;
-    record("menu /settings opens", (Boolean(mirror) && isControllable(mirror)) || native,
-      mirror ? `dialog · ${buttonsOf(mirror).slice(0, 4).map((b) => b.text).join(" / ")}` : String(first.body?.text ?? "").replace(/<[^>]+>/g, "").slice(0, 60));
+    const ack = await dispatch("/settings");
+    // The gateway acks the command ("▶️ /settings"); the dialog itself is an edit of
+    // that message with the brokered `tgplus:dlg:` keyboard (§0.1 #4: the host
+    // executes, the Broker presents the dialog it raises).
+    const mirror = await awaitMessage("settings dialog", ack.message_id, hasDialog, 15_000).catch(() => undefined);
+    record("menu /settings opens", Boolean(mirror),
+      mirror ? `dialog · ${buttonsOf(mirror).slice(0, 4).map((b) => b.text).join(" / ")}` : panelBody(ack.body?.text).slice(0, 60));
     // Cross-check the brokered dialog against the host's real terminal, so this
     // step cannot pass on a fabricated screen: the Broker builds its buttons
     // from the host component's own labels, so every label has to exist
@@ -935,6 +1125,92 @@ async function runHost(host, label, phase = "main") {
     await settle();
   } catch (error) {
     record("menu /settings opens", false, String(error.message).slice(0, 200));
+  }
+
+  // ── Goal: /login offers providers, then asks for a key on the same message ─
+  try {
+    const ack = await dispatch("/login");
+    const loginId = ack.message_id;
+    let list = await awaitMessage("login choices", loginId, (cur) => choicesOf(cur).length > 0, 20_000);
+    const path = [];
+    if (host === "omp") {
+      // OMP lists ~85 providers over nine pages; the provider search narrows it to an API-key one.
+      const search = findButton(list, /🔍 Search/);
+      if (!search) throw new Error(`no Search button: ${buttonsOf(list).map((b) => b.text).join(" / ").slice(0, 120)}`);
+      path.push("🔍 Search DeepSeek");
+      // Search only switches the picker into typing mode; it may not edit the message.
+      await cancelQuietly(search, loginId);
+      await injectMessage("DeepSeek");
+      list = await awaitMessage("login search result", loginId,
+        (cur) => choicesOf(cur).some((b) => /DeepSeek/i.test(String(b.text ?? ""))), 20_000);
+    } else if (host === "pi") {
+      // pi first asks for the sign-in method; the API-key method leads to the provider list.
+      const method = choicesOf(list).find((b) => /api ?key/i.test(String(b.text ?? "")));
+      if (!method) throw new Error(`no API-key method: ${choicesOf(list).map((b) => b.text).join(" / ")}`);
+      const before = panelBody(list.body.text);
+      path.push(method.text);
+      await click(method, loginId);
+      list = await awaitMessage("login provider list", loginId,
+        (cur) => choicesOf(cur).length > 0 && panelBody(cur.body.text) !== before, 20_000);
+    }
+    const provider = choicesOf(list).find((b) => /DeepSeek/i.test(String(b.text ?? ""))) ?? choicesOf(list)[0];
+    if (!provider) throw new Error("no provider button");
+    path.push(provider.text);
+    await click(provider, loginId);
+    const prompt = await awaitMessage("login key prompt", loginId,
+      (cur) => choicesOf(cur).length === 0 && /key/i.test(panelBody(cur.body.text)) && buttonsOf(cur).some(isCancel), 20_000).catch(() => undefined);
+    const shown = prompt ?? await latestState(loginId);
+    record("goal: /login provider then key prompt", Boolean(prompt),
+      `${path.join(" → ")} · text: "${panelBody(shown?.body.text).slice(0, 100)}" · buttons: ${buttonsOf(shown).map((b) => b.text).join(" / ") || "(none)"}`);
+    await settle();
+  } catch (error) {
+    record("goal: /login provider then key prompt", false, String(error.message).slice(0, 220));
+    // An open dialog would block every later turn: close whatever the failed flow left behind.
+    await settle();
+  }
+
+  // ── Goal: agent tool output never lands in a command's reply (#20) ─────
+  try {
+    const turnSince = await cursor();
+    await injectMessage("PROBE_SLOW_BASH: run the slow probe");
+    await sleep(1500);
+    const login = await dispatch("/login");
+    const loginId = login.message_id;
+    const loginReply = login.body?.reply_parameters?.message_id;
+    const leaks = (state) => state.calls
+      .filter((c) => !wasRejected(c) && c.body && ((c.method === "sendMessage" && loginReply !== undefined && c.body.reply_parameters?.message_id === loginReply)
+        || ((c.method === "editMessageText" || c.method === "editMessageReplyMarkup") && c.body.message_id === loginId)))
+      .map((c) => String(c.body.text ?? ""))
+      .filter((text) => /SLOW_DONE|sleep 6|^\$ /m.test(text));
+    const open = await awaitMessage("login open during slow tool", loginId, (cur) => buttonsOf(cur).length > 0, 20_000).catch(() => undefined);
+    await sleep(2000);
+    const whileOpen = leaks(await controlGet());
+    await settle();
+    const turnDone = await waitFor("slow probe turn finishes", (state) => state.calls.slice(turnSince).some((c) =>
+      (c.method === "sendMessage" || c.method === "editMessageText") && /MOCK_OK/.test(String(c.body?.text ?? "")))
+      , 40_000).then(() => true, () => false);
+    await sleep(500);
+    const afterCancel = leaks(await controlGet());
+    const sample = [...whileOpen, ...afterCancel].slice(0, 1).map((t) => ` · leaked: "${t.slice(0, 80)}"`).join("");
+    record("goal: agent tool output stays out of command replies",
+      Boolean(open) && turnDone && whileOpen.length === 0 && afterCancel.length === 0,
+      `/login open: ${Boolean(open)} · slow turn finished: ${turnDone} · leaks while open: ${whileOpen.length} · leaks after cancel: ${afterCancel.length}${sample}`);
+  } catch (error) {
+    record("goal: agent tool output stays out of command replies", false, String(error.message).slice(0, 220));
+  }
+
+  // ── Goal: a command typed in the local terminal stays local ─────────────
+  {
+    const localSince = await cursor();
+    tmux("send-keys", "-t", session, "-l", "/session");
+    tmux("send-keys", "-t", session, "Enter");
+    await sleep(4000);
+    const hits = (await controlGet()).calls.slice(localSince).filter((c) =>
+      (c.method === "sendMessage" || c.method === "editMessageText") && !wasRejected(c)
+      && /Session Info|Messages:/.test(String(c.body?.text ?? "")));
+    record("goal: local terminal command stays local", hits.length === 0,
+      hits.length === 0 ? "no session text sent within 4 s" : `${hits.length} session message(s) sent: "${panelBody(hits[0].body.text).slice(0, 80)}"`);
+    await settle();
   }
 
   // ── Management mutations (isolated dirs; exercises the real flows) ────
