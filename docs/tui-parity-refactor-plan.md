@@ -75,6 +75,29 @@
 - tick 只比较宿主对象身份是否变化；对象没变就不进入安装逻辑。
 - 回归测试：上千次 attach tick、tracker 重建、宿主每次读返回新函数、宿主替换方法后换回，调用链深度恒定（每个对象方法至多一层插件包装）。
 
+**数据来源决定（2026-10-28，SRC-3 取证，用户确认）**
+
+- **等价原则**：TUI 上用户能看到、能交互的，Telegram 上就要能。识别不了几乎都是插件没做，不是宿主没给数据；只有宿主确实没有结构化数据的界面才提示不支持。
+- **OMP：一律走 `describe(cx)` 语义树。** 选择器的 `selected`、`/settings` 的 `focus`、ask 的 `list.selected`（`overlays/ask-dialog.ts:930`）、输入的 `cursor` 都是公开数据；设置选中走 `handleNativeEvent` 的 `select`/`activate`/`action`。注意 ask 单选题与 approve 的 `select` 即提交。文本面板（报告/`/hotkeys`、`/session` 会话信息、`/usage`、`/jobs`、`/btw` 等）同样有 `describe()`（text/span/meter/spinner 等节点），转换成 Telegram 文本 + 面板自带的按钮（如 Close）。`ask.ts` 自己推算光标的做法作废，改读 `list.selected`。
+- **pi：没有语义接口，读组件字段。** 允许读 TS `private` 但运行时可读的字段（`selectedIndex`、`filteredModels` 等），限定 pi `1.4.0`，契约测试固定在 1.4.0 真实组件上；设置选中按 `selectedIndex` 计算步数后对焦点组件发方向键（操作走组件自己的输入处理，§2 原则 4）。扩展 `custom()` 组件数据在闭包里 → 不支持。
+- **pi 写进对话区的命令文本**（`/session`、`/hotkeys`、`/debug`、`/changelog` 等）：TUI 上可见，Telegram 上等价显示。只认领**我们提交该命令的同步调用期间**加入 `chatContainer` 的组件（单线程，期间 agent 事件插不进来，不用时间窗口），只取内容源：`text` 字段、`markdown` 字段、`ThemedText` 的内容函数（返回字符串，去 ANSI）；`Spacer`、`DynamicBorder` 等无内容组件跳过。不调用 `render()`。
+- **加载器/进度**：pi `Loader`（继承 `Text`，`message` 字段）、OMP spinner/progress 节点的 label，原地编辑同一条消息。
+
+**任务（依次派发，每个都要求 typecheck + 单测全绿）**
+
+| 编号 | 内容 |
+|---|---|
+| H-1 | `lib/tui/hooks.ts` 注册表 + 回归测试（含 `trackUserWaits` 真实形状的 Proxy、tracker 重建、上千 tick） |
+| H-2 | `hookMethod`/`installRace`/`hookEntryMethods`/`watchEditor` 迁到注册表，删除 `install-marks.ts`，dispose 时移除处理器 |
+| H-3 | tick 只比较宿主对象身份 |
+| O-1 | 删除对话区截取（`AGENT_CTORS`、`AGENT_FIELDS`、形状规则、重建窗口、`renderComponent` 的 `render()`），改为"同步提交期间 + 内容源"认领；`!` 结果改读 `getOutput()` |
+| O-2 | 删除 `customGoalAdapter`（pi-goal）与 `renderText`；`infoPanelAdapter` 改读字段/`describe` |
+| N-1 | OMP 语义树 → Telegram 文本/按钮的通用转换，覆盖文本面板与报告；补报告面板的认领 |
+| N-2 | `ask.ts` 改读 `list.selected` |
+| N-3 | 加载器/进度改读字段与 spinner/progress 节点 |
+| T-1 | 单元测试不写入用户真实日志目录 |
+| E2E | 阶段末由主控在 pi、OMP 各跑一次 + 长时运行叠层复测（W-1 打点，确认安装次数不随时间增长） |
+
 
 ---
 
