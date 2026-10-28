@@ -14,7 +14,7 @@
  *     --goal-confirm /tmp/probe-goal-confirm.json \
  *     --goal-question /tmp/probe-goal-question.json \
  *     --goal-questionnaire /tmp/probe-goal-questionnaire2.json \
- *     --out docs/host-probe/pi-0.81.1.json
+ *     --out docs/host-probe/pi-1.4.0.json
  *   node scripts/e2e/merge-probe.mjs --host omp \
  *     --main /tmp/probe-omp-final.json --approval /tmp/probe-omp-approval2.json \
  *     --out docs/host-probe/omp-18.12.5.json
@@ -173,7 +173,7 @@ main.conclusions = {
         pendingUserInputs: modeKeys.includes("pendingUserInputs"),
         onInputCallback: modeKeys.includes("onInputCallback"),
         sessionKeys,
-        note: "pi 0.81.1 has all three quietSince fields.",
+        note: "pi has all three quietSince fields.",
       },
   entryMethods: entryNames,
   toolUiMethods: uiMethods,

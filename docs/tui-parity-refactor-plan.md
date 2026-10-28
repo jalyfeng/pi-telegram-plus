@@ -1,10 +1,10 @@
 # Refactor technical plan: using all TUI commands equivalently from Telegram
 
 > Status: v8 (2026-10-28): the goal is in §0.0, the rules in force are in §0.2; on conflict, §0.0 > §0.2 > §0.1 > body text
-> Target hosts: pi (`@earendil-works/pi-coding-agent`, checked version 0.81.1), OMP (`omp/18.12.5`, installed at `~/.local/bin/omp`, a compiled single file)
+> Target hosts: pi (`@earendil-works/pi-coding-agent` `1.4.0`, upstream `earendil-works/pi` tag `v1.4.0`), OMP (`18.12.5`, upstream `can1357/oh-my-pi` tag `v18.12.5`, installed as a compiled single file)
 > Supersedes: **principle 1** of `docs/telegram-interactions-plan.md` ("dialogs initiated from Telegram go only to Telegram and do not pop up in the TUI"). Principle 2 of that document (status UI is written back to the TUI), principle 3 (do not touch the local editor during a Telegram turn) and principle 4 (never hang) remain in force.
 > Reader: the engineer or model doing the implementation. This document is self-contained and does not depend on earlier conversation.
-> Citation convention: plugin code is always located by **function name or constant name** (line numbers drift); pi host code is cited as "file + function name + 0.81.1 line number", because the published package content is fixed.
+> Citation convention: plugin code is always located by **function name or constant name** (line numbers drift); host code is cited as "upstream repo@tag + package-relative file + function name" (for example `pi@v1.4.0 packages/coding-agent/src/modes/interactive/interactive-mode.ts`, `setupEditorSubmitHandler`).
 > Revision notes are in §11.
 
 ---
@@ -36,7 +36,7 @@ Command logic is no longer rewritten inside Telegram, and terminal screen text i
 ### 0.1 v6 rules in force (2026-10-24, take precedence over conflicting content elsewhere in this document)
 
 1. **Only one host version is supported**: pi `1.4.0`, OMP `18.12.x`. When the version does not match or cannot be read, the plugin errors out at startup (status bar + Telegram notice), with no degradation or compatibility. `peerDependencies` is pinned to pi `1.4.0`; the multi-version test matrix is no longer maintained.
-2. **The host source is authoritative**: local read-only copies are pi `/Users/jaly/Documents/project/research/pi-1.4.0` (tag `v1.4.0`) and OMP `/Users/jaly/Documents/project/research/oh-my-pi-18.12.5` (tag `v18.12.5`). All field and line number citations of the form "pi 0.81.1, line N" in the text are void and 1.4.0 source is authoritative; task A1 updates them one by one after checking; `docs/host-probe/pi-0.81.1.json` and conclusions based on it are void.
+2. **The host source is authoritative**: pi `earendil-works/pi` tag `v1.4.0` and OMP `can1357/oh-my-pi` tag `v18.12.5`. Host fields, methods and behaviour are taken from that source; citations name the upstream file and function, not line numbers.
 3. **No degradation, only one way**: a dialog that cannot be recognized does not get a screenshot plus arrow keys and is not handed back to screen mirroring. Instead Telegram says clearly "There is a dialog in the terminal that Telegram cannot handle (<type>), please handle it in the terminal" and offers only a "Cancel" button (sends Esc). When the bridge is unavailable (the host runs in RPC/print mode, or a hook fails), the plugin errors out at startup and does not fall back to the plugin's native implementation.
 4. **Delete old paths immediately** (tasks D1–D4, before the later migration): the `off` mode and the `tuiBridge` config item, the old screen mirroring (`runTuiCommand`, `tui-selector.ts`, the `tgplus:tui:` callback), the native implementations where the plugin redoes host functionality (the matching parts of model/session/settings/auth etc. in `lib/commands/`, the matching native dialog flows in `telegram-ui.ts`, `custom-dialogs.ts`), and snapshot arrow keys. The plugin's own management functions (`pluginOnly` commands such as the `/tg` menu, `/stop`, `/pair`) are kept.
 5. **E2E "to be migrated" list**: after the old paths are deleted, commands not yet migrated to the new architecture temporarily have no output or interaction on Telegram. The E2E suite maintains a "to be migrated" list: a failure of a step on the list is an expected result and is listed separately; a failure of a step off the list is a regression. Each time a migration is completed, remove the matching step from the list.
@@ -222,7 +222,7 @@ export function wrapMethod<T extends object>(
 
 **Instance hooks go stale.** The host replaces the hooked objects while running, and these replacements no longer trigger `init`/`run`/`setupEditorSubmitHandler`, so we cannot rely on `captureMode` alone:
 
-- `setCustomEditorComponent` (L1830-1888) replaces `mode.editor` with the new editor provided by the extension and calls `setFocus(newEditor)`; it copies `defaultEditor.onSubmit` to the new editor (L1841).
+- `setCustomEditorComponent` replaces `mode.editor` with the new editor provided by the extension and calls `setFocus(newEditor)`; it copies `defaultEditor.onSubmit` to the new editor.
 - `/new`, `/resume`, `/fork` replace `mode.session`.
 
 Rules:
@@ -233,22 +233,22 @@ Rules:
 
 #### 4.1.2 Hook point table
 
-| Purpose | pi 0.81.1 (`dist/modes/interactive/interactive-mode.js`) | OMP 18.12.5 | Method |
+| Purpose | pi 1.4.0 (`packages/coding-agent/src/modes/interactive/interactive-mode.ts`) | OMP 18.12.5 | Method |
 |---|---|---|---|
 | Capture mode | `init` / `run` / `setupEditorSubmitHandler` (existing) | `initHooksAndCustomTools` / `render` (existing) | Prototype |
-| Command submit | `mode.defaultEditor.onSubmit` (same instance as `mode.editor`; `setupEditorSubmitHandler`, installed at L2085) | `mode.editor.onSubmit` (there is no `defaultEditor`; during the stage 0 probe this field was still `undefined` at capture time and was assigned only after initialization, so it must be installed by the once-per-second tick) | Instance |
+| Command submit | `mode.defaultEditor.onSubmit` (same instance as `mode.editor`; `setupEditorSubmitHandler`) | `mode.editor.onSubmit` (there is no `defaultEditor`; during the stage 0 probe this field was still `undefined` at capture time and was assigned only after initialization, so it must be installed by the once-per-second tick) | Instance |
 | Focus | `ui.setFocus(c)`; the current focus is read from `ui.focusedComponent`. Stage 0 proved it is a plain data field that **lags by one event** (after `setFocus` returns, what is read is the previous focus), so it can only be used for validation; the focus event itself is authoritative. The overlay's `setFocusInternal` receives a `{component, overlayFocusRestore}` wrapper; take `.component` before classifying | `ui.setFocus(c)`; the current focus is read from `ui.getFocused()` (exists and returns the live focus); there is no `focusedComponent` | Instance |
-| Execution of extension commands | `mode.session.prompt(text)`: when idle, `onSubmit` only hands the text to the main loop (`onInputCallback`, L2262 → `getUserInput` L2817), and the main loop then does `await this.session.prompt(userInput)` (L653) | `mode.session.prompt(text)` exists; `session.isStreaming`/`isCompacting` are accessors; there is no `mode.pendingUserInputs` (the OMP branch of §4.3) | Instance (completion signal of §4.3) |
+| Execution of extension commands | `mode.session.prompt(text)`: when idle, `onSubmit` only hands the text to the main loop (`onInputCallback`,  → `getUserInput` ), and the main loop then does `await this.session.prompt(userInput)` | `mode.session.prompt(text)` exists; `session.isStreaming`/`isCompacting` are accessors; there is no `mode.pendingUserInputs` (the OMP branch of §4.3) | Instance (completion signal of §4.3) |
 | Chat area rebuild | `chatContainer.clear()` | Same name | Instance (§4.4 excludes history redraw) |
 | Overlay | `ui.showOverlay(c, opts)` / `ui.hideOverlay()` | Same name (OMP `/settings` uses an overlay) | Instance |
-| Status output | `showStatus` (L2563), `showError` (L3180), `showWarning` (L3185) | Same name | Prototype |
+| Status output | `showStatus`, `showError`, `showWarning` | Same name | Prototype |
 | Other output | `chatContainer.addChild(c)` | Same name | Instance |
 | Export result | `session.exportToHtml(path)` / `session.exportToJsonl(path)`; stage 0 proved they return a **Promise**, and the path is taken from the resolved value (`export-resolved` in the probe file) | `session.exportToHtml(path, false)` exists and also returns a Promise | Instance (effective only inside the `/export` scope) |
-| Extension select entry | `showExtensionSelector(title, options, opts)` (L1712) | `select(title, options, opts)` of the UI context (internally `showCollabAwareSelector`) | The entry hook wraps the **UI context**, not the mode prototype |
-| Extension confirm | `showExtensionConfirm(title, message)` (L1752, internally reuses the selector with options `["Yes","No"]`) | `confirm(title, message, opts)` of the UI context (internally `showHookConfirm`) | Same as above |
-| Extension input | `showExtensionInput(title, placeholder, opts)` (L1763) | `input(title, placeholder, opts)` of the UI context (internally `showHookInput`); there is no `inputSecret` | Same as above |
-| Extension editor | `showExtensionEditor(title, prefill)` (L1803) | `editor(title, prefill, opts)` of the UI context (internally `showCollabAwareEditor`) | Same as above |
-| Extension custom | `showExtensionCustom(factory, options)` (L1903) | `custom(factory, options)` of the UI context (internally `showHookCustom`) | Same as above |
+| Extension select entry | `showExtensionSelector(title, options, opts)` | `select(title, options, opts)` of the UI context (internally `showCollabAwareSelector`) | The entry hook wraps the **UI context**, not the mode prototype |
+| Extension confirm | `showExtensionConfirm(title, message)` (, internally reuses the selector with options `["Yes","No"]`) | `confirm(title, message, opts)` of the UI context (internally `showHookConfirm`) | Same as above |
+| Extension input | `showExtensionInput(title, placeholder, opts)` | `input(title, placeholder, opts)` of the UI context (internally `showHookInput`); there is no `inputSecret` | Same as above |
+| Extension editor | `showExtensionEditor(title, prefill)` | `editor(title, prefill, opts)` of the UI context (internally `showCollabAwareEditor`) | Same as above |
+| Extension custom | `showExtensionCustom(factory, options)` | `custom(factory, options)` of the UI context (internally `showHookCustom`) | Same as above |
 | OMP ask | — | `askDialog(questions, options)` of the tool UI context: the first argument is the question array (`id/question/header/options/recommended`), the second is `{timeout, signal, acceptImages}`; the focused component has only `callbacks`/`options`, and the answering state is in a closure | Context hook |
 | OMP approve | — | `approve({full, compact, session})` of the tool UI context: three strings; the focused component has only `callbacks{onApprove,onDeny}` / `options{fullPrompt,...}` | Context hook |
 | Local editor input | `mode.editor.handleInput` (decides whether the local user is typing, §4.2.4); re-wrapped by the tick when the editor is replaced | Same name | Instance |
@@ -259,7 +259,7 @@ Stage 0 conclusion (2026-10-23, probe files in `docs/host-probe/`): OMP's extens
 
 - Synchronous entries (`showExtensionSelector`, `showExtensionInput`, `showExtensionEditor`): the host creates the component synchronously inside the entry method and calls `setFocus`. Before calling the original method, the hook pushes the entry onto `entryStack`; when the `setFocus` hook sees a new dialog focus, it takes the top entry and stores it in `WeakMap<object, EntryInfo>` (keyed by the focused object). The pop is written in `finally`, so it also pops when the original method throws, preventing a stale entry from being misused by the next focus event.
 - **Nested entry merging**: `showExtensionConfirm` internally calls `showExtensionSelector`. When the inner hook finds an outer entry already on top of the stack, it only fills in fields (such as the original options) and **does not overwrite** `kind`, so the final kind is `confirm`.
-- Asynchronous entry (`showExtensionCustom`): the host first does `await factory(...)` and only then `showOverlay`/`setFocus` (L1943-1959), and a slow factory may take a long time. The hook records the entry in the closure of this call and wraps the incoming `factory`: the component returned by the factory (or the component the promise resolves to) is written directly into `WeakMap<component, EntryInfo>`. When the focus event happens, look up by focused object first, then by root component.
+- Asynchronous entry (`showExtensionCustom`): the host first does `await factory(...)` and only then `showOverlay`/`setFocus`, and a slow factory may take a long time. The hook records the entry in the closure of this call and wraps the incoming `factory`: the component returned by the factory (or the component the promise resolves to) is written directly into `WeakMap<component, EntryInfo>`. When the focus event happens, look up by focused object first, then by root component.
 
 #### 4.1.3 Classifying the focused object
 
@@ -267,7 +267,7 @@ There are three paths for focus changes, and all must be covered:
 
 1. `ui.setFocus(x)`: the main path, an instance hook.
 2. `ui.showOverlay(x, opts)`: it calls `setFocus` internally only when it is not `nonCapturing` and is visible (`showOverlay` in pi-tui `tui.js`), so hooking `setFocus` already covers it.
-3. **Paths that bypass `setFocus`**: in pi-tui's input handling, the branch "the focused overlay is no longer visible" calls the private `setFocusInternal` (about L590 of `tui.js`), which the instance hook cannot catch. (`hideOverlay` calls the public `setFocus` and is already covered.)
+3. **Paths that bypass `setFocus`**: in pi-tui's input handling, the branch "the focused overlay is no longer visible" calls the private `setFocusInternal` (about  of `tui.js`), which the instance hook cannot catch. (`hideOverlay` calls the public `setFocus` and is already covered.)
 
 Therefore, besides being event-driven, FocusTracker must also **validate**: at the following moments read the current focus once (how to read is in §4.1.2), compare it with the focused object recorded by the Broker, and treat any mismatch as a "focus change":
 
@@ -283,10 +283,10 @@ Classification of the focused object `F` (judged in order, stop at the first hit
 |---|---|---|
 | `editor` | `F === mode.editor` or `F === mode.defaultEditor` | Close the current session (if any), but **the focus returning to the editor must be sustained**: if the same component regains focus within the confirmation window (250ms), cancel this close. When OMP redraws an already-open overlay it hands focus back to the editor for one frame; judging by a single event would withdraw the Telegram keyboard mid-answer and hand the chat to mirroring (decision 28) |
 | `inert` | `F` has no `handleInput` function | Ignore (for example `reloadBox` of `/reload`, a container that only shows text) |
-| `progress` | `F.constructor.name` ends with `Loader`, or `F` has `signal`/`abortController` and no list or input field at all (looked up by `findShape` of §4.6.3) | A progress state, not a dialog: the broker creates no session for it and sends no Telegram message, and terminal mirroring still shows the screen as before. The original design of "send '⏳ In progress' with only a cancel button" proved harmful in testing: as soon as OMP's working spinner appeared it took up a keyboard-carrying message in the chat and swallowed the text the user sent to the next (not yet created) dialog, so that text never reached the model; interruption is still covered by `/stop` and mirrored keys (decision 28). Example: the `BorderedLoader` of `/share` (L4613) |
+| `progress` | `F.constructor.name` ends with `Loader`, or `F` has `signal`/`abortController` and no list or input field at all (looked up by `findShape` of §4.6.3) | A progress state, not a dialog: the broker creates no session for it and sends no Telegram message, and terminal mirroring still shows the screen as before. The original design of "send '⏳ In progress' with only a cancel button" proved harmful in testing: as soon as OMP's working spinner appeared it took up a keyboard-carrying message in the chat and swallowed the text the user sent to the next (not yet created) dialog, so that text never reached the model; interruption is still covered by `/stop` and mirrored keys (decision 28). Example: the `BorderedLoader` of `/share` |
 | `dialog` | Anything else | Hand to AdapterRegistry |
 
-**Session identity is based on the focused object `F`.** The host's `showSelector(create)` returns `{ component, focus }`, and the two may differ: for `/settings` the focus is `selector.getSettingsList()` (L3583), and for `/fork` the focus is `selector.getMessageList()` (L3819). Rules:
+**Session identity is based on the focused object `F`.** The host's `showSelector(create)` returns `{ component, focus }`, and the two may differ: for `/settings` the focus is `selector.getSettingsList()`, and for `/fork` the focus is `selector.getMessageList()`. Rules:
 
 - `detect` / `read` / `act` always target the focused object `F` and look for data downward from it.
 - The root component `root` (`editorContainer.children[0]`, or the `component` of an overlay item) is used only to look upward for the title and entry information, not to decide whether the session is still alive.
@@ -318,7 +318,7 @@ Keep `getTuiCommands()`: the OMP built-in registry `BUILTIN_SLASH_COMMAND_DEFS`,
 Three name sets are computed at runtime (refreshed each time the mode is re-captured):
 
 - `hostBuiltin`: host built-in command names.
-  - **pi**: cannot be derived from the command catalog. In `buildCommandCatalog` the `source` for pi has only `"autocomplete"` and `"host"` (`"builtin"` appears only in OMP's registry), and the autocomplete list mixes extension commands and the 6 commands the plugin registers itself. So pi's `hostBuiltin` **directly uses the static list in Appendix A**, maintained per pi version. The stage 0 autocomplete catalog still cannot distinguish built-in from extension (`catalog` is empty), consistent with this judgment.
+  - **pi**: cannot be derived from the command catalog. In `buildCommandCatalog` the `source` for pi has only `"autocomplete"` and `"host"` (`"builtin"` appears only in OMP's registry), and the autocomplete list mixes extension commands and the 6 commands the plugin registers itself. So pi's `hostBuiltin` **directly uses a static list** taken from pi@v1.4.0 `setupEditorSubmitHandler`. The stage 0 autocomplete catalog still cannot distinguish built-in from extension (`catalog` is empty), consistent with this judgment.
   - **OMP**: take the registry `BUILTIN_SLASH_COMMAND_DEFS`.
 - `pluginNative`: all names in the plugin's `telegramCommands` map (registered by `registerAllCommands` and `registerTelegramCommands` in `index.ts`).
 - `pluginOnly = pluginNative − hostBuiltin`: commands implemented only by the plugin and not built into the host, for example `/tg*`, `/stop`, `/status`, `/cwd`, `/cd`.
@@ -387,7 +387,7 @@ Key points:
 - `withSuppressedLocalSubmit` wraps only the moment of the **synchronous call** (to stop the plugin's own submit from being treated as local input) and must not wrap the whole `await`. Otherwise, during the minutes a command like `/compact` runs, commands the local user types would be missed. After stage 5 deletes the old local-command mirroring (§4.9 item 5), this suppression mechanism can be deleted too.
 - Do not call `editor.addToHistory`, to avoid polluting the local input history.
 - The caller must not `await` the whole flow: `onSubmit` may hang for a long time (`/compact` takes tens of seconds) and would block Telegram polling.
-- When `onSubmit` returns depends on the command. In pi 0.81.1 `setupEditorSubmitHandler`:
+- When `onSubmit` returns depends on the command. In pi `setupEditorSubmitHandler`:
   - **await type** (the command has finished when it returns): `/scoped-models`, `/model`, `/export`, `/import`, `/share`, `/copy`, `/clone`, `/login`, `/clear` (i.e. `/new`), `/compact`, `/reload`.
   - **return-immediately type** (returns right after opening a dialog, and the dialog callback completes asynchronously later): `/settings`, `/name`, `/session`, `/changelog`, `/hotkeys`, `/fork`, `/tree`, `/trust`, `/logout`, `/debug`, `/resume`, Easter egg commands.
   - **Extension commands, templates, skills**: when idle, `onSubmit` just hands the text to the main loop and returns; the real execution is in the main loop's `session.prompt` (the row "Execution of extension commands" in §4.1.2). While streaming or compacting, `onSubmit` directly does `await session.prompt(...)`.
@@ -406,7 +406,7 @@ When the scope ends (§4.3), let the current editor content be `E`:
 | `localEdited` | Do nothing. The local user is present and already editing; the editor belongs to them |
 | `E === D` | Do nothing |
 | `E === ""` | `setText(D)` (restore the draft) |
-| `E` non-empty and `≠ D` | This is text the host wrote for the initiator (example: after `/fork` selects a message, `this.editor.setText(result.selectedText)` runs, see `showUserMessageSelector` L3814). Per "whoever initiates, displays": send `E` as a message to Telegram (labeled "Text placed in the editor, can be copied, edited and sent"), then `setText(D)` to restore the local draft |
+| `E` non-empty and `≠ D` | This is text the host wrote for the initiator (example: after `/fork` selects a message, `this.editor.setText(result.selectedText)` runs, see `showUserMessageSelector` ). Per "whoever initiates, displays": send `E` as a message to Telegram (labeled "Text placed in the editor, can be copied, edited and sent"), then `setText(D)` to restore the local draft |
 
 #### 4.2.5 Fallback path
 
@@ -469,7 +469,7 @@ The ownership of dialogs and output is judged in order:
   - `mode.pendingUserInputs` is empty;
   - the main loop is parked at `getUserInput` (`mode.onInputCallback` is set).
 
-  `quietSince` records the time at which these three points started to hold simultaneously, and is cleared when any one stops holding. A 60-second cap is also set, to prevent waiting forever if host fields change (a warning is logged when the cap triggers). These three fields are private fields of pi 0.81.1 (L2817-2826). **OMP 18.12.5 (stage 0 probe)**: `session.isStreaming`/`isCompacting` are accessors and `mode.onInputCallback` exists, but there is **no** `mode.pendingUserInputs`; OMP starts counting `quietSince` only when `onInputCallback` is a function and both of the first two accessors are false, ends after 500ms of continuous holding, and also has a 60-second cap. When the fields cannot be read, it falls straight back to the 60-second cap.
+  `quietSince` records the time at which these three points started to hold simultaneously, and is cleared when any one stops holding. A 60-second cap is also set, to prevent waiting forever if host fields change (a warning is logged when the cap triggers). These three fields are private fields of pi's interactive mode. **OMP 18.12.5 (stage 0 probe)**: `session.isStreaming`/`isCompacting` are accessors and `mode.onInputCallback` exists, but there is **no** `mode.pendingUserInputs`; OMP starts counting `quietSince` only when `onInputCallback` is a function and both of the first two accessors are false, ends after 500ms of continuous holding, and also has a 60-second cap. When the fields cannot be read, it falls straight back to the 60-second cap.
 
 **End conditions of a command scope** (all must hold):
 
@@ -493,7 +493,7 @@ On normal end, run the draft handling of §4.2.4, then release the scope.
 
 | Content | Sole owner |
 |---|---|
-| Agent messages, thinking, tool calls and results | The existing `lib/renderer.ts` (through events such as `agent_start`, `tool_execution_*`, `message_end`). The `AssistantMessageComponent` and `ToolExecutionComponent` that the host adds to `chatContainer` during a turn (L2330, L2406, L2663, L2700) are **never intercepted** |
+| Agent messages, thinking, tool calls and results | The existing `lib/renderer.ts` (through events such as `agent_start`, `tool_execution_*`, `message_end`). The `AssistantMessageComponent` and `ToolExecutionComponent` that the host adds to `chatContainer` during a turn (, , , ) are **never intercepted** |
 | Host status, errors, warnings (`showStatus`/`showError`/`showWarning`), including status the host converts from an extension `notify` | OutputCapture |
 | Other chat-area content produced by commands (for example the info block of `/session`, `/changelog`, the compaction summary) | OutputCapture, but only under the conditions in the table below |
 
@@ -501,9 +501,9 @@ Interception rules:
 
 | Source | When intercepted | Conversion |
 |---|---|---|
-| `showStatus(msg)` | Attributed to Telegram (§4.3 rule 1 or 2) | Plain text. pi updates the previous status in place (`showStatus` L2563-2570), and consecutive statuses within the same scope edit the same Telegram message |
+| `showStatus(msg)` | Attributed to Telegram (§4.3 rule 1 or 2) | Plain text. pi updates the previous status in place (`showStatus` ), and consecutive statuses within the same scope edit the same Telegram message |
 | `showError(msg)` / `showWarning(msg)` | Same as above | Add a `❌` / `⚠️` prefix |
-| `chatContainer.addChild(c)` | **All of**: ① there is an active **command scope** (§4.3 rule 1; during a turn attributed only by rule 2 it is not intercepted); ② not inside a chat area rebuild (see below); ③ `c` is not a component rendered by the agent (see below). **Do not pre-filter with `isStreaming`**: in pi's `onSubmit`, branches such as `/session`, `/changelog`, `/debug`, `/name` come before the streaming check (L2248); when these commands are sent from Telegram while the agent is streaming, the host still adds content to the chat area, and it must be intercepted | A string `text` field (Text) → strip color codes; a Markdown component (has the original markdown field) → convert to Telegram HTML with `lib/markdown.ts`; anything else → `c.render(80)` with colors stripped, put into `<pre>`, and split with `splitTelegramText` when too long |
+| `chatContainer.addChild(c)` | **All of**: ① there is an active **command scope** (§4.3 rule 1; during a turn attributed only by rule 2 it is not intercepted); ② not inside a chat area rebuild (see below); ③ `c` is not a component rendered by the agent (see below). **Do not pre-filter with `isStreaming`**: in pi's `onSubmit`, branches such as `/session`, `/changelog`, `/debug`, `/name` come before the streaming check; when these commands are sent from Telegram while the agent is streaming, the host still adds content to the chat area, and it must be intercepted | A string `text` field (Text) → strip color codes; a Markdown component (has the original markdown field) → convert to Telegram HTML with `lib/markdown.ts`; anything else → `c.render(80)` with colors stripped, put into `<pre>`, and split with `splitTelegramText` when too long |
 
 - **Chat area rebuild**: `/resume`, `/fork`, `/new` first call `chatContainer.clear()` and then use `addChild` to add the whole history again. Instance hook on `chatContainer.clear`: after the call set `rebuilding = true`, cleared only at the next macrotask (`setTimeout(0)`); `addChild` during that time is never intercepted. Session history on Telegram is handled by the existing history replay feature, not by OutputCapture.
 - **Components rendered by the agent** (excluded if any one holds):
@@ -511,7 +511,7 @@ Interception rules:
   - `c.constructor.name` matches `/MessageComponent$/` (`AssistantMessageComponent`, `UserMessageComponent`, etc.) or equals `ToolExecutionComponent` or `BashExecutionComponent`;
   - `c` has any own field among `lastMessage`, `hasToolCalls`, `toolCallId`.
 
-  Fields checked in pi 0.81.1: `AssistantMessageComponent` has `lastMessage` and `hasToolCalls` and no `message`; `UserMessageComponent` has only `text` and is recognized by constructor name.
+  Fields checked in pi: `AssistantMessageComponent` has `lastMessage` and `hasToolCalls` and no `message`; `UserMessageComponent` has only `text` and is recognized by constructor name.
   **OMP 18.12.5 (stage 0 probe)**: chat-area components expose only `children`, with no `lastMessage`/`hasToolCalls`/`toolCallId`. The observed agent-rendering constructors are: `qs` (user message), `_Te` (assistant message), `Aw` (tool block), `Ds` (streaming component, and `c === mode.streamingComponent`); `j`/`w` are layout/text primitives that command output also uses, so they cannot be used alone as an exclusion basis. The exclusion rule uses "this group of constructor names + `c === mode.streamingComponent`"; the constructor names are minified and change across OMP versions, and the contract test pins the 18.12.5 set.
 - **At most 20 components are intercepted per scope**; the excess is merged into one line "…N more outputs, please see the terminal".
 
@@ -699,7 +699,7 @@ type AdapterContext = {
 
 #### 4.6.3 Looking down for data: `findShape`
 
-The data is not necessarily on the focused object itself, nor in `children`. Example: the `filteredSessions`, `selectedIndex` and `searchInput` of `SessionSelectorComponent` are all on its field `sessionList`, and `SessionList` is an ordinary class, not a component, and is not in `children` (`class SessionList` in pi `session-selector.js`, L228).
+The data is not necessarily on the focused object itself, nor in `children`. Example: the `filteredSessions`, `selectedIndex` and `searchInput` of `SessionSelectorComponent` are all on its field `sessionList`, and `SessionList` is an ordinary class, not a component, and is not in `children` (`class SessionList` in pi `session-selector.js`, ).
 
 ```ts
 function findShape<T>(start: object, test: (o: any) => o is T, maxDepth = 3): T | undefined
@@ -744,7 +744,7 @@ ctx.requestRender();
 
 #### 4.6.5 Built-in adapter list (by priority)
 
-Field names come from pi 0.81.1. The matching OMP adapters are written from the stage 0 probe results (`docs/host-probe/omp-18.12.5.json`); key conclusion: OMP's extension entry points are in the UI context, and the focused components of built-in selectors have no readable data fields, so on OMP #5-#9 go through snapshot first, and only the entry arguments (#1/#2/#3/#4/#10) can give a structured model.
+Field names come from pi. The matching OMP adapters are written from the stage 0 probe results (`docs/host-probe/omp-18.12.5.json`); key conclusion: OMP's extension entry points are in the UI context, and the focused components of built-in selectors have no readable data fields, so on OMP #5-#9 go through snapshot first, and only the entry arguments (#1/#2/#3/#4/#10) can give a structured model.
 
 | # | Adapter | Detection | Read / operate | Covers |
 |---|---|---|---|---|
@@ -780,7 +780,7 @@ Order of handling:
    - The contract test uses the real pi-goal components of that version, and when a pi-goal upgrade changes the text the test fails first.
 3. Whether the exception is enabled, and the probe file it rests on, is recorded at the end of this section (to be filled in after stage 0 is complete).
 
-Stage 0 conclusion (2026-10-23, pi-goal 0.6.0): the confirmation box, the `goal_question` single question and the `goal_questionnaire` multi question are all returned by `ctx.ui.custom` as the **same Object shape**, whose own fields are only `render`, `invalidate`, `handleInput`; the questions, options, current tab and answered state are all in the factory closure, and the probe found no readable structured fields. The `render(80)` of the three shapes is recorded in `conclusions.piGoal` of `docs/host-probe/pi-0.81.1.json`.
+Stage 0 conclusion (2026-10-23, pi-goal 0.6.0): the confirmation box, the `goal_question` single question and the `goal_questionnaire` multi question are all returned by `ctx.ui.custom` as the **same Object shape**, whose own fields are only `render`, `invalidate`, `handleInput`; the questions, options, current tab and answered state are all in the factory closure, and the probe found no readable structured fields. The pi-goal probe output was removed with pi-goal support.
 
 Therefore **exception 1 (pi-goal) is enabled**, with the conditions narrowed to:
 
@@ -902,7 +902,7 @@ Changed to (`on` mode, when the bridge is available):
 
 1. During a Telegram turn (and during commands submitted by the Gateway, §4.2.6), `select/confirm/input/editor/custom/askDialog/approve` are **all delegated to the host UI**, drawn by the host in the terminal. The Broker takes over through the focus hook and pushes per §4.3. `createPromptObserverUi` is renamed `createHostPromptUi` and simplified to:
    - Prompt-type methods are passed straight to the host and no longer trigger `startPromptMirror`;
-   - **`notify` is passed only to the host and no longer also calls `telegramUi.notify`.** The host converts `notify` into `showStatus`/`showError`/`showWarning` (`showExtensionNotify` L1891), which OutputCapture sends to Telegram by ownership. This way there is only one send path and nothing is sent twice. (`createRoutedTelegramUi` in `off` mode is unaffected.)
+   - **`notify` is passed only to the host and no longer also calls `telegramUi.notify`.** The host converts `notify` into `showStatus`/`showError`/`showWarning` (`showExtensionNotify` ), which OutputCapture sends to Telegram by ownership. This way there is only one send path and nothing is sent twice. (`createRoutedTelegramUi` in `off` mode is unaffected.)
    - Editor-type methods (`pasteToEditor`, `setEditorText`, `getEditorText`) do nothing during a Telegram turn (inheriting principle 3 of the old document).
 2. Delete `startPromptMirror` and `promptMirrorHook`; the parameter of `runWithTelegramUi` becomes `uiMode` (§4.2.6).
 3. `custom()`: the host produces the component and gives it focus, and the Broker takes over as usual; if it cannot be recognized, say so clearly per §0.1 item 3. It no longer returns `undefined` directly.
@@ -932,7 +932,7 @@ The `/tg → Config` menu (where `config.tuiBridge` is read in `lib/commands/tg-
 
 ### 4.11 OMP structured channel (v5, 2026-10-24)
 
-Basis: the OMP 18.12.5 source (MIT, local read-only copy `/Users/jaly/Documents/project/research/oh-my-pi-18.12.5`) and three feasibility checks on 2026-10-24 (S20 read structure, S21c structured operation, S22 collab request). OMP ships two sets of structured interfaces: **collab** (remote guests answering dialogs) and **TSP** (a component describes itself as a semantic tree and receives structured events). Dialogs on OMP always go through these two channels or output interception, and **no longer read the screen and no longer simulate key presses**. The pi side is unaffected.
+Basis: the OMP 18.12.5 source (MIT, `can1357/oh-my-pi` tag `v18.12.5`) and three feasibility checks on 2026-10-24 (S20 read structure, S21c structured operation, S22 collab request). OMP ships two sets of structured interfaces: **collab** (remote guests answering dialogs) and **TSP** (a component describes itself as a semantic tree and receives structured events). Dialogs on OMP always go through these two channels or output interception, and **no longer read the screen and no longer simulate key presses**. The pi side is unaffected.
 
 #### 4.11.1 Channel assignment
 
@@ -1042,10 +1042,10 @@ Purpose: obtain OMP's real method names, argument shapes and component fields, r
 - Using the existing tmux + mock E2E environment (`scripts/e2e/`), run all commands in turn on OMP and pi, and trigger one `ask`, one extension `select/input`, and one `approve`.
 - Install pi-goal (`@capyup/pi-goal`), use the mock provider to trigger in turn the confirmation box, `goal_question` and `goal_questionnaire`, record the fields of these three custom components, and fill in the conclusion of §4.6.6 accordingly.
 - Additionally record: OMP's default editor field name, how the current focus is read, the main-loop related fields (matching pi's `pendingUserInputs`, `onInputCallback`), and the constructor names and fields of agent-rendered components in the chat area.
-- Produce `docs/host-probe/omp-18.12.5.json` and `docs/host-probe/pi-0.81.1.json`, and revise §4.1.2, the OMP part of §4.6.5 and the OMP command table of §4.8 accordingly.
+- Produce `docs/host-probe/omp-18.12.5.json` and a pi probe file (the pi probe was for an earlier, unsupported pi version and has since been removed), and revise §4.1.2, the OMP part of §4.6.5 and the OMP command table of §4.8 accordingly.
 - **Acceptance**: the two probe files are committed; all OMP-related "to be probed" items in this document have a conclusion.
 
-**Stage 0 execution result (2026-10-23)**: the two files were generated and committed (`docs/host-probe/pi-0.81.1.json`, `docs/host-probe/omp-18.12.5.json`). pi 0.81.1 ran the commands + extension dialogs with `scripts/e2e/run-probe.mjs`, and the three shapes of pi-goal 0.6.0 were run separately; OMP 18.12.5 ran 87 built-in commands, extension `select/confirm/input/editor/custom`, `ask` single/multi question, and `approve`. Key conclusions:
+**Stage 0 execution result (2026-10-23)**: the two files were generated and committed (`docs/host-probe/omp-18.12.5.json` is kept; the pi probe of an earlier pi version has been removed). pi ran the commands + extension dialogs with `scripts/e2e/run-probe.mjs`, and the three shapes of pi-goal 0.6.0 were run separately; OMP 18.12.5 ran 87 built-in commands, extension `select/confirm/input/editor/custom`, `ask` single/multi question, and `approve`. Key conclusions:
 
 1. **pi focus**: there is no `getFocused()`; `ui.focusedComponent` is a data field that lags by one event; the overlay's `setFocusInternal` receives `{component, overlayFocusRestore}`. The focus event is authoritative.
 2. **OMP focus**: `ui.getFocused()` is usable; all dialogs go through `setFocus`.
@@ -1059,7 +1059,7 @@ Purpose: obtain OMP's real method names, argument shapes and component fields, r
 ### Stage 1: infrastructure + output-only commands
 
 - `host.ts`, `focus.ts`, `origin.ts`, `gateway.ts`, `output.ts`.
-- The Gateway is enabled only for pi commands on a **static whitelist**: the commands in the "output only" part of Appendix A that can be submitted and do not replace the runtime. Commands off the whitelist still go through the old path (including old mirroring). Commands on the whitelist **never** enter `runTuiCommand`. `/new` goes through `ctx.newSession()`; `/reload`, `/fork`, `/clone`, `/import` keep the native handlers (§9 decisions 21, 22). OMP's similar commands are connected in stage 3 (§9 decision 23).
+- The Gateway is enabled only for pi commands on a **static whitelist**: the pi commands that only produce output, can be submitted and do not replace the runtime (see `setupEditorSubmitHandler` in pi@v1.4.0). Commands off the whitelist still go through the old path (including old mirroring). Commands on the whitelist **never** enter `runTuiCommand`. `/new` goes through `ctx.newSession()`; `/reload`, `/fork`, `/clone`, `/import` keep the native handlers (§9 decisions 21, 22). OMP's similar commands are connected in stage 3 (§9 decision 23).
 - This stage does not instantiate the Broker; FocusTracker serves only the scope-end judgment and OutputCapture. While the old and new hooks coexist, the new hooks are passive (observe only, send no Telegram dialog messages), and the dialog screen is still handled by the old mirroring.
 - Fix the draft overwrite problem (for whitelisted commands).
 - **Acceptance**: on pi, `/session`, `/compact`, `/name x`, `/new`, `/changelog`, `/share`, `/export` run from Telegram give the same host state as running in the terminal, the output is sent back in full (including the result after `/compact` completes), and the local draft is not lost. **OMP's similar commands are not in this stage's acceptance scope and move to stage 3.**
@@ -1245,7 +1245,7 @@ On the relation between "whoever initiates, displays" and "shared ownership": a 
 
 ### v6 (relative to v5, 2026-10-24)
 
-Decided by the user: support only pi `1.4.0` and OMP `18.12.x`; dialogs that cannot be recognized are reported clearly; delete immediately the `off` mode, the plugin's native implementation, the old screen mirroring and snapshot arrow keys; E2E uses a "to be migrated" list to distinguish expected failures. Added §0.1 and decisions 46–50; decisions 2 and 34 are void; principles 1 and 5 and §4.2.5, §4.6.5 #13, §4.10, §8, §10 are rewritten accordingly. The pi 0.81.1 line number citations in the text await updating after task A1 checks the 1.4.0 source.
+Decided by the user: support only pi `1.4.0` and OMP `18.12.x`; dialogs that cannot be recognized are reported clearly; delete immediately the `off` mode, the plugin's native implementation, the old screen mirroring and snapshot arrow keys; E2E uses a "to be migrated" list to distinguish expected failures. Added §0.1 and decisions 46–50; decisions 2 and 34 are void; principles 1 and 5 and §4.2.5, §4.6.5 #13, §4.10, §8, §10 are rewritten accordingly. Old pi line-number citations have since been removed; host code is cited by upstream file and function.4.0 source.
 
 ### v5 (relative to v4, 2026-10-24)
 
@@ -1253,7 +1253,7 @@ Based on the OMP 18.12.5 source (it had mistakenly been thought that OMP had onl
 
 ### v4 (relative to v3)
 
-Based on the third review round (6 high, 6 medium, and several details), all verified against the source. pi-goal is not installed on this machine and its component fields cannot be verified, so item 1 was changed to "decide after the stage 0 probe". Stage 0 (2026-10-23) is complete: the probe files for pi 0.81.1, OMP 18.12.5 and pi-goal 0.6.0 are in `docs/host-probe/`, and the conclusions are filled back into §4.1.2, §4.1.3, §4.3, §4.4, §4.6.5, §4.6.6, §4.8 and §6.
+Based on the third review round (6 high, 6 medium, and several details), all verified against the source. pi-goal is not installed on this machine and its component fields cannot be verified, so item 1 was changed to "decide after the stage 0 probe". Stage 0 (2026-10-23) is complete: the OMP 18.12.5 probe file is in `docs/host-probe/` (the pi and pi-goal probes were removed with the drop of the earlier pi version and of pi-goal support), and the conclusions are filled back into §4.1.2, §4.1.3, §4.3, §4.4, §4.6.5, §4.6.6, §4.8 and §6.
 
 | Review point | Where changed |
 |---|---|
@@ -1264,7 +1264,7 @@ Based on the third review round (6 high, 6 medium, and several details), all ver
 | Timing and scope of `expect` | §4.2.3 code registers first and submits after, built-in commands not registered; §4.3; §9 decision 15 |
 | The 2-second window misses a queued prompt | §4.3 expiry condition changed to state checks + a 60-second cap |
 | `/more`, `/pair` are not in `pluginOnly` | §4.2.1, §4.2.2 step 0 |
-| pi's `hostBuiltin` cannot be derived | §4.2.1 changed to the static list in Appendix A |
+| pi's `hostBuiltin` cannot be derived | §4.2.1 changed to a static list (the appendix it pointed to was removed with the old pi version) |
 | `pluginOnly` bypasses the focus check | §4.2.2 step 0' guard; §4.2.3 checks `hasPendingInput`; §9 decision 16 |
 | "A reply to another message also counts as input" conflicts with `resolveInput` | §4.5.1 table |
 | progress has no close semantics | §4.5 rule 7 |
@@ -1299,13 +1299,13 @@ Based on the second review round (4 structural issues, 7 medium or detail issues
 
 ### v2 (relative to v1)
 
-Based on one review of the pi 0.81.1 source and the plugin code, all 14 comments were verified as valid (except "OMP is not installed": OMP is installed at `~/.local/bin/omp`, but as a compiled binary it indeed cannot be directly rechecked, so stage 0 was added). Main changes:
+Based on one review of the pi source and the plugin code, all 14 comments were verified as valid (except "OMP is not installed": OMP is installed at `~/.local/bin/omp`, but as a compiled binary it indeed cannot be directly rechecked, so stage 0 was added). Main changes:
 
 | Review point | Where changed |
 |---|---|
 | `onSubmit` hangs only for some commands | §4.2.3 lists the await type and the return-immediately type; draft restoration moved to scope end (§4.2.4); scope end conditions rewritten (§4.3) |
 | SettingsList submenu does not call `setFocus` | §4.6.5 #5: a submenu is nested state within the same session; `ThemeSubmenu` degrades |
-| Field locations, focused object | §4.1.3 session identity is based on the focused object; §4.6.3 adds `findShape`; Appendix B corrected |
+| Field locations, focused object | §4.1.3 session identity is based on the focused object; §4.6.3 adds `findShape`; the pi component appendix corrected (since removed with the old pi version) |
 | Focus ≠ dialog; non-capturing overlays; `setFocusInternal` | §4.1.3 focus classification, focus validation; non-capturing overlays listed as a non-goal |
 | Scope ends too early and loses output | §4.3 |
 | `/fork` writes the editor | §4.2.4 |
@@ -1319,41 +1319,3 @@ Based on one review of the pi 0.81.1 source and the plugin code, all 14 comments
 | Miscellany | Doc header changed to "supersedes principle 1"; `/export` changed to take the host method's return value; `tui-bridge.ts` unified as "deleted in stage 5"; plugin code citations changed to function names |
 
 ---
-
-## Appendix A: pi built-in command classification (0.81.1, `setupEditorSubmitHandler` L2085-2218)
-
-| Category | Commands | `onSubmit` behavior |
-|---|---|---|
-| Opens a dialog | `/settings`, `/fork`, `/tree`, `/trust`, `/logout`, `/resume` | Returns immediately |
-| Opens a dialog | `/scoped-models`, `/login`, `/model` (no argument, or the argument has no exact match) | await |
-| Output only | `/name`, `/session`, `/changelog`, `/debug`, Easter egg commands | Returns immediately |
-| Output only | `/export`, `/share`, `/compact`, `/model <exact name>` | await |
-| Host control (native handler) | `/reload`, `/fork`, `/clone`, `/import` | await or returns immediately; **not submitted to the editor** (§9 decision 21) |
-| Host control (session replacement) | `/new` | Goes through `ctx.newSession()`, not submitted to the editor (§9 decision 22) |
-| Terminal-only (§4.8) | `/copy`, `/hotkeys`, `/quit` | — |
-| Prefix | `!`/`!!` | Keep the existing `runTelegramBash` |
-
-`/model <term>`: when `handleModelCommand` (L3586) matches a model exactly it switches directly and calls `showStatus`; otherwise it opens the selector with the search term.
-
-Extension commands, prompt templates and skills are not in this `if` chain and fall through to the generic submit logic after it (while compacting L2236, while streaming L2248, when idle `onInputCallback` L2262), and the Gateway's "submit directly" applies to them equally.
-
-The stage 1 whitelist takes the commands in the two "output only" rows that can be submitted and do not replace the runtime: `/name`, `/session`, `/changelog`, `/debug`, `/export`, `/share`, `/compact` and the Easter egg commands; `/new` goes through `ctx.newSession()`; `/reload`, `/fork`, `/clone`, `/import` keep the native handlers. OMP's commands are connected in stage 3.
-
-## Appendix B: pi dialog component structure (0.81.1)
-
-| Dialog | Focused object | Where the data is |
-|---|---|---|
-| Extension select/confirm | `ExtensionSelectorComponent` | On itself: `options`, `selectedIndex`, `onSelectCallback` |
-| Extension input | `ExtensionInputComponent` | On itself: `input` (Input), `onSubmitCallback` |
-| `/settings` | `selector.getSettingsList()` (SettingsList) | On the SettingsList itself: `items`, `filteredItems`, `selectedIndex`, `onChange`; when a submenu is open it is `submenuComponent` (mostly a SelectList inside the submenu class, with `ThemeSubmenu` the exception). `SettingsSelectorComponent` holds only one main `settingsList` |
-| theme / thinking / show-images | Each component | Internal `SelectList`: `items`, `filteredItems`, `selectedIndex`, `setSelectedIndex()`, `getSelectedItem()` |
-| `/model` | `ModelSelectorComponent` | On itself: `filteredModels`, `selectedIndex`, `currentModel`, `searchInput`, `scope` |
-| `/logout`, `/login` provider | `OAuthSelectorComponent` | On itself: `filteredProviders`, `selectedIndex`, `searchInput` |
-| `/resume` | `SessionSelectorComponent` | Field `sessionList` (an ordinary class `SessionList`, not a component): `filteredSessions`, `selectedIndex`, `searchInput`, `sortMode`, `nameFilter` |
-| `/fork` | `selector.getMessageList()` | A message list object (fields to be confirmed during implementation) |
-| `/login` input | `LoginDialogComponent` | `Input`; after submit the input box is replaced by `> value` text |
-| `/share` etc. | `BorderedLoader` | Progress, not a dialog |
-| `/reload` | `reloadBox` (Box) | No `handleInput`, ignored |
-| `/tree`, `/scoped-models`, `/trust`, config | Each component | Confirm with `findShape` during implementation |
-
-Conclusion: pi-tui's base controls (`SelectList` / `SettingsList`) cover only settings-type dialogs; high-frequency selectors such as model, session and login are self-drawn lists that mostly follow the convention "a `filtered*` array + `selectedIndex` + a selection callback", but the data may be on nested non-component objects, handled by `findShape` + the generic `FilteredListAdapter`, with dedicated adapters added as needed.

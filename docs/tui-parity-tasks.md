@@ -86,7 +86,7 @@ Plan §0.1, decisions 46–50. The order is fixed: first delete the old paths (D
 | D3b | `!`/`!!` commands run by the host, keeping the `bashConfirm` confirmation (decision 51) | D3 | ☑ | `e9a4d89`; bash output is intercepted by constructor name `BashExecutionComponent`; if the OMP compiled output renames it, it will not be intercepted, to be checked with E2E in 3E |
 | D4 | `SnapshotAdapter` becomes `UnsupportedAdapter` (explicit notice + cancel) | D2 | ☑ | `5fc9d8b`; checkpoints 3A-2 and 3A-3 done |
 | A1 | Upgrade the dev dependency to pi `1.4.0`; check the host interfaces the remaining code depends on against the 1.4.0 source, and output a "needs change" list | D1–D4 | ☑ (the check was done by the controller; the dependency upgrade is folded into A2) | 4 items need change: the capture patch point `initHooksAndCustomTools` was renamed; the entry now hooks `pushExtensionDialog`/`removeExtensionDialog`; the command catalog uses only `autocompleteProvider`; built-in commands add `/bug`, `/thinking`, `/trust` |
-| A2 | Fix the pi-side code per the A1 list (the entry uses 1.4.0's dialog stack `pushExtensionDialog`/`removeExtensionDialog`, etc.); update the 0.81.1 references in the plan; delete the multi-version test matrix | A1 | ☑ | `cecf115`; the matrix tool and the E2E multi-version loop are split into A3 |
+| A2 | Fix the pi-side code per the A1 list (the entry uses 1.4.0's dialog stack `pushExtensionDialog`/`removeExtensionDialog`, etc.); update the old pi version references in the plan; delete the multi-version test matrix | A1 | ☑ | `cecf115`; the matrix tool and the E2E multi-version loop are split into A3 |
 | A3 | Delete the multi-version compatibility matrix tooling (`gen-compat-matrix.mjs`, `compat:*`, release-flow checks); E2E tests only pi 1.4.0 in `node_modules` | A2 | ☑ | `c3b893f`; the README compatibility section and `docs/compatibility.md` were rewritten, `compat-results.json` deleted |
 | A4 | Check the host version at startup (pi `1.4.0`, OMP `18.12.x`); if it does not match or cannot be read, stop working and explain the reason in the status bar and in Telegram (§0.1 item 1) | A3 | ☑ | `2bd8469`; checkpoint 3A-4 done, **all of 3A done** (2026-10-25, unit tests 548/548, 0 skip) |
 
@@ -174,7 +174,7 @@ Prerequisite: stage 2 is accepted. The OMP broker switch has been lifted (plan �
 
 ### T3.2 OMP output-only commands connected to the Gateway
 
-- **Files**: `lib/tui/gateway.ts` (OMP whitelist), the OMP table in plan Appendix A or §4.8.
+- **Files**: `lib/tui/gateway.ts` (OMP whitelist), the OMP table in plan §4.8.
 - **To do**: add the 18 commands in the first row of the OMP table in plan §4.8 (`/help`, `/status`, `/usage`, `/stats`, `/context`, `/changelog`, `/debug`, `/skills`, `/plugins`, `/extensions`, `/tools`, `/agents`, `/mcp`, `/plan`, `/session`, `/jobs`, `/todo`, `/memory`) to OMP's Gateway whitelist.
 - **Completion criteria**: E2E (OMP) asserts for each of these 18 commands: it does not enter `runTuiCommand` (the return is not the old mirroring keyboard), and the received body is non-empty and not only an ack. Any command that returns only an ack is removed from the whitelist, and the reason is recorded in §9.
 - **Not included**: selector-type commands (T3.11).
@@ -419,7 +419,7 @@ The order matters: **first build the state-equivalence tests, then delete the ol
 
 ### T5.3 State-equivalence E2E covers all commands
 
-- **To do**: add all state-changing pi commands in plan Appendix A, and the OMP commands that can run in the mock environment, to the T5.2 framework; add step 4 of plan §7.2: "the option set listed in Telegram equals the component's full list".
+- **To do**: add all state-changing pi commands (from pi@v1.4.0 `setupEditorSubmitHandler`), and the OMP commands that can run in the mock environment, to the T5.2 framework; add step 4 of plan §7.2: "the option set listed in Telegram equals the component's full list".
 - **Completion criteria**: all green on pi and OMP; commands that cannot run in the mock environment are listed with the reason.
 
 ### T5.4 Delete the mirroring code in the controller
