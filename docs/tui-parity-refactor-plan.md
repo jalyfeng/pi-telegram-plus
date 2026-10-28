@@ -24,6 +24,39 @@
 5. **E2E"待迁移"清单**：删除旧路径后，尚未迁移到新架构的命令在 Telegram 上暂时没有输出或交互。E2E 套件维护一份"待迁移"清单：清单内步骤失败算预期结果，单独列出；清单外步骤失败才算回归。每完成一项迁移，从清单中移除对应步骤。
 6. 本节与 §4.11（OMP 结构化通道）、§9 决定 41–50 共同构成 v6 的约束。
 
+### 0.2 v8 生效规则（2026-10-28，优先于本文其他位置及 §0.1 的冲突内容）
+
+背景：#19（长会话后 `/tg`、`ask` 栈溢出，#16 复发）和 #20（命令回复混入 agent 工具框）都出在"观察终端渲染、反推归属"的镜像层。W-1 实测：OMP 上 UI 上下文的 13 个对话框方法约每秒被重装一次（94 秒 95 次）；pi 上每次 `/new`、`/reload` 在自己上一层包装外再套一层（`ptp:showExtensionSelector > ptp:…`）。
+
+**交互规则（用户确认）**
+
+1. **对话区不归插件截取。** agent 消息、用户消息、工具调用由 `lib/renderer.ts` 经 session 事件发送，这部分保持不变。Telegram 上的命令/工具交互只对应 TUI **输入框区域**的内容（宿主在那里临时替换编辑器画出的选择器、输入框、登录提示、进度）。
+2. **TUI 上能选择 → Telegram 内联按钮（可翻页）；TUI 上是文本展示 → Telegram 文本。** 文本只取宿主给的结构化数据：对话框入口参数、组件的 `text`/`markdown` 等字段、`showStatus`/`showError`/`showWarning` 的字符串、扩展 `notify`、`showCommandReport` 的 `title`。
+3. **不做终端镜像：不调用 `render()` 读画面。** 拿不到结构化数据的界面，一律提示"Telegram 不支持，请在终端操作"，只给"取消"。
+4. **一条命令一条消息，原地编辑。** 按钮、进度、结果都在同一条 Telegram 消息上 `editMessageText` 替换，完成后移除按钮。
+5. 本地发起的对话框只在终端（原则 3 不变）。
+
+**由此删除**
+
+- `OutputCapture` 对 `chatContainer.addChild` 的截取：`AGENT_CTORS`、`AGENT_FIELDS`、方法形状排除（2f936f5）、`clear` 重建窗口、`REBUILD_OUTPUT_LABELS`、`renderComponent` 的 `render()` 分支、`showCommandReport` 的 body 渲染。保留：`showStatus/showError/showWarning`、`/export` 发文件、`!` 命令的 bash 结果（宿主 bash 组件的 `getOutput()`，见下）。
+- 用渲染文本工作的适配器：`customGoalAdapter`（pi-goal，§4.6.6 例外一作废）、`infoPanelAdapter` 的 `renderText`（改为只读结构化字段，读不到则按 unsupported）、`adapters/utils.ts` 的 `renderText`。
+- `!` 命令结果改为读宿主 bash 组件的 `getOutput()`，不再 `render()`；认领方式（"!" scope 内的 bash 执行组件，含 pending 区）不变。
+
+**#19：宿主方法包装改为"每个对象每个方法只有一个包装"**
+
+- 新模块 `lib/tui/hooks.ts` 取代 `install-marks.ts` 的启发式（对象标记、两次读取比较、函数身份、按 tracker 分作用域）以及 `hookMethod`/`installRace`/`hookEntryMethods`/`watchEditor` 各自的包装代码。
+- 注册表放在 `globalThis`（`Symbol.for` 键），跨模块实例（OMP `?mtime=` 导入、`/reload`）共享：`WeakMap<object, Map<method, Slot>>`。`Slot = { wrapper, base, handlers: Map<kind, Handler> }`。
+- 每个 (对象, 方法) 只有一个 `wrapper`；各功能（race、entry、focus、status、bash…）作为 `kind` 处理器挂在 slot 上，按固定优先级组成调用管道。**再次安装同一 kind 只替换处理器，不新增包装**。runtime 重建（`/new`、`/reload`）时，新 tracker 用同一 kind 覆盖旧处理器，旧 runtime dispose 时移除自己的处理器。
+- **身份判断读自有属性描述符，不读 `object[method]`。** 已核实的失效机制（OMP 18.12.5 `extensibility/extensions/user-wait.ts` `trackUserWaits`）：工具 UI 上下文是一个 Proxy，`get` 对底层每个函数值缓存一个匿名转发函数。我们写入的包装落在底层对象上，再读回来得到的是"转发到我们包装的匿名函数"，读取稳定但不是我们的包装 → 旧逻辑每秒在它外面再包一层。`Object.getOwnPropertyDescriptor(proxy, method)` 在没有对应 trap 时转发到底层，拿到的正是我们写入的值。
+- 安装规则：
+  - 首次：`base` = `object[method]` 读到的值（可能来自原型）；写入 `wrapper`；
+  - 之后：自有描述符的 `value === slot.wrapper` → 不动；
+  - 自有描述符存在、是函数且不是我们的包装（宿主真的换了方法）→ `slot.base = 描述符的值`（原始函数，不是 Proxy 的转发函数），重新写回同一个 `wrapper`，记 debug 日志；
+  - 写入失败（冻结对象）→ 放弃，记 debug 日志。
+- 我们的包装统一登记在一个 `WeakSet` 里；`base` 永远不能是登记过的包装（防止自引用）。
+- tick 只比较宿主对象身份是否变化；对象没变就不进入安装逻辑。
+- 回归测试：上千次 attach tick、tracker 重建、宿主每次读返回新函数、宿主替换方法后换回，调用链深度恒定（每个对象方法至多一层插件包装）。
+
 
 ---
 
