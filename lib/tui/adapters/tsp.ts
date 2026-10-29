@@ -66,6 +66,12 @@ type PickerProps = {
   actions?: readonly PickerEntryLike[];
   /** Search box contents; null/absent means the picker has no search box. */
   query?: unknown;
+  /**
+   * Pending confirmation over the list (OMP session picker's Delete): `text`
+   * is the question, `act` the native action that answers yes. Null/absent
+   * when nothing waits for an answer.
+   */
+  confirm?: unknown;
 };
 
 /** Tab, scope or action-bar entry: an id, a `TspText` label, optional disable. */
@@ -357,6 +363,35 @@ function visibleItems(props: PickerProps): PickerItemLike[] {
   return ordered.filter((item) => !item.disabled);
 }
 
+/** The picker's pending confirmation: its question text and the yes action. */
+type PickerConfirmLike = { text?: unknown; act?: unknown };
+
+/**
+ * The open confirmation over the picker, or undefined when none is pending.
+ * While one is open the host draws it in place of the list, so Telegram shows
+ * it as a yes/no dialog and the list actions stay out of reach.
+ */
+function pickerConfirm(props: PickerProps): PickerConfirmLike | undefined {
+  if (!isObject(props.confirm)) return undefined;
+  const confirm = props.confirm as PickerConfirmLike;
+  return typeof confirm.text === "string" && confirm.text.length > 0 ? confirm : undefined;
+}
+
+/**
+ * The native event that answers an open picker confirmation: yes sends the
+ * host's own confirm action, no (or Cancel) sends `close`, which the host maps
+ * onto cancelling the confirmation alone. Every other action is refused.
+ */
+function pickerConfirmEvent(keypath: string, confirm: PickerConfirmLike, action: DialogAction): unknown {
+  if (action.type === "cancel" || (action.type === "confirm" && !action.yes)) {
+    return { type: "action", key: keypath, act: "close", mods: [] };
+  }
+  if (action.type === "confirm" && typeof confirm.act === "string" && confirm.act.length > 0) {
+    return { type: "action", key: keypath, act: confirm.act, mods: [] };
+  }
+  return undefined;
+}
+
 /** Prefix of the synthetic keys that address a strip chip by index. */
 const STRIP_KEY_PREFIX = "strip:";
 
@@ -457,6 +492,10 @@ export const tspPickerAdapter: DialogAdapter = {
     const found = findPicker(component);
     if (!found) return { kind: "unsupported", what: "OMP picker closed or no longer a picker" };
     const { props } = found;
+    const confirm = pickerConfirm(props);
+    if (confirm) {
+      return { kind: "confirm", title: tspText(confirm.text) };
+    }
     const strip = pickerStrip(props);
     if (strip) {
       // The strip is open (e.g. the model hub's role chips after activating a
@@ -523,6 +562,8 @@ export const tspPickerAdapter: DialogAdapter = {
     const found = findPicker(component);
     if (!found) return false;
     const { owner, keypath, props } = found;
+    const confirm = pickerConfirm(props);
+    if (confirm) return sendPickerEvent(owner, pickerConfirmEvent(keypath, confirm, action), ctx);
     if (action.type === "search") {
       // The picker filters through its own input box: replace its contents
       // and let the host re-filter the list.
@@ -550,24 +591,31 @@ export const tspPickerAdapter: DialogAdapter = {
     } else if (action.type === "cancel") {
       target = { type: "action", key: keypath, act: "close", mods: [] };
     }
-    if (!target) return false;
-    const handle = (owner as Partial<Describable>).handleNativeEvent;
-    if (typeof handle !== "function") return false;
-    try {
-      handle.call(owner, target);
-    } catch {
-      return false;
-    }
-    // The native event mutates host state without a UI tick; ask the host to
-    // redraw so the terminal catches up with what Telegram just showed (3E).
-    try {
-      ctx.requestRender();
-    } catch {
-      // A host without a live renderer has nothing to redraw; the act landed.
-    }
-    return true;
+    return sendPickerEvent(owner, target, ctx);
   },
 };
+
+/**
+ * Hand a native event to the picker's owner and ask the host to redraw so the
+ * terminal catches up with what Telegram just showed (3E). False when there is
+ * no event or the host refuses it.
+ */
+function sendPickerEvent(owner: object, target: unknown, ctx: AdapterContext): boolean {
+  if (!target) return false;
+  const handle = (owner as Partial<Describable>).handleNativeEvent;
+  if (typeof handle !== "function") return false;
+  try {
+    handle.call(owner, target);
+  } catch {
+    return false;
+  }
+  try {
+    ctx.requestRender();
+  } catch {
+    // A host without a live renderer has nothing to redraw; the act landed.
+  }
+  return true;
+}
 
 /** The live page's rows, in section order (the host only describes that page). */
 function prefsRows(props: PrefsProps): PrefsRowLike[] {

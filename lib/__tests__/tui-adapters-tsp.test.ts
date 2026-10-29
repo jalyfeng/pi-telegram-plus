@@ -1306,3 +1306,39 @@ describe("tsp login read descends into describe-only form fields (H13)", () => {
     expect(describesTextInput(makeLoginDialog())).toBe(true);
   });
 });
+
+describe("tsp picker pending confirmation (OMP session Delete)", () => {
+  const confirmProps = {
+    ...pickerProps,
+    confirm: { text: "Delete “notes” ? This removes the session file.", act: "delete-confirm", label: "Delete" },
+  };
+
+  it("reads an open confirmation as a yes/no dialog instead of the list", () => {
+    const component = makeComponent({ k: "frame", c: [{ key: "picker", k: "picker", p: confirmProps }] });
+    const model = tspPickerAdapter.read(component, ctxFor());
+    expect(model).toEqual({ kind: "confirm", title: "Delete “notes” ? This removes the session file." });
+  });
+
+  it("sends the host's confirm action on yes and keeps the picker open on no", () => {
+    const component = makeComponent({ k: "frame", c: [{ key: "picker", k: "picker", p: confirmProps }] });
+    expect(tspPickerAdapter.act(component, { type: "confirm", yes: true }, ctxFor())).toBe(true);
+    expect(tspPickerAdapter.act(component, { type: "confirm", yes: false }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([
+      { type: "action", key: "picker", act: "delete-confirm", mods: [] },
+      { type: "action", key: "picker", act: "close", mods: [] },
+    ]);
+  });
+
+  it("answers Cancel with close and refuses list actions while the confirmation is open", () => {
+    const component = makeComponent({ k: "frame", c: [{ key: "picker", k: "picker", p: confirmProps }] });
+    expect(tspPickerAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(tspPickerAdapter.act(component, { type: "choose", key: "a" }, ctxFor())).toBe(false);
+    expect(tspPickerAdapter.act(component, { type: "key", name: "act:1" }, ctxFor())).toBe(false);
+    expect(component.events).toEqual([{ type: "action", key: "picker", act: "close", mods: [] }]);
+  });
+
+  it("reads the list again once the confirmation is null", () => {
+    const component = makeComponent({ k: "frame", c: [{ key: "picker", k: "picker", p: { ...confirmProps, confirm: null } }] });
+    expect(asSelect(tspPickerAdapter.read(component, ctxFor())).kind).toBe("select");
+  });
+});
