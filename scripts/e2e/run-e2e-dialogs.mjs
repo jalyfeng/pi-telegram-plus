@@ -1052,11 +1052,13 @@ async function runHost(host, servers) {
       }));
 
       // V4 dialog open: the terminal is showing a select dialog while the `!` command arrives.
+      let dialogKb;
       variantResults.push(await runVariant("V4", async () => {
         try {
           const since = await cursor();
           await injectText("/probe-select");
           const kb = await keyboardAfter("V4 select keyboard", since);
+          dialogKb = kb;
           if (!kb) return { ok: false, text: "V4: MISSING (no dialog keyboard)" };
           const sinceBang = await cursor();
           await injectText("!ls -la ptp-bang-dialog.txt");
@@ -1073,6 +1075,14 @@ async function runHost(host, servers) {
           if (notice) return { ok: true, text: `V4: notice "${plainOf(notice.call).trim().slice(0, 120)}"` };
           return { ok: false, text: "V4: MISSING (no feedback)" };
         } finally {
+          // Cancel the select from Telegram and wait until its keyboard is withdrawn. Escape
+          // alone left it open, and V5 was then refused ("a dialog is waiting in the terminal").
+          if (dialogKb) {
+            const messageId = dialogKb.body?.message_id ?? dialogKb.message_id;
+            const cancel = buttonsOf(dialogKb).find((b) => /:x$/.test(String(b.callback_data ?? "")));
+            if (cancel) await clickButton(cancel, messageId);
+            await keyboardGone(messageId, 10_000);
+          }
           await clearDialog();
         }
       }));
