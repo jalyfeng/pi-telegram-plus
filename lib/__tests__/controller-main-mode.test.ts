@@ -184,7 +184,7 @@ function createTurnSession(streamingRef: { value: boolean }, idleRef: { value: b
 
 describe("Telegram message sent during a Telegram-started turn", () => {
   for (const [messageMode, expected] of [["steer", "steer"], ["queue", "followUp"]] as const) {
-    it.fails(`a second Telegram message steers into the turn the first one started (${messageMode})`, async () => {
+    it(`a second Telegram message steers into the turn the first one started (${messageMode})`, async () => {
       const streamingRef = { value: false };
       const idleRef = { value: true };
       const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];

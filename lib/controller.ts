@@ -913,9 +913,36 @@ export function createTelegramController(deps: {
   };
 
   // Per chat/thread prompt queues: each Telegram topic chains independently.
+  // A queue entry is the "taken" signal of its message, not the whole turn.
   const promptTails = new Map<string, Promise<void>>();
   // Increasing generation per chat/thread lets stop invalidate pending queue items.
   const interruptGenerationByTarget = new Map<string, number>();
+
+  // Resolves once the host has taken the message: the prompt settled, or the
+  // session is streaming (checked right away, then every 25 ms). Needed because
+  // session.prompt() resolves only when the whole turn ends on both hosts.
+  type TakenSignal = (taken: Promise<void>) => void;
+  const whenTaken = (session: { readonly isStreaming: boolean }, promptPromise: Promise<unknown>): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = () => {
+        if (timer !== undefined) clearTimeout(timer);
+        resolve();
+      };
+      const poll = () => {
+        if (session.isStreaming) return done();
+        timer = setTimeout(poll, 25);
+      };
+      promptPromise.then(done, done);
+      poll();
+    });
+  // Calls session.prompt and reports to onTaken while still returning the prompt
+  // promise, so the caller awaits the turn exactly as before.
+  const promptAndSignal = (session: CapturedAgentSession, text: string, opts: Record<string, unknown>, onTaken: TakenSignal): Promise<unknown> => {
+    const promptPromise = Promise.resolve(session.prompt(text, opts as any));
+    onTaken(whenTaken(session, promptPromise));
+    return promptPromise;
+  };
 
   const getOrCreateTail = (key: string): Promise<void> => promptTails.get(key) ?? Promise.resolve();
   const setTail = (key: string, tail: Promise<void>) => promptTails.set(key, tail);
@@ -949,7 +976,7 @@ export function createTelegramController(deps: {
   // While background workflow agents run, session.isStreaming stays true and
   // core rejects plain prompts; steer/followUp would drain into a workflow
   // agent's turn instead (repo issue #10).
-  const deliverToMainThread = async (text: string, chatId: number, messageThreadId: number | undefined, sourceMessageId: number | undefined): Promise<void> => {
+  const deliverToMainThread = async (text: string, chatId: number, messageThreadId: number | undefined, sourceMessageId: number | undefined, onTaken: TakenSignal): Promise<void> => {
     const session = deps.getSession();
     if (!session) return;
     const ctx = session.extensionRunner.createCommandContext();
@@ -992,13 +1019,13 @@ export function createTelegramController(deps: {
         // A main turn (e.g. a goal continuation) started while we waited —
         // behave like the terminal and steer into it instead of holding.
         if (idleFn && !idleFn.call(ctx)) {
-          await session.prompt(text, { source: "interactive", streamingBehavior: busyStreamingBehavior() });
+          await promptAndSignal(session, text, { source: "interactive", streamingBehavior: busyStreamingBehavior() }, onTaken);
           return;
         }
         continue;
       }
       try {
-        await session.prompt(text, { source: "interactive" });
+        await promptAndSignal(session, text, { source: "interactive" }, onTaken);
         return;
       } catch (err) {
         // A goal continuation or workflow step may have started between our
@@ -1013,7 +1040,7 @@ export function createTelegramController(deps: {
   // Hold-and-deliver path shared by "main" and idle-"tui": wait until the
   // main loop is idle, then submit a plain prompt so the message always
   // starts a fresh main-thread turn.
-  const runMainDelivery = async (text: string, chatId: number, replaceMessageId: number | undefined, messageThreadId: number | undefined, sourceMessageId: number | undefined) => {
+  const runMainDelivery = async (text: string, chatId: number, replaceMessageId: number | undefined, messageThreadId: number | undefined, sourceMessageId: number | undefined, onTaken: TakenSignal) => {
     const turn = deps.beginTelegramTurn(chatId, replaceMessageId, messageThreadId, sourceMessageId);
     if (!turn) {
       // Target already has an active turn — reject with a busy message.
@@ -1030,7 +1057,7 @@ export function createTelegramController(deps: {
         ui: telegramUi,
         turn,
         uiMode: promptUiMode(),
-        run: () => deliverToMainThread(text, chatId, messageThreadId, sourceMessageId),
+        run: () => deliverToMainThread(text, chatId, messageThreadId, sourceMessageId, onTaken),
       }));
     } finally {
       deps.endTelegramTurn(chatId, turn);
@@ -1042,7 +1069,7 @@ export function createTelegramController(deps: {
   // so a switch in the Config menu applies to the next message.
   const busyStreamingBehavior = (): "steer" | "followUp" => (deps.getConfig?.().messageMode ?? "steer") === "queue" ? "followUp" : "steer";
 
-  const runPrompt = async (text: string, chatId: number, replaceMessageId?: number, messageThreadId?: number, sourceMessageId?: number) => {
+  const runPrompt = async (text: string, chatId: number, replaceMessageId: number | undefined, messageThreadId: number | undefined, sourceMessageId: number | undefined, onTaken: TakenSignal) => {
     const session = deps.getSession();
     if (!session) {
       if (replaceMessageId !== undefined) await deps.transport.editText(chatId, replaceMessageId, "π session is not ready yet.");
@@ -1070,7 +1097,7 @@ export function createTelegramController(deps: {
     // turn; it is never steered or queued into a background workflow agent's
     // turn.
     if (!mainBusy) {
-      await runMainDelivery(text, chatId, replaceMessageId, messageThreadId, sourceMessageId);
+      await runMainDelivery(text, chatId, replaceMessageId, messageThreadId, sourceMessageId, onTaken);
       return;
     }
 
@@ -1097,7 +1124,7 @@ export function createTelegramController(deps: {
               // Goal auto-continuations can be streaming without owning an
               // active TelegramTurn. Keep the delivery behavior tied to the
               // configured messageMode rather than to our renderer bookkeeping.
-              await session.prompt(text, { source: "interactive", streamingBehavior: busyStreamingBehavior() });
+              await promptAndSignal(session, text, { source: "interactive", streamingBehavior: busyStreamingBehavior() }, onTaken);
             },
           }));
         } finally {
@@ -1111,7 +1138,7 @@ export function createTelegramController(deps: {
         ui: telegramUi,
         turn: existingTurn,
         uiMode: promptUiMode(),
-        run: () => session.prompt(text, { source: "interactive", streamingBehavior: busyStreamingBehavior() }),
+        run: () => promptAndSignal(session, text, { source: "interactive", streamingBehavior: busyStreamingBehavior() }, onTaken),
       }));
       return;
     }
@@ -1122,13 +1149,19 @@ export function createTelegramController(deps: {
     // messages are delivered to the main thread in order.
     const key = targetKey(chatId, messageThreadId);
     const generation = getInterruptGeneration(key);
-    const task = getOrCreateTail(key)
+    // The next message for this chat/thread starts once this one is taken by the
+    // host (or this one finished for any reason), not when its turn ends.
+    let markTaken: () => void = () => undefined;
+    const taken = new Promise<void>((resolve) => { markTaken = resolve; });
+    const onTaken: TakenSignal = (signal) => { void signal.then(markTaken); };
+    void getOrCreateTail(key)
       .then(() => {
         if (generation !== getInterruptGeneration(key)) return;
-        return runPrompt(text, chatId, replaceMessageId, messageThreadId, sourceMessageId);
+        return runPrompt(text, chatId, replaceMessageId, messageThreadId, sourceMessageId, onTaken);
       })
-      .catch((err) => reportPromptFailure("prompt-delivery", chatId, messageThreadId, sourceMessageId, err));
-    setTail(key, task);
+      .catch((err) => reportPromptFailure("prompt-delivery", chatId, messageThreadId, sourceMessageId, err))
+      .finally(markTaken);
+    setTail(key, taken);
   };
 
   // §4.5 rule 6: a command arriving while a dialog is still waiting is the remote user
