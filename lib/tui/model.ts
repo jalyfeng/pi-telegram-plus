@@ -22,6 +22,16 @@ export type DialogItem = {
   checked?: boolean;
   /** Where the terminal cursor was when the model was read. */
   focused?: boolean;
+  /**
+   * Text shown after the label in the message body (never on the button): the
+   * host's row detail or settings hint. Telegram shows it as text, so it is
+   * truncated by the renderer, not by the producer.
+   */
+  note?: string;
+  /** Short tags shown in the message body after the label, e.g. a model's `[default]`. */
+  badges?: string[];
+  /** Section heading the row sits under; the renderer prints it once per run of rows. */
+  group?: string;
 };
 
 export type Question = {
@@ -41,15 +51,23 @@ export type DialogModel =
       items: DialogItem[];
       /** Full list size before filtering, when the host reports it. */
       total: number;
-      search?: { query: string };
+      search?: SearchModel;
       multi?: boolean;
       extraActions?: { label: string; key: string }[];
+      /** Host subtitle under the title (e.g. "Pick a provider"). */
+      subtitle?: string;
+      /** Host text shown in the body when the list is empty (or as its note). */
+      notice?: string;
     }
   | {
       kind: "settings";
       title: string;
       items: (DialogItem & { values?: string[]; hasSubmenu?: boolean })[];
-      search?: { query: string };
+      search?: SearchModel;
+      /** Host subtitle under the title: the current settings page's label. */
+      subtitle?: string;
+      /** The current page's lead text. */
+      notice?: string;
       /** A submenu is nested state of the same session (§4.6.4 #5). */
       submenu?: { itemKey: string; model: DialogModel };
     }
@@ -61,8 +79,18 @@ export type DialogModel =
       canSubmit: boolean;
     }
   | { kind: "approval"; title: string; detail?: string; options: { key: string; label: string }[] }
-  | { kind: "confirm"; title: string; message?: string }
-  | { kind: "input"; title: string; detail?: string; placeholder?: string; secret: boolean; prefill?: string }
+  /** `confirmLabel` / `cancelLabel` are the host's own button names when it gives them. */
+  | { kind: "confirm"; title: string; message?: string; confirmLabel?: string; cancelLabel?: string }
+  | {
+      kind: "input";
+      title: string;
+      detail?: string;
+      placeholder?: string;
+      secret: boolean;
+      prefill?: string;
+      /** A multi-step wizard's step list, with the step on screen marked `current`. */
+      steps?: { label: string; current: boolean }[];
+    }
   | { kind: "editor"; title: string; prefill?: string }
   | { kind: "progress"; text: string; cancellable: boolean }
   /**
@@ -74,6 +102,9 @@ export type DialogModel =
   | { kind: "info"; title?: string; text: string; closable: boolean; html?: boolean; actions?: { label: string; key: string }[] }
   /** §4.6.5 #13: nothing can model this dialog; the chat gets a plain notice, never a frame. */
   | { kind: "unsupported"; title?: string; what: string };
+
+/** A search box; `placeholder` is the host's hint shown while the query is empty. */
+export type SearchModel = { query: string; placeholder?: string };
 
 export type DialogAction =
   | { type: "choose"; key: string }

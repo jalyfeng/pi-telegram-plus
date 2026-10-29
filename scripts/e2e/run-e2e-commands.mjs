@@ -1390,7 +1390,7 @@ async function runHost(host, label, phase = "main") {
         && (c.method === "sendMessage" || c.body?.message_id === messageId) && c.body);
       const text = (call) => String(call?.body?.text ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
-      // 1. Delete shows the confirmation with its text and Yes / Cancel buttons.
+      // 1. Delete shows the confirmation with the host's own Delete / Cancel buttons.
       const first = await openDeletePicker();
       const beforeAsk = countSessionFiles();
       const askSince = await cursor();
@@ -1400,7 +1400,7 @@ async function runHost(host, label, phase = "main") {
         return hit && isConfirm(hit) ? hit : false;
       }, STEP_TIMEOUT_MS);
       const askButtons = buttonsOf(ask).map((b) => String(b.text ?? ""));
-      const yesButton = buttonsOf(ask).find((b) => /Yes/.test(String(b.text ?? "")));
+      const yesButton = buttonsOf(ask).find((b) => /^Delete$/.test(String(b.text ?? "")));
       const cancelButton = buttonsOf(ask).find((b) => /Cancel/.test(String(b.text ?? "")) || DIALOG_CANCEL.test(String(b.callback_data ?? "")));
       record("omp /resume delete asks for confirmation",
         Boolean(yesButton && cancelButton) && countSessionFiles() === beforeAsk,
@@ -1426,8 +1426,8 @@ async function runHost(host, label, phase = "main") {
         const hit = latestMessage(state, confirmSince, second.messageId);
         return hit && isConfirm(hit) ? hit : false;
       }, STEP_TIMEOUT_MS);
-      const yesAgain = buttonsOf(again).find((b) => /Yes/.test(String(b.text ?? "")));
-      if (!yesAgain) throw new Error(`no Yes button: ${buttonsOf(again).map((b) => String(b.text ?? "")).join(" / ").slice(0, 160)}`);
+      const yesAgain = buttonsOf(again).find((b) => /^Delete$/.test(String(b.text ?? "")));
+      if (!yesAgain) throw new Error(`no Delete button: ${buttonsOf(again).map((b) => String(b.text ?? "")).join(" / ").slice(0, 160)}`);
       const beforeYes = countSessionFiles();
       await pressRaw(yesAgain, second.messageId);
       await sleep(4000);
