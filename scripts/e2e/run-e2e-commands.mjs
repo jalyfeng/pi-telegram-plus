@@ -1471,6 +1471,113 @@ async function runHost(host, label, phase = "main") {
       record("omp /settings search", false, String(error.message).slice(0, 200));
     }
     await settle();
+
+    // ── Taps (issue #23, diagnostic): what each /settings button does when tapped ──
+    // The root lists only pages. One page is entered, up to 6 of its rows are tapped, then
+    // Back returns to the root. Each tap records toast, label after the tap and whether the
+    // pane changed. Nothing is fixed here, and this step never fails the suite.
+    const taps = [];
+    let tapError = "";
+    const plain = (text) => String(text ?? "").replace(/^[\s▸○◉●✓☐☑]+/u, "").trim();
+    const labelPrefix = (text) => plain(text).split(/:\s|\s[—·▸›]\s/)[0].trim() || plain(text).slice(0, 12);
+    const findTap = (call, text) => {
+      const buttons = buttonsOf(call);
+      return buttons.find((b) => String(b.text ?? "") === text)
+        ?? buttons.find((b) => plain(b.text).startsWith(labelPrefix(text)) && !isNav(b) && !isCancel(b));
+    };
+    const classifyTap = (b) => {
+      const text = plain(b.text);
+      if (isNav(b) || isCancel(b) || /^\d+\/\d+$/.test(text) || /^⬅️? ?Back$|^Back$|^Cancel$|^❌/.test(text)) return "skip";
+      if (text.includes("📄")) return "page";
+      if (/(…|›|▸|\.\.\.)\s*$/.test(text)) return "editor";
+      if (/\b(On|Off)\s*$/i.test(text)) return "switch";
+      if (/[:—·]/.test(text)) return "choice";
+      return "other";
+    };
+    const pickRows = (call) => {
+      const pool = buttonsOf(call).map((b) => ({ b, kind: classifyTap(b) })).filter((x) => x.kind !== "skip" && x.kind !== "page");
+      const order = [];
+      const take = (kind, n) => order.push(...pool.filter((x) => x.kind === kind && !order.includes(x)).slice(0, n));
+      take("switch", 2);
+      take("choice", 2);
+      take("other", 2 - order.filter((x) => x.kind === "choice").length);
+      take("editor", 1);
+      take("other", 1);
+      return order.slice(0, 6);
+    };
+    /**
+     * Find a row in the latest keyboard, paging forward (Next) while it is not on the
+     * current screen: a tap can redraw the list from its first screen.
+     */
+    const locateTap = async (messageId, text) => {
+      for (let screen = 0; screen < 8; screen += 1) {
+        const current = await latestState(messageId);
+        const target = current ? findTap(current, text) : undefined;
+        if (target) return { current, target };
+        const next = current && buttonsOf(current).find((b) => /Next ▶/.test(String(b.text ?? "")));
+        if (!next) return undefined;
+        await click(next, messageId, { timeoutMs: 10_000 }).catch(() => undefined);
+      }
+      return undefined;
+    };
+    /** Tap one row (found again by its text or label prefix) and record what happens. */
+    const tapRow = async (kind, text, messageId) => {
+      const located = await locateTap(messageId, text);
+      if (!located) {
+        taps.push({ kind, label: plain(text), toast: "", after: "(not in keyboard before tap)", paneChanged: false, message: "" });
+        console.log(`    tap ${kind} | ${plain(text)} | not in keyboard before tap`);
+        return;
+      }
+      const { target } = located;
+      const paneBefore = String(tmux("capture-pane", "-p", "-t", session).stdout ?? "");
+      const since = await cursor();
+      const callbackId = await injectCallback(String(target.callback_data), messageId);
+      const answer = await waitFor(`answer ${target.text}`, (state) => state.calls.slice(since)
+        .find((c) => c.method === "answerCallbackQuery" && c.body?.callback_query_id === callbackId) ?? false, 15_000)
+        .catch(() => undefined);
+      await sleep(1000);
+      const paneAfter = String(tmux("capture-pane", "-p", "-t", session).stdout ?? "");
+      const afterLocated = await locateTap(messageId, target.text);
+      const current = afterLocated?.current ?? await latestState(messageId);
+      const toast = String(answer?.body?.text ?? "");
+      const after = afterLocated ? String(afterLocated.target.text ?? "") : "(gone)";
+      const message = String(current?.body?.text ?? "").replace(/\s+/g, " ").slice(0, 80);
+      const paneChanged = paneBefore !== paneAfter;
+      taps.push({ kind, label: String(target.text ?? ""), toast, after, paneChanged, message });
+      console.log(`    tap ${kind} | ${plain(target.text)} | toast "${toast}" | after "${after}" | pane ${paneChanged ? "changed" : "same"}`);
+    };
+
+    try {
+      await settle();
+      const tapAck = await dispatch("/settings", { timeoutMs: 30_000 });
+      const tapMessageId = tapAck.message_id;
+      await awaitMessage("settings taps dialog", tapMessageId, hasDialog, 20_000);
+      const root = await latestState(tapMessageId);
+      const pageButton = buttonsOf(root).find((b) => /📄/.test(String(b.text ?? "")) && /Interaction/.test(String(b.text ?? "")))
+        ?? buttonsOf(root).find((b) => classifyTap(b) === "page");
+      if (!pageButton) throw new Error(`no page button: ${buttonsOf(root).map((b) => b.text).join(" / ").slice(0, 120)}`);
+      await tapRow("page", pageButton.text, tapMessageId);
+      // The page lists its sub-pages first (📄, 10 per screen); the rows to tap come on later screens.
+      for (let screen = 0; screen < 8; screen += 1) {
+        const current = await latestState(tapMessageId);
+        const picks = pickRows(current);
+        if (picks.length > 0) {
+          for (const { b, kind } of picks) await tapRow(kind, b.text, tapMessageId);
+          break;
+        }
+        const next = buttonsOf(current).find((b) => /Next ▶/.test(String(b.text ?? "")));
+        if (!next) break;
+        await click(next, tapMessageId, { timeoutMs: 10_000 }).catch(() => undefined);
+      }
+      const back = buttonsOf(await latestState(tapMessageId)).find((b) => /Back$/.test(plain(b.text)) && !isNav(b));
+      if (back) await click(back, tapMessageId, { timeoutMs: 10_000 }).catch(() => undefined);
+    } catch (error) {
+      tapError = String(error.message).slice(0, 200);
+    }
+    await settle();
+    writeFileSync(join(runDir, "settings-taps-omp.json"), `${JSON.stringify(taps, null, 2)}\n`);
+    record("omp /settings taps (issue #23, diagnostic)", true,
+      tapError ? `error: ${tapError}` : `${taps.length} taps, ${taps.filter((t) => t.toast).length} with a toast`);
   }
 
   // ── Inventory (issue #18, diagnostic): TUI text that Telegram does not show ──
