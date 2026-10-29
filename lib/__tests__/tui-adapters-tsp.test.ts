@@ -1536,3 +1536,159 @@ describe("tsp input wizard step (Y-2)", () => {
     expect(tspInputAdapter.read(component, ctxFor())).not.toHaveProperty("steps");
   });
 });
+
+describe("tsp picker row-scoped actions", () => {
+  const sessionProps = () => ({
+    title: "Resume",
+    noun: "sessions",
+    items: [
+      { id: "s1", label: "charlie" },
+      { id: "s2", label: "bravo" },
+      { id: "s3", label: "alpha" },
+    ],
+    selected: "s1",
+    current: ["s1"],
+    actions: [
+      { id: "resume", label: "Resume", primary: true },
+      { id: "delete", label: "Delete" },
+      { id: "scope", label: "All projects" },
+      { id: "close", label: "Close" },
+    ],
+  });
+
+  /**
+   * A session picker that answers like OMP's: `select` moves the highlight,
+   * `delete` opens the confirmation for the highlighted row, and the confirm
+   * action removes that row. It records every event it receives.
+   */
+  function makeSessionHost() {
+    const props: Record<string, unknown> = sessionProps();
+    const events: unknown[] = [];
+    const removed: string[] = [];
+    const component = {
+      events,
+      removed,
+      props,
+      describe: () => ({ k: "picker", p: props }),
+      handleNativeEvent: (event: Record<string, unknown>) => {
+        events.push(event);
+        if (event.type === "select") props.selected = event.item;
+        else if (event.type === "action" && event.act === "delete") {
+          props.confirm = { text: "Delete it? This removes the session file.", act: "delete-confirm", label: "Delete" };
+        } else if (event.type === "action" && event.act === "delete-confirm") {
+          removed.push(String(props.selected));
+          props.items = (props.items as { id: string }[]).filter((item) => item.id !== props.selected);
+          props.confirm = null;
+        }
+      },
+    };
+    return component;
+  }
+
+  const keyOf = (model: ReturnType<typeof asSelect>, label: string) =>
+    model.extraActions?.find((extra) => extra.label === label)?.key ?? expect.fail(`no ${label} action`);
+
+  it("keeps the primary and list-wide actions firing at once", () => {
+    const host = makeSessionHost();
+    const model = asSelect(tspPickerAdapter.read(host, ctxFor()));
+    expect(model.extraActions).toEqual([
+      { label: "Resume", key: "act:0" },
+      { label: "Delete", key: "act:1" },
+      { label: "All projects", key: "act:2" },
+    ]);
+    expect(tspPickerAdapter.act(host, { type: "key", name: "act:2" }, ctxFor())).toBe(true);
+    expect(tspPickerAdapter.act(host, { type: "key", name: "act:0" }, ctxFor())).toBe(true);
+    expect(host.events).toEqual([
+      { type: "action", key: "", act: "scope", mods: [] },
+      { type: "action", key: "", act: "resume", mods: [] },
+    ]);
+  });
+
+  it("answers Delete with a row choice instead of firing at the host's highlight", () => {
+    const host = makeSessionHost();
+    const { ctx, renders } = countingCtx();
+    const press = tspPickerAdapter.act(host, { type: "key", name: keyOf(asSelect(tspPickerAdapter.read(host, ctx)), "Delete") }, ctx);
+    expect(press).toBe(true);
+    expect(host.events).toEqual([]);
+    expect(renders()).toBe(1);
+    const model = asSelect(tspPickerAdapter.read(host, ctx));
+    expect(model.subtitle).toBe("Delete: choose a session");
+    expect(model.items.map((item) => item.key)).toEqual(["s1", "s2", "s3"]);
+    // The action bar steps aside; only the way back stays beside the rows.
+    expect(model.extraActions).toEqual([{ label: "Back", key: "pick:back" }]);
+  });
+
+  it("selects the chosen row, then fires the action at it", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    expect(tspPickerAdapter.act(host, { type: "choose", key: "s2" }, ctx)).toBe(true);
+    expect(host.events).toEqual([
+      { type: "select", key: "", item: "s2" },
+      { type: "action", key: "", act: "delete", mods: [] },
+    ]);
+    // The host now asks; the mode is spent, so the confirmation shows.
+    expect(tspPickerAdapter.read(host, ctx)).toMatchObject({ kind: "confirm" });
+  });
+
+  it("deletes exactly the picked session through the confirmation", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    tspPickerAdapter.act(host, { type: "choose", key: "s3" }, ctx);
+    expect(tspPickerAdapter.act(host, { type: "confirm", yes: true }, ctx)).toBe(true);
+    expect(host.removed).toEqual(["s3"]);
+    const model = asSelect(tspPickerAdapter.read(host, ctx));
+    expect(model.items.map((item) => item.key)).toEqual(["s1", "s2"]);
+    expect(model.subtitle).toBeUndefined();
+  });
+
+  it("leaves pick mode with Back without touching the host", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    expect(tspPickerAdapter.act(host, { type: "key", name: "pick:back" }, ctx)).toBe(true);
+    expect(host.events).toEqual([]);
+    const model = asSelect(tspPickerAdapter.read(host, ctx));
+    expect(model.subtitle).toBeUndefined();
+    expect(model.extraActions?.map((extra) => extra.label)).toEqual(["Resume", "Delete", "All projects"]);
+    // A row tap is a plain activation again.
+    expect(tspPickerAdapter.act(host, { type: "choose", key: "s2" }, ctx)).toBe(true);
+    expect(host.events).toEqual([{ type: "activate", key: "", item: "s2" }]);
+  });
+
+  it("refuses a row the list no longer holds and drops the mode", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    expect(tspPickerAdapter.act(host, { type: "choose", key: "gone" }, ctx)).toBe(false);
+    expect(host.events).toEqual([]);
+    expect(asSelect(tspPickerAdapter.read(host, ctx)).subtitle).toBeUndefined();
+  });
+
+  it("drops the mode when the host stops offering the action", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    host.props.actions = [{ id: "resume", label: "Resume", primary: true }];
+    const model = asSelect(tspPickerAdapter.read(host, ctx));
+    expect(model.subtitle).toBeUndefined();
+    expect(tspPickerAdapter.act(host, { type: "choose", key: "s2" }, ctx)).toBe(true);
+    expect(host.events).toEqual([{ type: "activate", key: "", item: "s2" }]);
+  });
+
+  it("does not enter pick mode on an empty list", () => {
+    const host = makeSessionHost();
+    host.props.items = [];
+    expect(tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctxFor())).toBe(false);
+    expect(host.events).toEqual([]);
+  });
+
+  it("keeps the mode per picker component", () => {
+    const first = makeSessionHost();
+    const second = makeSessionHost();
+    tspPickerAdapter.act(first, { type: "key", name: "act:1" }, ctxFor());
+    expect(asSelect(tspPickerAdapter.read(second, ctxFor())).subtitle).toBeUndefined();
+    expect(asSelect(tspPickerAdapter.read(first, ctxFor())).subtitle).toBe("Delete: choose a session");
+  });
+});

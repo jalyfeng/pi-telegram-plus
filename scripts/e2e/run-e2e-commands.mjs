@@ -1390,11 +1390,26 @@ async function runHost(host, label, phase = "main") {
         && (c.method === "sendMessage" || c.body?.message_id === messageId) && c.body);
       const text = (call) => String(call?.body?.text ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
+      // Delete asks which session first (a tap on a row would resume it); the
+      // current session is skipped, so deleting leaves exactly one file fewer.
+      const chooseOtherSession = async (opened) => {
+        const chooseSince = await cursor();
+        await pressRaw(opened.deleteButton, opened.messageId);
+        const choice = await waitFor("delete: choose a session", (state) => {
+          const hit = latestMessage(state, chooseSince, opened.messageId);
+          return hit && buttonsOf(hit).some((b) => /^Back$/.test(String(b.text ?? ""))) ? hit : false;
+        }, STEP_TIMEOUT_MS);
+        const row = buttonsOf(choice).find((b) => /^tgplus:dlg:[^:]+:\d+:c:/.test(String(b.callback_data ?? ""))
+          && !/✓|\[current\]/.test(String(b.text ?? "")));
+        if (!row) throw new Error(`no non-current session to delete: ${buttonsOf(choice).map((b) => String(b.text ?? "")).join(" / ").slice(0, 160)}`);
+        await pressRaw(row, opened.messageId);
+      };
+
       // 1. Delete shows the confirmation with the host's own Delete / Cancel buttons.
       const first = await openDeletePicker();
       const beforeAsk = countSessionFiles();
       const askSince = await cursor();
-      await pressRaw(first.deleteButton, first.messageId);
+      await chooseOtherSession(first);
       const ask = await waitFor("delete confirmation shown", (state) => {
         const hit = latestMessage(state, askSince, first.messageId);
         return hit && isConfirm(hit) ? hit : false;
@@ -1421,7 +1436,7 @@ async function runHost(host, label, phase = "main") {
       // 3. Delete again, then Yes removes the selected session file.
       const second = await openDeletePicker();
       const confirmSince = await cursor();
-      await pressRaw(second.deleteButton, second.messageId);
+      await chooseOtherSession(second);
       const again = await waitFor("second delete confirmation", (state) => {
         const hit = latestMessage(state, confirmSince, second.messageId);
         return hit && isConfirm(hit) ? hit : false;

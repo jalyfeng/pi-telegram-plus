@@ -70,6 +70,8 @@ type PickerProps = {
   placeholder?: unknown;
   /** Text under the title (`TspPickerProps.subtitle`). */
   subtitle?: unknown;
+  /** What the list holds, plural ("sessions"). */
+  noun?: unknown;
   /**
    * Pending confirmation over the list (OMP session picker's Delete): `text`
    * is the question, `act` the native action that answers yes. Null/absent
@@ -518,6 +520,40 @@ function pickerBarEvent(keypath: string, props: PickerProps, name: string): unkn
   return undefined;
 }
 
+/**
+ * Action-bar ids that act on one list row (OMP session picker's Delete, and
+ * its siblings in other pickers). The host applies them to its own highlight,
+ * and Telegram has no highlight to move: tapping a row activates it. So these
+ * buttons first ask which row they are for, then send the host `select` for
+ * that row followed by the action, the order the TUI user follows with the
+ * arrow keys and the action key. Every other bar entry (the primary action,
+ * scope toggles, ...) keeps firing at once.
+ */
+const ROW_ACTION_IDS: Record<string, true> = { delete: true, rename: true, pin: true, unpin: true };
+
+/** Synthetic key of the "leave pick mode" button. */
+const PICK_BACK_KEY = "pick:back";
+
+/**
+ * Pick mode per picker component: the row-scoped action waiting for its row.
+ * Keyed by the component the picker belongs to, so a closed picker takes its
+ * mode with it and a new picker starts clean.
+ */
+const pendingRowAction = new WeakMap<object, string>();
+
+/** The enabled bar entry `id` names, when the live picker still offers it. */
+function rowActionEntry(props: PickerProps, id: string): { id: string; label?: unknown } | undefined {
+  if (!Array.isArray(props.actions)) return undefined;
+  const entry = props.actions.find((candidate) => isObject(candidate) && candidate.id === id && !candidate.disabled);
+  return isObject(entry) && typeof entry.id === "string" ? (entry as { id: string; label?: unknown }) : undefined;
+}
+
+/** "sessions" -> "session": the noun the picker lists, in the singular. */
+function pickerNoun(props: PickerProps): string {
+  const noun = typeof props.noun === "string" ? props.noun.trim() : "";
+  return noun ? noun.replace(/s$/, "") : "item";
+}
+
 export const tspPickerAdapter: DialogAdapter = {
   id: "tsp-picker",
 
@@ -552,6 +588,9 @@ export const tspPickerAdapter: DialogAdapter = {
         total: items.length,
       };
     }
+    const pendingAction = pendingRowAction.get(found.owner);
+    const pending = pendingAction === undefined ? undefined : rowActionEntry(props, pendingAction);
+    if (pendingAction !== undefined && !pending) pendingRowAction.delete(found.owner);
     const currentIds = Array.isArray(props.current) ? props.current : [];
     const items: DialogItem[] = visibleItems(props).map((item) => {
       const description = item.detail === undefined ? undefined : tspText(item.detail);
@@ -565,10 +604,17 @@ export const tspPickerAdapter: DialogAdapter = {
         focused: props.selected === item.id,
       };
     });
-    const extraActions = pickerExtraActions(props);
+    const extraActions = pending
+      ? [
+          ...pickerExtraActions(props).filter((extra) => !extra.key.startsWith(BAR_KEY_PREFIX)),
+          { label: "Back", key: PICK_BACK_KEY },
+        ]
+      : pickerExtraActions(props);
     const search = typeof props.query === "string" ? { query: props.query, ...pickerPlaceholder(props) } : undefined;
     const title = typeof props.title === "string" ? props.title : "Select";
-    const subtitle = tspText(props.subtitle) || undefined;
+    const subtitle = pending
+      ? `${tspText(pending.label) || pending.id}: choose a ${pickerNoun(props)}`
+      : tspText(props.subtitle) || undefined;
     if (items.length === 0) {
       const text = tspText(props.empty) || tspText(props.message) || "Nothing to show";
       if (extraActions.length === 0 && !search) {
@@ -620,6 +666,29 @@ export const tspPickerAdapter: DialogAdapter = {
       }
       return true;
     }
+    const pendingAction = pendingRowAction.get(owner);
+    if (pendingAction !== undefined && action.type === "key" && action.name === PICK_BACK_KEY) {
+      pendingRowAction.delete(owner);
+      return requestRedraw(ctx);
+    }
+    if (pendingAction !== undefined && action.type === "choose" && !action.key.startsWith(STRIP_KEY_PREFIX)) {
+      // The row the user picked for the waiting action: move the host's
+      // highlight there, then fire the action at it.
+      pendingRowAction.delete(owner);
+      if (!rowActionEntry(props, pendingAction)) return false;
+      if (!visibleItems(props).some((item) => item.id === action.key)) return false;
+      if (!sendPickerEvent(owner, { type: "select", key: keypath, item: action.key }, ctx)) return false;
+      return sendPickerEvent(owner, { type: "action", key: keypath, act: pendingAction, mods: [] }, ctx);
+    }
+    if (action.type === "key" && action.name.startsWith(BAR_KEY_PREFIX)) {
+      const entry = entryAt(props.actions, action.name.slice(BAR_KEY_PREFIX.length));
+      if (entry && ROW_ACTION_IDS[entry.id] && !entry.disabled) {
+        // Nothing to aim at: the host would ignore it, so say the press did nothing.
+        if (visibleItems(props).length === 0) return false;
+        pendingRowAction.set(owner, entry.id);
+        return requestRedraw(ctx);
+      }
+    }
     let target: unknown;
     if (action.type === "choose" && action.key.startsWith(STRIP_KEY_PREFIX)) {
       const raw = action.key.slice(STRIP_KEY_PREFIX.length);
@@ -639,6 +708,16 @@ export const tspPickerAdapter: DialogAdapter = {
     return sendPickerEvent(owner, target, ctx);
   },
 };
+
+/** Ask the host to redraw after a change that lives only in this adapter. */
+function requestRedraw(ctx: AdapterContext): boolean {
+  try {
+    ctx.requestRender();
+  } catch {
+    // A host without a live renderer has nothing to redraw; the mode still changed.
+  }
+  return true;
+}
 
 /**
  * Hand a native event to the picker's owner and ask the host to redraw so the
