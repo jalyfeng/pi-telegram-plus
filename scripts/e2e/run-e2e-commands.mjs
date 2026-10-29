@@ -1369,8 +1369,10 @@ async function runHost(host, label, phase = "main") {
       const openDeletePicker = async () => {
         const since = await cursor();
         await dispatch("/resume", { timeoutMs: 30_000 });
+        // The picker is the newest keyboard that offers Delete; an emptied keyboard
+        // left by an earlier edit does not count.
         const picker = await waitFor("/resume picker for delete", (state) =>
-          state.calls.slice(since).findLast((c) => !wasRejected(c) && Array.isArray(rowsOf(c))) ?? false, 30_000);
+          state.calls.slice(since).findLast((c) => !wasRejected(c) && buttonsOf(c).some((b) => /delete/i.test(String(b.text ?? "")))) ?? false, 30_000);
         const deleteButton = buttonsOf(picker).find((b) => /delete/i.test(String(b.text ?? "")));
         if (!deleteButton) {
           throw new Error(`no Delete action: ${buttonsOf(picker).map((b) => String(b.text ?? "")).join(" / ").slice(0, 200)}`);
