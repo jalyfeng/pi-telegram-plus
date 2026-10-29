@@ -14,7 +14,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createServer } from "node:net";
 import { classify, loadPending } from "./pending.mjs";
 import { validateTelegramCalls } from "./telegram-contract.mjs";
@@ -143,6 +143,7 @@ function startHost(host, projectDir, agentDir, paneLog, session) {
     TMPDIR: join(ROOT, "tmp"),
     FORCE_COLOR: "0",
     NO_COLOR: "1",
+    ...(host === "omp" ? { PITG_TREE_DUMP: join(dirname(paneLog), "tree-dump.jsonl") } : {}),
   };
   mkdirSync(env.TMPDIR, { recursive: true });
   const envArgs = Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
@@ -1453,6 +1454,76 @@ async function runHost(host, label, phase = "main") {
       record("omp /settings search", false, String(error.message).slice(0, 200));
     }
     await settle();
+  }
+
+  // ── Inventory (issue #18, diagnostic): TUI text that Telegram does not show ──
+  // For each dialog command, the described tree read by the plugin (PITG_TREE_DUMP)
+  // is compared with the Telegram text and buttons. Texts missing from Telegram are
+  // listed per command and written to inventory-omp.json; nothing is fixed here.
+  if (host === "omp") {
+    const INVENTORY_COMMANDS = ["/login", "/settings", "/model", "/extensions", "/tree", "/agents", "/hub", "/logout", "/mcp add", "/usage"];
+    const TEXT_PROPS = new Set(["title", "subtitle", "lead", "hint", "text", "label", "message", "warning", "detail", "description",
+      "preview", "body", "notice", "badge", "badges", "facts", "status", "empty", "summary", "placeholder", "heading", "caption"]);
+    const readDumps = () => {
+      try {
+        return readFileSync(join(dirname(paneLog), "tree-dump.jsonl"), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      } catch {
+        return [];
+      }
+    };
+    // Every human-readable prop of the tree, with the node kind and role it comes from.
+    const collectTexts = (value, kind, found = []) => {
+      if (Array.isArray(value)) {
+        for (const item of value) collectTexts(item, kind, found);
+        return found;
+      }
+      if (typeof value !== "object" || value === null) return found;
+      const nodeKind = typeof value.k === "string" ? value.k : kind;
+      const role = typeof value.p?.role === "string" ? `${nodeKind}/${value.p.role}` : nodeKind;
+      for (const [prop, raw] of Object.entries(value)) {
+        if (TEXT_PROPS.has(prop)) {
+          const text = typeof raw === "string" ? raw : Array.isArray(raw) && raw.every((x) => typeof x === "object" && x !== null && "t" in x)
+            ? raw.map((x) => String(x.t)).join("") : undefined;
+          if (text && text.trim()) found.push({ kind: role, prop, text: text.trim() });
+        }
+        if (typeof raw === "object" && raw !== null) collectTexts(raw, nodeKind, found);
+      }
+      return found;
+    };
+    const norm = (s) => s.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+      .replace(/&quot;/g, "\"").replace(/\s+/g, " ").trim().toLowerCase();
+    const inventory = [];
+    for (const command of INVENTORY_COMMANDS) {
+      const row = { command, missing: [], texts: 0, adapter: "", telegram: "", buttons: [], error: "" };
+      inventory.push(row);
+      const dumpsBefore = readDumps().length;
+      try {
+        const ack = await dispatch(command, { timeoutMs: 30_000 });
+        await quiesce(ack.message_id);
+        await sleep(500);
+        const final = foldState((await controlGet()).calls, ack.message_id);
+        const telegramText = String(final?.body.text ?? "");
+        row.telegram = norm(telegramText).slice(0, 300);
+        row.buttons = buttonsOf(final).map((b) => String(b.text ?? ""));
+        const described = readDumps().slice(dumpsBefore).filter((d) => d.tree).at(-1);
+        row.adapter = described?.adapter ?? "(no described tree)";
+        const shown = norm([telegramText, ...row.buttons].join("\n"));
+        const seen = new Map();
+        for (const entry of described ? collectTexts(described.tree, "") : []) seen.set(`${entry.kind}|${entry.text}`, entry);
+        row.texts = seen.size;
+        row.missing = [...seen.values()].filter((entry) => !shown.includes(norm(entry.text)));
+        record(`omp inventory ${command}`, true,
+          `${row.missing.length} of ${row.texts} described texts missing from Telegram (${row.adapter})`);
+      } catch (error) {
+        row.error = String(error.message).slice(0, 200);
+        record(`omp inventory ${command}`, false, row.error);
+      }
+      await settle();
+    }
+    writeFileSync(join(runDir, "inventory-omp.json"), `${JSON.stringify(inventory, null, 2)}\n`);
+    for (const row of inventory) {
+      for (const entry of row.missing) console.log(`    ${row.command} | ${entry.kind} | ${entry.prop} | ${entry.text.slice(0, 120)}`);
+    }
   }
 
   // ── Reload, then verify the plugin still serves ────────────────────────

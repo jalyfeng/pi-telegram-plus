@@ -18,10 +18,13 @@
  *   button, never a mirrored frame or a guessed key sequence; if no adapter can
  *   perform an action, the button reports failure rather than guessing.
  */
+import { appendFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { log } from "../logger.ts";
 import type { DialogCallback } from "../callback-protocol.ts";
 import type { TelegramTransport, TelegramTurn } from "../types.ts";
 import { pickAdapter, unsupportedAdapter } from "./adapters/index.ts";
+import { describeTree } from "./adapters/tsp.ts";
 import { currentHostState } from "./host.ts";
 import { sendKeyTo } from "./keys.ts";
 import type { FocusInfo, FocusTracker } from "./focus.ts";
@@ -39,6 +42,31 @@ import type { SecretStore } from "./secrets.ts";
 import { renderDialog, type RenderedDialog } from "./render-telegram.ts";
 
 const brokerLog = log.child("tui-broker");
+
+/**
+ * E2E diagnostic (issue #18 inventory): with PITG_TREE_DUMP set to a file path,
+ * every dialog read appends the component's described tree and the model the
+ * adapter produced as one JSON line. Unset in normal runs, so nothing is written.
+ */
+const TREE_DUMP = process.env.PITG_TREE_DUMP ? resolve(process.env.PITG_TREE_DUMP) : "";
+
+function dumpDescribedTree(component: Record<string, unknown>, adapterId: string, model: DialogModel): void {
+  if (!TREE_DUMP) return;
+  try {
+    // A repeated object is reported as a cycle; describe trees are plain data, so this only guards the dump.
+    const seen = new WeakSet<object>();
+    const line = JSON.stringify({ at: Date.now(), adapter: adapterId, component: ctorName(component), tree: describeTree(component), model }, (_key, value: unknown) => {
+      if (typeof value !== "object" || value === null) return value;
+      if (seen.has(value)) return "[cycle]";
+      seen.add(value);
+      if (typeof (value as { describe?: unknown }).describe === "function") return `[component ${ctorName(value as Record<string, unknown>)}]`;
+      return value;
+    });
+    appendFileSync(TREE_DUMP, `${line}\n`);
+  } catch (err) {
+    brokerLog.debug("tree dump failed", { err });
+  }
+}
 
 /** §4.5 rule 2: at most one message edit per chat per second. */
 export const EDIT_THROTTLE_MS = 1_000;
@@ -819,7 +847,9 @@ export class DialogBroker {
   private read(component: Record<string, unknown>, ctx: AdapterContext, adapter?: DialogAdapter): DialogModel | undefined {
     const picked = adapter ?? pickAdapterSafely(component, ctx) ?? unsupportedAdapter;
     try {
-      return picked.read(component, ctx);
+      const model = picked.read(component, ctx);
+      dumpDescribedTree(component, picked.id, model);
+      return model;
     } catch (err) {
       brokerLog.debug("adapter read failed", { err, ctor: ctorName(component) });
       return undefined;
