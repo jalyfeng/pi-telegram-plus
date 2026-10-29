@@ -16,6 +16,7 @@
  * instances, and all of them must share one wrapper per method.
  */
 
+import { appendFileSync } from "node:fs";
 import { log } from "../logger.ts";
 
 /** A pipeline stage: call `next(args)` to continue towards the host method; return its result (or a replacement). */
@@ -39,6 +40,27 @@ type Slot = {
   original: (...args: unknown[]) => unknown;
 };
 
+/**
+ * Opt-in diagnostics (issue #19 acceptance). When the environment variable
+ * `PITG_HOOK_STATS` names a file, every new slot is counted per `<Ctor>.<method>`,
+ * and once a minute one JSON line is appended with the cumulative and per-window
+ * counts and the deepest plugin-wrapper chain on any live slot. Unset: no timer,
+ * no file, no counting.
+ */
+const STATS_ENV = "PITG_HOOK_STATS";
+const STATS_INTERVAL_MS = 60_000;
+
+type StatsTracked = { key: string; method: string; target: WeakRef<object> };
+type StatsState = {
+  file: string;
+  startedAt: number;
+  created: number;
+  createdByKey: Map<string, number>;
+  createdAtLastSample: number;
+  tracked: StatsTracked[];
+  timer?: ReturnType<typeof setInterval>;
+};
+
 type Registry = {
   /** target -> method -> slot. */
   slots: WeakMap<object, Map<string, Slot>>;
@@ -48,6 +70,8 @@ type Registry = {
   wrapperSlots: WeakMap<object, Slot>;
   /** owner -> slots that owner put a stage on. */
   owners: WeakMap<object, Set<Slot>>;
+  /** Diagnostics state: undefined until first read, null when `PITG_HOOK_STATS` is unset. */
+  stats?: StatsState | null;
 };
 
 const REGISTRY_KEY = Symbol.for("pi-telegram-plus.hooks");
@@ -92,6 +116,68 @@ export function methodOwner(obj: object, name: string): object | undefined {
 /** Whether `fn` is a wrapper this module created. */
 export function isPluginWrapper(fn: unknown): boolean {
   return typeof fn === "function" && registry().wrappers.has(fn);
+}
+
+function statsOf(reg: Registry): StatsState | undefined {
+  if (reg.stats === undefined) {
+    const file = process.env[STATS_ENV];
+    reg.stats = file
+      ? { file, startedAt: Date.now(), created: 0, createdByKey: new Map(), createdAtLastSample: 0, tracked: [] }
+      : null;
+  }
+  return reg.stats ?? undefined;
+}
+
+function countCreatedSlot(reg: Registry, target: object, method: string): void {
+  const stats = statsOf(reg);
+  if (!stats) return;
+  let ctor = "?";
+  try {
+    ctor = (Object.getPrototypeOf(target) as { constructor?: { name?: string } } | null)?.constructor?.name || "?";
+  } catch {
+    // a host proxy may refuse the prototype read; keep the placeholder
+  }
+  const key = `${ctor}.${method}`;
+  stats.created += 1;
+  stats.createdByKey.set(key, (stats.createdByKey.get(key) ?? 0) + 1);
+  stats.tracked.push({ key, method, target: new WeakRef(target) });
+  if (!stats.timer) {
+    stats.timer = setInterval(() => sampleStats(reg), STATS_INTERVAL_MS);
+    (stats.timer as { unref?: () => void }).unref?.();
+  }
+}
+
+function sampleStats(reg: Registry): void {
+  const stats = reg.stats;
+  if (!stats) return;
+  let maxDepth = 0;
+  const depthByKey: Record<string, number> = {};
+  const live: StatsTracked[] = [];
+  for (const entry of stats.tracked) {
+    const target = entry.target.deref();
+    if (!target) continue;
+    live.push(entry);
+    const depth = pluginWrapperDepth(target, entry.method);
+    maxDepth = Math.max(maxDepth, depth);
+    depthByKey[entry.key] = Math.max(depthByKey[entry.key] ?? 0, depth);
+  }
+  stats.tracked = live;
+  const line = {
+    at: new Date().toISOString(),
+    elapsedMs: Date.now() - stats.startedAt,
+    created: stats.created,
+    createdInWindow: stats.created - stats.createdAtLastSample,
+    liveSlots: live.length,
+    maxDepth,
+    depthByKey,
+    createdByKey: Object.fromEntries(stats.createdByKey),
+  };
+  stats.createdAtLastSample = stats.created;
+  try {
+    appendFileSync(stats.file, `${JSON.stringify(line)}\n`);
+  } catch (err) {
+    hookLog.debug("hook stats write failed", { err });
+  }
 }
 
 function findSlot(target: object, method: string): Slot | undefined {
@@ -166,6 +252,7 @@ export function installHook(target: object, method: string, kind: string, stage:
     }
     const created = createSlot(base as (...args: unknown[]) => unknown);
     if (!writeWrapper(target, method, created.wrapper)) return false;
+    countCreatedSlot(reg, target, method);
     created.stages.set(kind, entry);
     reg.wrappers.add(created.wrapper);
     reg.wrapperSlots.set(created.wrapper, created);
