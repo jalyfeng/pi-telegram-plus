@@ -128,34 +128,36 @@ function setup(options: { draftBeneath?: boolean } = {}) {
     enabled: () => true,
   });
   broker.start();
-  return { sent, ui, focusCalls, toolUi, state, broker };
+  return { sent, ui, focusCalls, toolUi, state, broker, focus };
 }
 
 const flush = async (ticks = 3) => {
   for (let i = 0; i < ticks; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
 };
+/** OMP passes `dialogOptions` with an abort signal; the race wrapper only exists for that shape. */
+const askOptions = () => ({ signal: new AbortController().signal });
 const sendsOf = (sent: Sent[]) => sent.filter((entry) => entry.kind === "send");
 
 describe("#22 one ask call sends one Telegram message", () => {
   it("S1 plain: a single askDialog call sends exactly one message", async () => {
-    const { sent, toolUi, focusCalls } = setup();
-    void toolUi.askDialog([QUESTION], {});
+    const { sent, toolUi, focusCalls, focus, state } = setup();
+    void toolUi.askDialog([QUESTION], askOptions());
     await flush();
+    expect(focus.entryFor(state.ask as unknown as Record<string, unknown>)?.race).toBeDefined();
     expect(focusCalls).toHaveLength(1);
     expect(sendsOf(sent)).toHaveLength(1);
   });
 
   it("S2 draft beneath: the editor mounted under the dialog does not add a message", async () => {
     const { sent, toolUi } = setup({ draftBeneath: true });
-    void toolUi.askDialog([QUESTION], {});
+    void toolUi.askDialog([QUESTION], askOptions());
     await flush();
     expect(sendsOf(sent)).toHaveLength(1);
   });
 
-  // #22: reproduces the duplicate message
-  it.fails("S3 nested prompt: opening and closing a prompt editor over the dialog sends one message", async () => {
+  it("S3 nested prompt: opening and closing a prompt editor over the dialog sends one message", async () => {
     const { sent, ui, toolUi, state } = setup();
-    void toolUi.askDialog([QUESTION], {});
+    void toolUi.askDialog([QUESTION], askOptions());
     await flush();
     const promptEditor = new HookEditorComponent();
     ui.setFocus(promptEditor);
@@ -163,5 +165,21 @@ describe("#22 one ask call sends one Telegram message", () => {
     ui.setFocus(state.ask);
     await flush();
     expect(sendsOf(sent)).toHaveLength(1);
+    expect(sent.filter((entry) => (entry.kind === "edit" || entry.kind === "editText") && entry.text === "Answered in the terminal")).toEqual([]);
+  });
+
+  it("S4 settled ask: a prompt opened after the ask was answered is not kept, and opens its own message", async () => {
+    const { sent, ui, toolUi, state, focus } = setup();
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    const race = focus.entryFor(state.ask as unknown as Record<string, unknown>)?.race;
+    expect(race?.settled).toBe(false);
+    expect(race?.answer(undefined)).toBe(true);
+    expect(race?.settled).toBe(true);
+    await flush();
+    ui.setFocus(new HookEditorComponent());
+    await flush();
+    // The guard does not apply once the race is settled: the ask session retires and the prompt opens a message.
+    expect(sendsOf(sent)).toHaveLength(2);
   });
 });

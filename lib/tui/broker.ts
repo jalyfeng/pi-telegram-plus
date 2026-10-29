@@ -364,6 +364,15 @@ export class DialogBroker {
         // so only the *drawing* rule applies: never mirror the spinner itself (§4.5 rule 1).
         return;
       }
+      // A prompt opened over a live ask dialog (OMP's "Other"/note input, a HookEditorComponent) takes
+      // focus while the ask call is still open, and restoreAskDialog hands focus back to the SAME ask
+      // object afterwards (oh-my-pi@v18.12.5 packages/coding-agent/src/modes/controllers/extension-ui-controller.ts,
+      // #showLocalAskDialog / openPrompt / restoreAskDialog). The question is still the one on screen, so the
+      // session, its message and its focus stay as they are; the same-component branch redraws when focus returns.
+      if (session && session.state !== "closed" && session.focus !== component) {
+        const race = session.entry?.kind === "ask" ? session.entry.race : undefined;
+        if (race && !race.settled && this.deps.focus.entryFor(component) === undefined) return;
+      }
       // Same question, different object: the host moved focus from the dialog to the
       // overlay wrapper that holds it, and the wrapper is what receives keys from then
       // on. Keep the session - its message, keyboard and pending button taps stay
