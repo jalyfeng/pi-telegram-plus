@@ -1350,10 +1350,9 @@ async function runHost(host, label, phase = "main") {
     }
     await settle();
 
-    // H20: observe what Delete does in the /resume picker on Telegram. The
-    // picker above was closed by settle(), so it is opened again. The only
-    // assertion is that no session file disappears without a confirmation;
-    // the reply text and buttons are recorded as observations.
+    // H20: Delete in the /resume picker asks for confirmation on Telegram, as the
+    // TUI does ("Delete ... This removes the session file."). Cancel keeps the
+    // session file; Yes removes it. Both answers go through the picker message.
     try {
       const sessionsDir = join(runDir, "agent", "sessions");
       const countSessionFiles = () => {
@@ -1364,40 +1363,74 @@ async function runHost(host, label, phase = "main") {
           return 0;
         }
       };
-      const pickerSince = await cursor();
-      await dispatch("/resume", { timeoutMs: 30_000 });
-      const picker = await waitFor("/resume picker for delete", (state) =>
-        state.calls.slice(pickerSince).findLast((c) => !wasRejected(c) && Array.isArray(rowsOf(c))) ?? false, 30_000);
-      const deleteButton = buttonsOf(picker).find((b) => /delete/i.test(String(b.text ?? "")));
-      const stepName = "omp /resume delete asks for confirmation";
-      if (!deleteButton) {
-        record(stepName, true,
-          `no Delete action offered: ${buttonsOf(picker).map((b) => String(b.text ?? "")).join(" / ").slice(0, 200)}`);
-      } else {
-        const messageId = picker.body?.message_id ?? picker.message_id;
-        const before = countSessionFiles();
-        // Raw callback instead of click(): click() throws when no follow-up
-        // message comes, and a silent Delete is exactly what must be observed.
-        const clickSince = await cursor();
-        const callbackId = await injectCallback(String(deleteButton.callback_data), messageId);
-        await waitFor("Delete callback answered", (state) =>
+      const CONFIRM_TEXT = "removes the session file";
+      const isConfirm = (call) => String(call?.body?.text ?? "").includes(CONFIRM_TEXT);
+      const openDeletePicker = async () => {
+        const since = await cursor();
+        await dispatch("/resume", { timeoutMs: 30_000 });
+        const picker = await waitFor("/resume picker for delete", (state) =>
+          state.calls.slice(since).findLast((c) => !wasRejected(c) && Array.isArray(rowsOf(c))) ?? false, 30_000);
+        const deleteButton = buttonsOf(picker).find((b) => /delete/i.test(String(b.text ?? "")));
+        if (!deleteButton) {
+          throw new Error(`no Delete action: ${buttonsOf(picker).map((b) => String(b.text ?? "")).join(" / ").slice(0, 200)}`);
+        }
+        return { picker, messageId: picker.body?.message_id ?? picker.message_id, deleteButton };
+      };
+      // Raw callback: a press may legitimately produce no reply of its own.
+      const pressRaw = async (button, messageId) => {
+        const callbackId = await injectCallback(String(button.callback_data), messageId);
+        await waitFor(`callback answered: ${button.text}`, (state) =>
           state.calls.some((c) => c.method === "answerCallbackQuery" && c.body?.callback_query_id === callbackId), STEP_TIMEOUT_MS);
-        await sleep(4000);
-        const afterClick = await controlGet();
-        const reply = afterClick.calls.slice(clickSince).findLast((c) =>
-          !wasRejected(c) && (c.method === "sendMessage" || c.method === "editMessageText") && c.body
-          && (typeof c.body.text === "string" || Array.isArray(c.body.reply_markup?.inline_keyboard)));
-        const replyText = String(reply?.body?.text ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-        const replyButtons = buttonsOf(reply).map((b) => String(b.text ?? "")).join(" / ").slice(0, 160);
-        const after = countSessionFiles();
-        const observed = `text: "${replyText.slice(0, 160)}" · buttons: ${replyButtons || "(none)"} · has Delete: ${replyText.includes("Delete")} · has "removes the session file": ${replyText.includes("removes the session file")}`;
-        record(stepName, after === before,
-          after === before ? observed : `a session file was deleted without any confirmation (${before} -> ${after})`);
+      };
+      const latestMessage = (state, since, messageId) => state.calls.slice(since).findLast((c) =>
+        !wasRejected(c) && (c.method === "sendMessage" || c.method === "editMessageText")
+        && (c.method === "sendMessage" || c.body?.message_id === messageId) && c.body);
+      const text = (call) => String(call?.body?.text ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
-        // Close the dialog without touching a session row or a confirm button.
-        const cancel = buttonsOf(reply).find((b) => /^Cancel$/.test(String(b.text ?? "")) || DIALOG_CANCEL.test(String(b.callback_data ?? "")));
-        if (cancel && reply) await click(cancel, reply.body?.message_id ?? reply.message_id).catch(() => undefined);
-      }
+      // 1. Delete shows the confirmation with its text and Yes / Cancel buttons.
+      const first = await openDeletePicker();
+      const beforeAsk = countSessionFiles();
+      const askSince = await cursor();
+      await pressRaw(first.deleteButton, first.messageId);
+      const ask = await waitFor("delete confirmation shown", (state) => {
+        const hit = latestMessage(state, askSince, first.messageId);
+        return hit && isConfirm(hit) ? hit : false;
+      }, STEP_TIMEOUT_MS);
+      const askButtons = buttonsOf(ask).map((b) => String(b.text ?? ""));
+      const yesButton = buttonsOf(ask).find((b) => /Yes/.test(String(b.text ?? "")));
+      const cancelButton = buttonsOf(ask).find((b) => /Cancel/.test(String(b.text ?? "")) || DIALOG_CANCEL.test(String(b.callback_data ?? "")));
+      record("omp /resume delete asks for confirmation",
+        Boolean(yesButton && cancelButton) && countSessionFiles() === beforeAsk,
+        `text: "${text(ask).slice(0, 120)}" · buttons: ${askButtons.join(" / ").slice(0, 120)}`);
+
+      // 2. Cancel closes the confirmation and keeps the session file.
+      const cancelSince = await cursor();
+      await pressRaw(cancelButton, first.messageId);
+      await waitFor("picker back after cancel", (state) => {
+        const hit = latestMessage(state, cancelSince, first.messageId);
+        return hit && !isConfirm(hit) && Array.isArray(rowsOf(hit)) ? hit : false;
+      }, STEP_TIMEOUT_MS);
+      await sleep(1000);
+      const afterCancel = countSessionFiles();
+      record("omp /resume cancel keeps the session file", afterCancel === beforeAsk,
+        afterCancel === beforeAsk ? `${afterCancel} session files kept` : `${beforeAsk} -> ${afterCancel}`);
+
+      // 3. Delete again, then Yes removes the selected session file.
+      const second = await openDeletePicker();
+      const confirmSince = await cursor();
+      await pressRaw(second.deleteButton, second.messageId);
+      const again = await waitFor("second delete confirmation", (state) => {
+        const hit = latestMessage(state, confirmSince, second.messageId);
+        return hit && isConfirm(hit) ? hit : false;
+      }, STEP_TIMEOUT_MS);
+      const yesAgain = buttonsOf(again).find((b) => /Yes/.test(String(b.text ?? "")));
+      if (!yesAgain) throw new Error(`no Yes button: ${buttonsOf(again).map((b) => String(b.text ?? "")).join(" / ").slice(0, 160)}`);
+      const beforeYes = countSessionFiles();
+      await pressRaw(yesAgain, second.messageId);
+      await sleep(4000);
+      const afterYes = countSessionFiles();
+      record("omp /resume confirm removes the session file", afterYes === beforeYes - 1,
+        afterYes === beforeYes - 1 ? `${beforeYes} -> ${afterYes} session files` : `${beforeYes} -> ${afterYes} (expected one less)`);
     } catch (error) {
       record("omp /resume delete asks for confirmation", false, String(error.message).slice(0, 200));
     }
