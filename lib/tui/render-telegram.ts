@@ -245,8 +245,11 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
     return { text: `${inner.text}\n<i>Submenu · Back sends Esc</i>`, rows, keyMap, page: 0, pages: 1 };
   }
   const page = Math.max(0, ctx.page ?? 0);
-  const pages = Math.max(1, Math.ceil(model.items.length / PAGE_SIZE));
-  const window = model.items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+  // Page switches (shortcuts) are not list rows: they form a compact block under the list.
+  const rowItems = model.items.filter((item) => item.shortcut !== true);
+  const shortcutItems = model.items.filter((item) => item.shortcut === true);
+  const pages = Math.max(1, Math.ceil(rowItems.length / PAGE_SIZE));
+  const window = rowItems.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
   const rows: TelegramButton[][] = [];
   const keyMap = new Map<string, string>();
   window.forEach((item, index) => {
@@ -275,16 +278,27 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
     rows.push([built]);
     keyMap.set(arg, item.key);
   });
-  const nav = pageButtons(model.items.length, page, ctx);
+  const nav = pageButtons(rowItems.length, page, ctx);
   if (nav.length > 0) rows.push(nav);
+  // The compact block of page switches sits under the list on every page; the
+  // arg `g<n>` cannot collide with the row args (`<page>.<index>...`).
+  const shortcutButtons: TelegramButton[] = [];
+  shortcutItems.forEach((item, index) => {
+    const arg = `g${index}`;
+    const built = button(shorten(item.label, MAX_LABEL), ctx, "m", arg);
+    if (!built) return;
+    shortcutButtons.push(built);
+    keyMap.set(arg, item.key);
+  });
+  rows.push(...chunk(shortcutButtons));
   rows.push(cancelRow(ctx));
-  const pageLine = `Page ${page + 1}/${pages} · ${model.items.length} items`;
+  const pageLine = `Page ${page + 1}/${pages} · ${rowItems.length} items`;
   const searchLine = model.search ? `${pageLine} · 🔍 ${searchHint(model.search, "Type to search")}` : pageLine;
   return {
     text: listText(
       model.title,
       [model.subtitle, searchLine].filter((line) => line !== undefined && line !== "").join("\n"),
-      model.items,
+      rowItems,
       page,
       false,
       model.notice,

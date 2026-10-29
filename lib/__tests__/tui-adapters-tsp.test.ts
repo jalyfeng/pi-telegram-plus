@@ -544,7 +544,7 @@ describe("tsp prefs read", () => {
     expect(model.title).toBe("Settings");
     // The current page and every disabled page/row is left out.
     expect(model.items).toEqual([
-      { key: "page:general", label: "📄 General", hasSubmenu: true },
+      { key: "page:general", label: "📄 General", hasSubmenu: true, shortcut: true },
       { key: "think", label: "Thinking", value: "On", values: ["On", "Off"], group: "Inference" },
       { key: "theme", label: "Theme", value: "Dark", values: ["Dark", "Light"], group: "Appearance" },
       { key: "width", label: "Width", value: "80", hasSubmenu: true, group: "Appearance" },
@@ -1441,7 +1441,7 @@ describe("tsp settings text the host shows (Y-2)", () => {
     expect(model.subtitle).toBe("Models");
     expect(model.notice).toBe("Pick the models pi uses.");
     expect(model.items).toEqual([
-      { key: "page:general", label: "📄 General", hasSubmenu: true },
+      { key: "page:general", label: "📄 General", hasSubmenu: true, shortcut: true },
       { key: "think", label: "Thinking", value: "On", values: ["On", "Off"], note: "How hard to think", group: "Inference" },
       { key: "theme", label: "Theme", value: "Dark", values: ["Dark", "Light"], note: "Dark palette", group: "Inference" },
     ]);

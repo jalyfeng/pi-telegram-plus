@@ -1079,7 +1079,7 @@ export const tspPrefsAdapter: DialogAdapter = {
     const { owner, props } = found;
     const currentPage = typeof props.page === "string" ? props.page : "";
     const query = typeof props.query === "string" ? props.query : "";
-    const items: (DialogItem & { values?: string[]; hasSubmenu?: boolean })[] = [];
+    const items: (DialogItem & { values?: string[]; hasSubmenu?: boolean; shortcut?: boolean })[] = [];
     // The current page's label is the subtitle; its lead text is the notice, which a search replaces.
     const allPages = Array.isArray(props.pages) ? (props.pages as readonly PrefsPageLike[]) : [];
     const currentLabel = tspText(allPages.find((page) => isObject(page) && page.id === currentPage)?.label).trim();
@@ -1091,7 +1091,7 @@ export const tspPrefsAdapter: DialogAdapter = {
     for (const page of pages) {
       if (!isObject(page) || typeof page.id !== "string" || page.disabled) continue;
       if (page.id === currentPage) continue;
-      items.push({ key: `page:${page.id}`, label: `📄 ${tspText(page.label)}`, hasSubmenu: true });
+      items.push({ key: `page:${page.id}`, label: `📄 ${tspText(page.label)}`, hasSubmenu: true, shortcut: true });
     }
     for (const { row, group } of prefsGroupedRows(props)) {
       if (row.disabled) continue;

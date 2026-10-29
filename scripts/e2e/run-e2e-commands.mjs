@@ -1473,9 +1473,10 @@ async function runHost(host, label, phase = "main") {
     await settle();
 
     // ── Taps (issue #23, diagnostic): what each /settings button does when tapped ──
-    // The root lists only pages. One page is entered, up to 6 of its rows are tapped, then
-    // Back returns to the root. Each tap records toast, label after the tap and whether the
-    // pane changed. Nothing is fixed here, and this step never fails the suite.
+    // The root lists the current page's rows (page 1) with the other pages as a compact block.
+    // Up to 6 rows are tapped from page 1, then one page switch, then Cancel closes the dialog.
+    // Each tap records toast, label after the tap and whether the pane changed. Nothing is
+    // fixed here, and this step never fails the suite.
     const taps = [];
     let tapError = "";
     const plain = (text) => String(text ?? "").replace(/^[\s▸○◉●✓☐☑]+/u, "").trim();
@@ -1537,7 +1538,14 @@ async function runHost(host, label, phase = "main") {
         .catch(() => undefined);
       await sleep(1000);
       const paneAfter = String(tmux("capture-pane", "-p", "-t", session).stdout ?? "");
-      const afterLocated = await locateTap(messageId, target.text);
+      // A page switch removes its own button (the page is now the current one), so it is
+      // looked for on the screen it was tapped on, not paged through: paging would move the
+      // Telegram page away from page 1, where the new page's rows must show.
+      const afterState = kind === "page" ? await latestState(messageId) : undefined;
+      const afterTarget = afterState ? findTap(afterState, target.text) : undefined;
+      const afterLocated = kind === "page"
+        ? (afterState && afterTarget ? { current: afterState, target: afterTarget } : undefined)
+        : await locateTap(messageId, target.text);
       const current = afterLocated?.current ?? await latestState(messageId);
       const toast = String(answer?.body?.text ?? "");
       const after = afterLocated ? String(afterLocated.target.text ?? "") : "(gone)";
@@ -1552,25 +1560,30 @@ async function runHost(host, label, phase = "main") {
       const tapAck = await dispatch("/settings", { timeoutMs: 30_000 });
       const tapMessageId = tapAck.message_id;
       await awaitMessage("settings taps dialog", tapMessageId, hasDialog, 20_000);
+      // The root lists the current page's rows on Telegram page 1; the other pages are a
+      // compact block of 📄 buttons below the list (issue #23).
       const root = await latestState(tapMessageId);
       const pageButton = buttonsOf(root).find((b) => /📄/.test(String(b.text ?? "")) && /Interaction/.test(String(b.text ?? "")))
         ?? buttonsOf(root).find((b) => classifyTap(b) === "page");
       if (!pageButton) throw new Error(`no page button: ${buttonsOf(root).map((b) => b.text).join(" / ").slice(0, 120)}`);
+      // Rows on page 1 first, each tapped from the first screen.
+      for (const { b, kind } of pickRows(root)) await tapRow(kind, b.text, tapMessageId);
+      // Then one page switch from the compact block: the new page's rows must show on page 1.
       await tapRow("page", pageButton.text, tapMessageId);
-      // The page lists its sub-pages first (📄, 10 per screen); the rows to tap come on later screens.
-      for (let screen = 0; screen < 8; screen += 1) {
-        const current = await latestState(tapMessageId);
-        const picks = pickRows(current);
-        if (picks.length > 0) {
-          for (const { b, kind } of picks) await tapRow(kind, b.text, tapMessageId);
-          break;
-        }
-        const next = buttonsOf(current).find((b) => /Next ▶/.test(String(b.text ?? "")));
-        if (!next) break;
-        await click(next, tapMessageId, { timeoutMs: 10_000 }).catch(() => undefined);
-      }
-      const back = buttonsOf(await latestState(tapMessageId)).find((b) => /Back$/.test(plain(b.text)) && !isNav(b));
-      if (back) await click(back, tapMessageId, { timeoutMs: 10_000 }).catch(() => undefined);
+      const switched = await latestState(tapMessageId);
+      const switchedRow = buttonsOf(switched).find((b) => classifyTap(b) !== "skip" && classifyTap(b) !== "page");
+      taps.push({
+        kind: "page-rows",
+        label: switchedRow ? plain(switchedRow.text) : "(no row on page 1)",
+        toast: "",
+        after: String(switched?.body?.text ?? "").match(/Page \d+\/\d+ · \d+ items/)?.[0] ?? "",
+        paneChanged: false,
+        message: String(switched?.body?.text ?? "").replace(/\s+/g, " ").slice(0, 80),
+      });
+      console.log(`    page-rows | first row after switch: ${switchedRow ? plain(switchedRow.text) : "(none)"}`);
+      // Close the page with Cancel (present on every page).
+      const cancel = buttonsOf(await latestState(tapMessageId)).find((b) => isCancel(b));
+      if (cancel) await click(cancel, tapMessageId, { timeoutMs: 10_000 }).catch(() => undefined);
     } catch (error) {
       tapError = String(error.message).slice(0, 200);
     }

@@ -62,7 +62,7 @@ export type DialogModel =
   | {
       kind: "settings";
       title: string;
-      items: (DialogItem & { values?: string[]; hasSubmenu?: boolean })[];
+      items: (DialogItem & { values?: string[]; hasSubmenu?: boolean; /** A page switch drawn in the compact block under the list, not as a list row. */ shortcut?: boolean })[];
       search?: SearchModel;
       /** Host subtitle under the title: the current settings page's label. */
       subtitle?: string;
