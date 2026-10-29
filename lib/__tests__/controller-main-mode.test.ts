@@ -208,6 +208,50 @@ describe("Telegram message sent during a Telegram-started turn", () => {
   }
 });
 
+describe("prompt rejection keeps message order", () => {
+  it("a rejected first prompt keeps the next message behind its retry", async () => {
+    const streamingRef = { value: false };
+    const idleRef = { value: true };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const session = createSession(streamingRef, idleRef, prompts);
+    let calls = 0;
+    let endTurnFn: () => void = () => undefined;
+    session.prompt = vi.fn((text: string, promptOpts?: Record<string, unknown>) => {
+      prompts.push({ text, opts: promptOpts });
+      calls += 1;
+      if (calls === 1) return Promise.reject(new Error("Agent is already processing"));
+      if (calls === 2) {
+        // The retry starts the turn; it ends only when the test says so.
+        streamingRef.value = true;
+        idleRef.value = false;
+        return new Promise<void>((resolve) => {
+          endTurnFn = () => {
+            streamingRef.value = false;
+            idleRef.value = true;
+            resolve();
+          };
+        });
+      }
+      return Promise.resolve();
+    });
+    const controller = createController(session, sent, { messageMode: "steer" });
+
+    try {
+      await sendMessage(controller, "first", 1);
+      await waitFor(() => prompts.length === 1);
+      // Send the second message before the first retry (about 120 ms later).
+      await sendMessage(controller, "second", 2);
+      await waitFor(() => prompts.length === 3, 3000);
+    } finally {
+      endTurnFn();
+    }
+
+    expect(prompts.map((item) => item.text)).toEqual(["first", "first", "second"]);
+    expect(prompts[2].opts?.streamingBehavior).toBe("steer");
+  });
+});
+
 describe("TUI-parity message delivery", () => {
   it("steers into the main turn while the main loop is busy (like typing in the TUI)", async () => {
     const streamingRef = { value: true };

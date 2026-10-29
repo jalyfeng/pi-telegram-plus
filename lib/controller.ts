@@ -921,19 +921,30 @@ export function createTelegramController(deps: {
   // Resolves once the host has taken the message: the prompt settled, or the
   // session is streaming (checked right away, then every 25 ms). Needed because
   // session.prompt() resolves only when the whole turn ends on both hosts.
+  // A rejected prompt was not taken: it only stops polling and never resolves,
+  // so a retry in deliverToMainThread keeps the next message behind it.
   type TakenSignal = (taken: Promise<void>) => void;
   const whenTaken = (session: { readonly isStreaming: boolean }, promptPromise: Promise<unknown>): Promise<void> =>
     new Promise<void>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const done = () => {
+      let finished = false;
+      const stop = () => {
+        finished = true;
         if (timer !== undefined) clearTimeout(timer);
-        resolve();
       };
       const poll = () => {
-        if (session.isStreaming) return done();
+        if (finished) return;
+        if (session.isStreaming) {
+          stop();
+          resolve();
+          return;
+        }
         timer = setTimeout(poll, 25);
       };
-      promptPromise.then(done, done);
+      promptPromise.then(() => {
+        stop();
+        resolve();
+      }, stop);
       poll();
     });
   // Calls session.prompt and reports to onTaken while still returning the prompt
