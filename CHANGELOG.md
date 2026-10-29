@@ -55,6 +55,13 @@ reimplementation and several settings, so read **Breaking changes** before upgra
   reports such as `/mcp`) and pi's chat-area output (`/session`, `/hotkeys`, `/changelog`, `/debug`) reach
   the chat as text with the panel's own buttons, read from the host's structured data, never from the
   rendered screen.
+- **OMP dialogs carry the text the terminal shows** (#18): list subtitles, per-item details and badges
+  (for example a provider's "Not configured", an agent's description, a model's `[free]`), empty-list
+  notices and search hints; `/settings` section names, section descriptions and row hints; the `/mcp add`
+  wizard's step bar and step title.
+- **Row actions in OMP pickers pick their row first** (#18): `/resume` → Delete (also Rename, Pin, Unpin)
+  asks which session it applies to, then shows the host's own confirmation (`Delete` / `Cancel`) on the same
+  message, exactly like moving the highlight and pressing the key in the terminal.
 - **`!` / `!!` results show the exit status** (`exit N`) or `cancelled` when the command did not succeed.
 - **Message mode is back in `/tg` → Config** (📨 Message mode). `steer` (default) injects your message into the
   running main turn; `queue` sends it as a follow-up after the turn ends. The choice applies to the next
