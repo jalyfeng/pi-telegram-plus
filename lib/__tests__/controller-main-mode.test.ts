@@ -159,6 +159,55 @@ describe("messageMode while the main loop is busy", () => {
   });
 });
 
+// A session whose first prompt starts a turn that only ends when the test calls
+// endTurn(), like both hosts: prompt() resolves when the whole turn ends.
+function createTurnSession(streamingRef: { value: boolean }, idleRef: { value: boolean }, prompts: Array<{ text: string; opts?: Record<string, unknown> }>) {
+  const session = createSession(streamingRef, idleRef, prompts);
+  let endTurnFn: () => void = () => undefined;
+  let started = false;
+  session.prompt = vi.fn((text: string, promptOpts?: Record<string, unknown>) => {
+    prompts.push({ text, opts: promptOpts });
+    if (started) return Promise.resolve();
+    started = true;
+    streamingRef.value = true;
+    idleRef.value = false;
+    return new Promise<void>((resolve) => {
+      endTurnFn = () => {
+        streamingRef.value = false;
+        idleRef.value = true;
+        resolve();
+      };
+    });
+  });
+  return { session, endTurn: () => endTurnFn() };
+}
+
+describe("Telegram message sent during a Telegram-started turn", () => {
+  for (const [messageMode, expected] of [["steer", "steer"], ["queue", "followUp"]] as const) {
+    it.fails(`a second Telegram message steers into the turn the first one started (${messageMode})`, async () => {
+      const streamingRef = { value: false };
+      const idleRef = { value: true };
+      const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+      const sent: Array<{ text: string }> = [];
+      const { session, endTurn } = createTurnSession(streamingRef, idleRef, prompts);
+      const controller = createController(session, sent, { messageMode });
+
+      try {
+        await sendMessage(controller, "first starts turn", 1);
+        await waitFor(() => prompts.length === 1);
+        await sendMessage(controller, "second during turn", 2);
+        // Must reach the host while the first turn is still running (Esc not pressed).
+        await waitFor(() => prompts.length === 2, 1000);
+      } finally {
+        endTurn();
+      }
+
+      expect(prompts[1].opts?.streamingBehavior).toBe(expected);
+      expect(prompts[1].text).toBe("second during turn");
+    });
+  }
+});
+
 describe("TUI-parity message delivery", () => {
   it("steers into the main turn while the main loop is busy (like typing in the TUI)", async () => {
     const streamingRef = { value: true };
