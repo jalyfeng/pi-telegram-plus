@@ -99,6 +99,23 @@ Background: #19 (after a long session `/tg` and `ask` overflow the stack, #16 re
 | T-1 | Unit tests do not write to the user's real log directory |
 | E2E | At the end of the stage the controller runs once each on pi and OMP + a long-running layer-stacking retest (W-1 instrumentation, confirming the install count does not grow over time) |
 
+**Status (2026-10-29): all tasks above are done, plus the acceptance fixes below.** Final acceptance on branch `plan-v8`: commands suite (main/quit/exit/disconnect) all green on both hosts, dialogs pi 14/14 and OMP 18/18 (5 consecutive clean runs), tui-bridge 2/2, OMP suite 14/14, base suite and state suite green, long-run suite (`scripts/e2e/run-e2e-longrun.mjs`: OMP 12 min with 16 `ask` answers and 7 `/model`; pi 15× `/new` + 5× `/reload` + 19 dialogs) — no wrapper created after start-up except for new host objects, wrapper depth 1 throughout, `/tg` opens in the terminal.
+
+**Implementation decisions made during acceptance (binding for later work)**
+
+| ID | Decision |
+|---|---|
+| A-1 | One command, one message: the gateway ack message is the command's message; a dialog opened by the command is drawn on it, output and the dialog summary end on it, long output pages inside it; `✓ Done` only when nothing else is shown. |
+| X-2 | A dialog is attributed to a command by call chain: the FocusTracker captures `currentCommandScope()` in the host's `setFocus` hook, so a dialog that opens after the scope idle-ended still lands on the command's message. Broker edits are queued per message. |
+| X-4 / X-9 | The broker validates the live focus before and after acting on a Telegram tap, and a command scope reads the live focus before it idle-ends (hosts can focus a dialog without a focus event the plugin sees). |
+| X-5 | pi's `mode.ui` is a forwarding Proxy (`createInteractiveTuiReference`); UI hooks are installed on the prototype that owns the method (`methodOwner`). |
+| X-6 | OMP text panels (focused `SessionInfoOverlay`, `ReportPanel`, inline reports in `reportContainer`) are read from `describe()`; command notices (`notify`/`showWarning` inside the command chain) join the command message; extension commands get the same ack. |
+| X-7 | `hooks.ts` keeps each slot's original host function and guards re-entry: when a third-party wrapper captured ours and is called through it, stages run once and the original host function is called. The developer probe (`PITG_PROBE`) installs through `hooks.ts` too. |
+| X-1 | `!` results carry the exit status from the host bash component's `setComplete(exitCode, cancelled)` arguments. |
+| F-1 | A deterministic Telegram 400 is not retried; a parse rejection falls back to plain text once. The mock Bot API contract allows `<pre><code>`. |
+
+**Known limitation:** OMP can focus some dialogs (e.g. the `/login` provider picker, whose focused object is an inner child) without the plugin's `setFocus` hook recognising the dialog; the live-focus check covers the case where focus is already on the dialog when the command scope would idle-end (≈1.5 s). A dialog that a host opens later than that, silently, would be treated as local.
+
 
 ---
 
