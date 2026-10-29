@@ -29,6 +29,14 @@ type Slot = {
   /** The host function the stages end in. Never a plugin wrapper. */
   base: (...args: unknown[]) => unknown;
   stages: Map<string, StageEntry>;
+  /**
+   * Calls through this wrapper that are still on the stack. A call that comes
+   * back into the wrapper while one is running (a third-party wrapper captured
+   * this one and was then installed as `base`) goes straight to `original`.
+   */
+  active: number;
+  /** The host function this slot was created around; the fallback for re-entry. */
+  original: (...args: unknown[]) => unknown;
 };
 
 type Registry = {
@@ -105,8 +113,18 @@ function createSlot(base: (...args: unknown[]) => unknown): Slot {
   const slot: Slot = {
     base,
     stages: new Map<string, StageEntry>(),
+    active: 0,
+    original: base,
     wrapper: function ptpHook(this: unknown, ...args: unknown[]): unknown {
-      return runPipeline(slot, this, args);
+      // Re-entry (see `Slot.active`): the stages already ran for this call, so
+      // only the original host function runs. Stages run once per outer call.
+      if (slot.active > 0) return slot.original.apply(this, args);
+      slot.active += 1;
+      try {
+        return runPipeline(slot, this, args);
+      } finally {
+        slot.active -= 1;
+      }
     },
   };
   return slot;

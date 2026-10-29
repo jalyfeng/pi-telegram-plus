@@ -250,3 +250,41 @@ describe("installHook keeps one wrapper per object and method", () => {
     expect(calls()).toBe(2);
   });
 });
+
+describe("re-entry through a third-party wrapper", () => {
+  it("runs each stage and the host method once when a wrapper captured ours and was reinstalled", () => {
+    const host = hostMethod();
+    const target: Record<string, Fn> = { m: host.fn };
+    const first = countingStage();
+    expect(installHook(target, "m", "k1", first.stage)).toBe(true);
+    // A third party captures the plugin wrapper and wraps it, as a probe does.
+    const captured = target.m;
+    target.m = function patched(this: unknown, ...args: unknown[]): unknown {
+      return captured.apply(this, args);
+    };
+    // Reinstalling the stage sees a replaced method; it must not loop back into itself.
+    const second = countingStage();
+    expect(installHook(target, "m", "k1", second.stage)).toBe(true);
+
+    expect(target.m(5)).toBe(500);
+    expect(host.calls()).toBe(1);
+    expect(second.calls()).toBe(1);
+    expect(first.calls()).toBe(0);
+  });
+
+  it("keeps the pipeline working for later calls after a re-entrant call", () => {
+    const host = hostMethod();
+    const target: Record<string, Fn> = { m: host.fn };
+    const stage = countingStage();
+    installHook(target, "m", "k1", stage.stage);
+    const captured = target.m;
+    target.m = function patched(this: unknown, ...args: unknown[]): unknown {
+      return captured.apply(this, args);
+    };
+    installHook(target, "m", "k2", countingStage().stage);
+    target.m(1);
+    target.m(2);
+    expect(host.calls()).toBe(2);
+    expect(stage.calls()).toBe(2);
+  });
+});
