@@ -62,7 +62,7 @@ function setup(turns: TelegramTurn[] = []) {
     settleScope: (scope) => { settled.push(scope); },
   });
   broker.start();
-  return { sent, ui, editor, origin, broker, settled };
+  return { sent, ui, editor, origin, broker, settled, focus };
 }
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 5));
@@ -86,6 +86,25 @@ describe("a dialog opened inside an ended command's call chain", () => {
     await flush();
     expect(scope.dialogSummaries).toEqual(["Answered in the terminal"]);
     expect(settled).toEqual([scope]);
+  });
+});
+
+describe("a dialog the host focuses without a focus event during an idle command", () => {
+  it("is read live before the idle end can close the command scope under it", async () => {
+    const { ui, origin, broker, focus } = setup();
+    const scope = origin.begin({ chatId: 42 }, "login", "/login", "");
+    scope.telegramMessageId = 500;
+
+    // The host moves focus to the selector without calling setFocus; the tracker's own
+    // verify tick would take up to two seconds to notice, longer than the idle window.
+    const selector = new ExtensionSelectorComponent(() => undefined);
+    runInCommand(scope, () => { ui.focusedComponent = selector; });
+
+    expect(focus.isEditor()).toBe(false);
+    await flush();
+    expect(scope.ended).toBe(false);
+    expect(scope.dialogOpen).toBe(true);
+    expect(broker.current()?.telegram?.messageId).toBe(500);
   });
 });
 

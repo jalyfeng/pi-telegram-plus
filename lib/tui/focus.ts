@@ -150,7 +150,14 @@ export class FocusTracker {
     this.update(read, "getter");
   }
 
+  /**
+   * Whether the editor has the keys. Asked by the command scope's idle end, which runs on a
+   * 250 ms tick, while a dialog the host opens without a `setFocus` event is only learned by
+   * the two-sample verify (up to about 2 s). The live focus is read first, so an idle end
+   * never closes a scope under a dialog the host already focused.
+   */
   isEditor(): boolean {
+    this.validate();
     return this.info.kind === "editor" || this.info.kind === "unknown";
   }
 
