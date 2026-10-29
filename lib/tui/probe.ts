@@ -12,6 +12,7 @@
  */
 import { renameSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { installHook } from "./hooks.ts";
 
 type AnyRecord = Record<string, unknown>;
 type ProbeEvent = { at: number; seq: number; kind: string; data: UnknownRecord };
@@ -418,25 +419,28 @@ function argSnapshot(args: unknown[], depth = 2): Snap[] {
   return args.slice(0, 4).map((arg) => snapshot(arg, depth));
 }
 
+/**
+ * The probe's observers are stages on the shared hook wrappers (`tui/hooks.ts`),
+ * never a wrapper of their own, so a probed method keeps one plugin layer.
+ * The stage is outermost (highest priority) so it sees every call the host
+ * receives, as the old plain wrapper did, even when an inner stage such as the
+ * race answers without reaching the host method.
+ */
+const PROBE_OWNER = {};
+const PROBE_PRIORITY = Number.MAX_SAFE_INTEGER;
+
 function installMethod(target: unknown, name: string, onCall: (args: unknown[], receiver: unknown) => void): boolean {
   if (!isRecord(target)) return false;
   const current = safeGet(target, name);
   if (typeof current !== "function") return false;
-  if ("__ptpProbe" in current && current.__ptpProbe) return false;
-  const wrapped = function patched(this: unknown, ...args: unknown[]): unknown {
+  return installHook(target, name, `probe:${name}`, (next, args, self) => {
     try {
-      onCall(args, this);
+      onCall(args, self);
     } catch (error) {
       warn(`${name} observer failed: ${String(error)}`);
     }
-    return current.apply(this, args);
-  };
-  Object.defineProperty(wrapped, "__ptpProbe", { value: true });
-  try {
-    return Reflect.set(target, name, wrapped);
-  } catch {
-    return false;
-  }
+    return next(args);
+  }, { priority: PROBE_PRIORITY, owner: PROBE_OWNER });
 }
 
 function installAsyncResult(value: unknown, name: string, args: unknown[]): void {
@@ -698,9 +702,8 @@ function installResultMethod(target: unknown, name: string): boolean {
   if (!isRecord(target)) return false;
   const current = safeGet(target, name);
   if (typeof current !== "function") return false;
-  if ("__ptpProbeResult" in current && current.__ptpProbeResult) return false;
-  const wrapped = function patched(this: unknown, ...args: unknown[]): unknown {
-    const result = current.apply(this, args);
+  return installHook(target, name, `probe:result:${name}`, (next, args) => {
+    const result = next(args);
     try {
       push(document().promptCalls, "export-result", {
         method: name,
@@ -725,13 +728,7 @@ function installResultMethod(target: unknown, name: string): boolean {
       warn(`${name} result observer failed: ${String(error)}`);
     }
     return result;
-  };
-  Object.defineProperty(wrapped, "__ptpProbeResult", { value: true });
-  try {
-    return Reflect.set(target, name, wrapped);
-  } catch {
-    return false;
-  }
+  }, { priority: PROBE_PRIORITY, owner: PROBE_OWNER });
 }
 
 function installSession(session: AnyRecord): void {
