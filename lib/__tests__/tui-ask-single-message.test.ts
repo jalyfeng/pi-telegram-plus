@@ -134,7 +134,7 @@ function setup(options: { draftBeneath?: boolean } = {}) {
 const flush = async (ticks = 3) => {
   for (let i = 0; i < ticks; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
 };
-/** OMP passes `dialogOptions` with an abort signal; the race wrapper only exists for that shape. */
+/** OMP's ask tool passes dialogOptions with its own abort signal; the race wrapper adds one either way. */
 const askOptions = () => ({ signal: new AbortController().signal });
 const sendsOf = (sent: Sent[]) => sent.filter((entry) => entry.kind === "send");
 
