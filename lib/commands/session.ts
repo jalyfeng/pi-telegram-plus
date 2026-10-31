@@ -6,6 +6,7 @@ import type { SessionDeps, CommandRegistry } from "./register.ts";
 import { escapeHtml } from "../html.ts";
 import { log } from "../logger.ts";
 import { checkpointCurrentUpdateCursor } from "../polling.ts";
+import { isOmpHost } from "../session-capture.ts";
 
 const sessionLog = log.child("session");
 
@@ -96,44 +97,60 @@ export function registerSessionCommands(
   });
 
   // ── /cd ───────────────────────────────────────────────────────────────
-  registry.registerCommand("cd", {
-    description: "Switch pi working directory",
-    handler: async (args, ctx) => {
-      const ui = ctx.ui;
-      const rawPath = args.trim() || await ui.input("Working directory", ctx.cwd);
-      if (!rawPath) return;
+  // OMP's `SessionManager.create` takes a SessionStorage where pi takes
+  // NewSessionOptions, so the switch below can only fail there with
+  // `t.ensureDirSync is not a function`; OMP switches directories with its own
+  // /move, which keeps the session and its history. Keep /cd reachable from
+  // Telegram to point at /move — registered without a description so it never
+  // becomes a TUI slash command.
+  if ((deps.isOmpHost ?? isOmpHost)()) {
+    registry.registerCommand("cd", {
+      handler: async (args, ctx) => {
+        const target = args.trim();
+        const command = target ? `/move ${escapeHtml(target)}` : "/move <path>";
+        ctx.ui.notify(`This host switches directories with ${command}.`, "info");
+      },
+    });
+  } else {
+    registry.registerCommand("cd", {
+      description: "Switch pi working directory",
+      handler: async (args, ctx) => {
+        const ui = ctx.ui;
+        const rawPath = args.trim() || await ui.input("Working directory", ctx.cwd);
+        if (!rawPath) return;
 
-      const targetCwd = resolveTargetCwd(rawPath, ctx.cwd);
-      const info = await stat(targetCwd).catch(sessionLog.swallow("debug", "stat target cwd failed (treated as not-a-directory)", { targetCwd }));
-      if (!info?.isDirectory()) {
-        ui.notify(`Not a directory: ${escapeHtml(targetCwd)}`, "error");
-        return;
-      }
+        const targetCwd = resolveTargetCwd(rawPath, ctx.cwd);
+        const info = await stat(targetCwd).catch(sessionLog.swallow("debug", "stat target cwd failed (treated as not-a-directory)", { targetCwd }));
+        if (!info?.isDirectory()) {
+          ui.notify(`Not a directory: ${escapeHtml(targetCwd)}`, "error");
+          return;
+        }
 
-      const currentSessionFile = ctx.sessionManager.getSessionFile();
-      const SessionManagerClass = SESSION_MANAGER;
-      if (!SessionManagerClass) {
-        ui.notify("Session management is unavailable in this pi build.", "error");
-        return;
-      }
-      const sessionManager = SessionManagerClass.create(targetCwd, undefined, {
-        ...(currentSessionFile ? { parentSession: currentSessionFile } : {}),
-      });
-      // Ensure the header-only session file exists before switchSession opens it.
-      (sessionManager as unknown as { _rewriteFile?: () => void })._rewriteFile?.();
-      const sessionPath = sessionManager.getSessionFile();
-      if (!sessionPath) {
-        ui.notify("Cannot switch cwd from an ephemeral session.", "error");
-        return;
-      }
+        const currentSessionFile = ctx.sessionManager.getSessionFile();
+        const SessionManagerClass = SESSION_MANAGER;
+        if (!SessionManagerClass) {
+          ui.notify("Session management is unavailable in this pi build.", "error");
+          return;
+        }
+        const sessionManager = SessionManagerClass.create(targetCwd, undefined, {
+          ...(currentSessionFile ? { parentSession: currentSessionFile } : {}),
+        });
+        // Ensure the header-only session file exists before switchSession opens it.
+        (sessionManager as unknown as { _rewriteFile?: () => void })._rewriteFile?.();
+        const sessionPath = sessionManager.getSessionFile();
+        if (!sessionPath) {
+          ui.notify("Cannot switch cwd from an ephemeral session.", "error");
+          return;
+        }
 
-      const result = await ctx.switchSession(sessionPath, {
-        withSession: async (nextCtx: { ui: import("@earendil-works/pi-coding-agent").ExtensionUIContext }) => {
-          nextCtx.ui.notify(`✅ Switched cwd:\n${escapeHtml(targetCwd)}`, "info");
-        },
-      });
-      if (result.cancelled) ui.notify("Cwd switch cancelled.", "info");
-    },
-  });
+        const result = await ctx.switchSession(sessionPath, {
+          withSession: async (nextCtx: { ui: import("@earendil-works/pi-coding-agent").ExtensionUIContext }) => {
+            nextCtx.ui.notify(`✅ Switched cwd:\n${escapeHtml(targetCwd)}`, "info");
+          },
+        });
+        if (result.cancelled) ui.notify("Cwd switch cancelled.", "info");
+      },
+    });
+  }
 
 }

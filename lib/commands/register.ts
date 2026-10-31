@@ -10,6 +10,8 @@ export type CommandRegistry = {
 /** Minimal base deps — most commands only need session access. */
 export type SessionDeps = {
   getSession: () => CapturedAgentSession | undefined;
+  /** Overrides host detection for commands whose context API differs per host. */
+  isOmpHost?: () => boolean;
 };
 
 /** Deps for the /tg Config submenu flows. */
