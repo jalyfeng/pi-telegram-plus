@@ -11,7 +11,10 @@
  *   POST /_control/inject   { "updates": [ ... ] }  queue updates for getUpdates
  *   GET  /_control/log                              read the JSONL call log
  *   GET  /_control/state                            read counters + queued updates
- *   POST /_control/reset                            clear log + queue
+ *   POST /_control/delay   { "method", "ms", "withReplyMarkup"? }
+ *                                                   hold matching calls for ms before replying;
+ *                                                   { "ms": 0 } clears the rule (slow-network probe)
+ *   POST /_control/reset                            clear log + queue + delay rule
  *
  * Usage: node mock-telegram.mjs [--port 9900] [--log /tmp/x/telegram.jsonl]
  */
@@ -44,6 +47,11 @@ const calls = [];
  * driver prove the polling loop engaged before any message was injected.
  */
 let getUpdatesPolls = 0;
+/**
+ * Slow-network rule: calls matching `method` (and, when `withReplyMarkup`, carrying a
+ * reply_markup) are recorded on arrival and then held for `ms` before the reply is sent.
+ */
+let delayRule = null;
 
 function record(entry) {
   calls.push(entry);
@@ -125,10 +133,24 @@ const server = createServer(async (req, res) => {
         methods: calls.filter((c) => c.direction === "out").map((c) => c.method),
       });
     }
+    if (path === "/_control/delay") {
+      let parsed = {};
+      try {
+        parsed = JSON.parse(raw.toString("utf8") || "{}");
+      } catch {
+        return json(res, 400, { ok: false, error: "invalid JSON" });
+      }
+      const ms = Number(parsed.ms ?? 0);
+      delayRule = ms > 0 && typeof parsed.method === "string"
+        ? { method: parsed.method, ms, withReplyMarkup: parsed.withReplyMarkup === true }
+        : null;
+      return ok(res, { delay: delayRule });
+    }
     if (path === "/_control/reset") {
       pendingUpdates = [];
       calls.length = 0;
       getUpdatesPolls = 0;
+      delayRule = null;
       writeFileSync(LOG_PATH, "");
       return ok(res, { reset: true });
     }
@@ -211,6 +233,11 @@ const server = createServer(async (req, res) => {
     body,
     ...(resultMessageId === undefined ? {} : { message_id: resultMessageId }),
   });
+
+  if (delayRule && delayRule.method === method
+    && (!delayRule.withReplyMarkup || body?.reply_markup !== undefined)) {
+    await sleep(delayRule.ms);
+  }
 
   switch (method) {
     case "getMe":

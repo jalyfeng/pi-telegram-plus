@@ -81,6 +81,20 @@ async function waitFor(label, predicate, timeoutMs = STEP_TIMEOUT_MS) {
   throw new Error(`timed out: ${label} (last: ${JSON.stringify(last).slice(0, 600)})`);
 }
 
+/** Requests the mock provider has received so far, one JSONL entry each. */
+function providerRequests() {
+  const file = join(ROOT, "provider.jsonl");
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").split("\n").filter(Boolean)
+    .map((line) => { try { return JSON.parse(line); } catch { return {}; } })
+    .filter((entry) => entry.direction === "in");
+}
+
+/** User-side text of a provider request: the joined user messages plus the last message. */
+function requestUserText(entry) {
+  return `${entry.userText ?? ""}\n${entry.lastText ?? ""}`.replace(/\\n/g, "\n");
+}
+
 function killSession(session) {
   tmux("pipe-pane", "-t", session);
   for (let attempt = 0; attempt < 3; attempt += 1) tmux("kill-session", "-t", session);
@@ -197,7 +211,7 @@ async function runHost(host, label, phase = "main") {
 
   let updateId = 5000;
   let messageId = 9000;
-  const injectMessage = async (text) => {
+  const injectMessage = async (text, extra = {}) => {
     const id = messageId++;
     await controlPost("/_control/inject", {
       updates: [{
@@ -205,7 +219,7 @@ async function runHost(host, label, phase = "main") {
         message: {
           message_id: id, date: Math.floor(Date.now() / 1000),
           chat: { id: 42, type: "private" }, from: { id: 42, is_bot: false, first_name: "E2E" },
-          text,
+          text, ...extra,
         },
       }],
     });
@@ -603,11 +617,57 @@ async function runHost(host, label, phase = "main") {
     await settle();
   }
 
+  // ── Scenario R1: a reply to a rich message quotes its body (#25) ──────
+  // Telegram keeps a rich message's body in rich_message.blocks and leaves text empty;
+  // the quoted block given to the model must still carry the table as plain text.
+  try {
+    const richSince = await cursor();
+    await injectMessage("what does this table say? RICH_REPLY_PROBE", {
+      reply_to_message: {
+        message_id: 8001, date: Math.floor(Date.now() / 1000),
+        chat: { id: 42, type: "private" },
+        from: { id: 424242, is_bot: true, first_name: "pi-tg E2E", username: "pi_tg_e2e_bot" },
+        rich_message: {
+          blocks: [
+            { type: "paragraph", text: "Rich reply fixture" },
+            { type: "table", cells: [
+              [
+                { text: "name", is_header: true, align: "left", valign: "top" },
+                { text: "value", is_header: true, align: "left", valign: "top" },
+              ],
+              [
+                { text: "alpha", align: "left", valign: "top" },
+                { text: "42", align: "left", valign: "top" },
+              ],
+            ] },
+          ],
+        },
+      },
+    });
+    const request = await waitFor("rich reply reaches the model", () => providerRequests().find((entry) =>
+      requestUserText(entry).includes("RICH_REPLY_PROBE")), 30_000);
+    const text = requestUserText(request);
+    const quotedAt = text.indexOf("[telegram quoted message]");
+    const detail = quotedAt < 0
+      ? "no [telegram quoted message] block in the user message"
+      : text.slice(quotedAt, quotedAt + 160).replace(/\n/g, " / ");
+    record("reply to a rich message carries its text",
+      text.includes("Rich reply fixture") && text.includes("alpha | 42"), detail);
+    await waitFor("rich reply turn finishes", (state) => state.calls.slice(richSince).some((c) =>
+      (c.method === "sendMessage" || c.method === "editMessageText") && /MOCK_OK/.test(String(c.body?.text ?? ""))),
+      40_000).catch(() => undefined);
+    await settle();
+  } catch (error) {
+    record("reply to a rich message carries its text", false, String(error.message).slice(0, 220));
+  }
+
   // ── Scripted `ask` tool round trip ─────────────────────────────────────
   // The mock provider answers the marker message with a real tool_call for the
   // host's `ask` tool, so the model→tool→UI→answer→model loop is exercised.
   try {
     const since = await cursor();
+    // Slow network: every sendMessage with buttons takes 2.5 s, longer than one poll (#22).
+    await controlPost("/_control/delay", { method: "sendMessage", ms: 2500, withReplyMarkup: true });
     await injectMessage("please run the ask probe ASK_TOOL_PROBE");
     const mirror = await waitFor("ask prompt mirrored", (state) =>
       state.calls.slice(since).findLast((entry) =>
@@ -625,6 +685,12 @@ async function runHost(host, label, phase = "main") {
       const labels = buttonsOf(mirror).map((b) => String(b.text ?? ""));
       record("ask tool prompt reaches Telegram", /red|green|blue/.test(labels.join(" ")),
         String(mirror.body?.text ?? "").replace(/<[^>]+>/g, "") + " · " + labels.slice(0, 4).join(" / "));
+      // Several 1 s polls pass while the first sendButtons is still in flight.
+      await sleep(4000);
+      const askMessages = (await controlGet()).calls.slice(since).filter((c) =>
+        c.method === "sendMessage" && !wasRejected(c) && buttonsOf(c).some((b) => /red|green|blue/i.test(String(b.text ?? "")))).length;
+      record("ask sends one message on a slow network", askMessages === 1, `ask messages: ${askMessages}`);
+      await controlPost("/_control/delay", { ms: 0 });
       const green = buttonsOf(mirror).find((b) => /green/.test(String(b.text ?? ""))) ?? buttonsOf(mirror)[0];
       const mirrorId = mirror.body?.message_id ?? mirror.message_id;
       if (green) {
@@ -640,6 +706,8 @@ async function runHost(host, label, phase = "main") {
     await settle();
   } catch (error) {
     record("ask tool round trip", false, String(error.message).slice(0, 220));
+  } finally {
+    await controlPost("/_control/delay", { ms: 0 }).catch(() => undefined);
   }
 
   // ── Stage 1: output-only commands must return real body text ──────────
