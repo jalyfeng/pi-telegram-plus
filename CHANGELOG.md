@@ -91,6 +91,10 @@ reimplementation and several settings, so read **Breaking changes** before upgra
 
 ### Fixed
 
+- **`/cd` on OMP points at the host's `/move`.** OMP's `SessionManager.create` takes a storage object
+  where pi takes session options, so the switch could never work there and failed with
+  `t.ensureDirSync is not a function`. A `/cd <path>` sent from Telegram now answers with the
+  equivalent `/move <path>`, and the command is no longer registered in the TUI.
 - **Secrets are masked everywhere the plugin sends text**: dialog text and buttons, command output,
   assistant replies (including code blocks sent as files and Rich Messages), tool hints and plugin
   notices. Masking runs before HTML conversion, so keys containing `&`, `<` or `>` are caught. Secrets
