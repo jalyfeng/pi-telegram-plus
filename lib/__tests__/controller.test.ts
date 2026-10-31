@@ -260,6 +260,142 @@ describe("createTelegramController media message behavior", () => {
     expect(prompts[0]).toContain("[telegram message]\nWhat do you think?");
   });
 
+  it("includes the Rich Message body of a replied-to bot message", async () => {
+    const prompts: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async () => [{ message_id: 1 }],
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 2,
+      chat: { id: 999 },
+      from: { id: 100, username: "alice" },
+      text: "What do you think?",
+      reply_to_message: {
+        message_id: 1,
+        from: { id: 200, is_bot: true, username: "jaly_claw_bot" },
+        rich_message: {
+          blocks: [
+            { type: "paragraph", text: "Here is the table:" },
+            {
+              type: "table",
+              cells: [
+                [{ text: "Name", is_header: true }, { text: "Score", is_header: true }],
+                [{ text: "alice" }, { text: "9" }],
+              ],
+            },
+          ],
+        },
+      },
+    } as any);
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain("from: @jaly_claw_bot id:200");
+    expect(prompts[0]).toContain("text:\nHere is the table:\nName | Score\nalice | 9");
+    expect(prompts[0]).not.toContain("content: unavailable from Telegram update");
+    expect(prompts[0]).toContain("[telegram message]\nWhat do you think?");
+  });
+
+  it("reports unavailable content when a replied-to message has no readable body", async () => {
+    const prompts: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async () => [{ message_id: 1 }],
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 2,
+      chat: { id: 999 },
+      from: { id: 100, username: "alice" },
+      text: "What do you think?",
+      reply_to_message: {
+        message_id: 1,
+        from: { id: 200, username: "bob" },
+      },
+    } as any);
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain("from: @bob id:200");
+    expect(prompts[0]).toContain("content: unavailable from Telegram update");
+  });
+
   it("includes Telegram selected quote text even without reply_to_message", async () => {
     const prompts: string[] = [];
     const session = {

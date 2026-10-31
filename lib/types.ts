@@ -126,6 +126,12 @@ export type TelegramExternalReply = {
   quote?: TelegramTextQuote;
 };
 
+/** Loose shape of a Telegram Rich Message block; only the fields the plain-text view reads are typed. */
+export type TelegramRichBlock = { type?: string; [key: string]: unknown };
+
+/** Telegram Rich Message body (Bot API `RichMessage`), returned when a bot-sent rich message is replied to. */
+export type TelegramRichMessage = { blocks?: TelegramRichBlock[]; is_rtl?: boolean };
+
 export type TelegramMessage = {
   message_id: number;
   /** Forum topic/thread id for supergroup topics. */
@@ -149,6 +155,8 @@ export type TelegramMessage = {
   text_quote?: TelegramTextQuote;
   /** External replied-to message metadata, when the original message is not directly accessible. */
   external_reply?: TelegramExternalReply;
+  /** Rich Message body; Telegram keeps the text here instead of `text`/`caption` for `sendRichMessage` output. */
+  rich_message?: TelegramRichMessage;
 };
 
 export type TelegramCallbackQuery = {

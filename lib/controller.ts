@@ -17,6 +17,7 @@ import type { TelegramUiRuntime } from "./telegram-ui.ts";
 import type { TuiBridgeAdapter } from "./tui-bridge.ts";
 import { tuiBridge as defaultTuiBridge, hostOwnsPrompts } from "./tui-bridge.ts";
 import { escapeHtml } from "./html.ts";
+import { richMessageToPlainText } from "./rich-text-plain.ts";
 import { recordCommandUsage } from "./command-usage.ts";
 import { getTelegramMenuOverflow } from "./menu-commands.ts";
 import { log } from "./logger.ts";
@@ -141,13 +142,15 @@ function buildTelegramQuotedMessageBlock(message: TelegramMessage | undefined): 
   const sender = formatTelegramSender(message.from);
   if (sender) lines.push(`from: ${sender}`);
   const text = message.text ?? message.caption;
-  if (text?.trim()) {
-    lines.push(message.caption !== undefined ? "caption:" : "text:");
-    lines.push(truncateQuotedText(text.trim()));
+  const hasPlainText = !!text?.trim();
+  const body = hasPlainText ? text!.trim() : richMessageToPlainText(message.rich_message);
+  if (body) {
+    lines.push(hasPlainText && message.caption !== undefined ? "caption:" : "text:");
+    lines.push(truncateQuotedText(body));
   }
   const media = buildTelegramIncomingMediaSummary(message, "[telegram quoted attachment]");
   if (media) lines.push(media);
-  if (lines.length === 2) lines.push("content: unavailable from Telegram update");
+  if (!body && !media) lines.push("content: unavailable from Telegram update");
   return lines.join("\n");
 }
 
