@@ -992,12 +992,17 @@ export class DialogBroker {
         .sendButtons(chatId, rendered.text, rendered.rows, telegram.messageThreadId, session.owner?.sourceMessageId)
         .then((sent) => {
           session.sending = false;
-          // The message may have been retired while the send was in flight.
-          if (this.session !== session) return;
+          // Keep the id even when the session was replaced or closed meanwhile: the sent message still needs closing.
           session.telegram = { ...telegram, messageId: sent.message_id };
+          if (session.state === "closed") {
+            const summary = session.pendingSummary;
+            session.pendingSummary = undefined;
+            if (summary !== undefined) this.publish(session, summary);
+            return;
+          }
           // Content may have changed while the send was pending. `published` still holds what was
           // sent, so show() edits only when the live content differs from it.
-          if (session.state !== "closed") this.show(session);
+          if (this.session === session) this.show(session);
         })
         .catch((err) => {
           session.sending = false;
@@ -1021,7 +1026,12 @@ export class DialogBroker {
   /** The one-line replacement for a finished dialog (rules 4.2/4.3). */
   private publish(session: DialogSession, summary: string): void {
     const telegram = session.telegram;
-    if (!telegram || telegram.messageId <= 0) return;
+    if (!telegram) return;
+    if (telegram.messageId <= 0) {
+      // The first send is still in flight: keep the summary until its message id arrives.
+      if (session.sending) session.pendingSummary = summary;
+      return;
+    }
     session.published = `${summary}|closed`;
     const scope = this.scopes.get(session);
     if (scope) {

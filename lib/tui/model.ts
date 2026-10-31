@@ -234,6 +234,8 @@ export type DialogSession = {
    * meanwhile, so this stops it from sending the dialog again.
    */
   sending?: boolean;
+  /** Summary of a close that happened while the first send was in flight; published once the message id is known. */
+  pendingSummary?: string;
   state: "open" | "resolving" | "closed";
   closedBy?: "telegram" | "terminal" | "replaced";
   lastAction?: string;

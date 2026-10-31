@@ -83,7 +83,9 @@ function setup(options: { draftBeneath?: boolean; holdSend?: boolean } = {}) {
       sent.push({ chatId, messageId: nextId, kind: "text" });
       return [{ message_id: nextId }];
     },
-    removeInlineKeyboard: async () => undefined,
+    removeInlineKeyboard: async (chatId: number, messageId: number) => {
+      sent.push({ chatId, messageId, kind: "removeKeyboard" });
+    },
     deleteMessage: async () => undefined,
   };
   const editor = { focused: false, render: () => "", handleInput: () => undefined, getText: () => "", setText: () => undefined };
@@ -133,7 +135,7 @@ function setup(options: { draftBeneath?: boolean; holdSend?: boolean } = {}) {
   });
   broker.start();
   const releaseSend = () => { for (const release of held.splice(0)) release(); };
-  return { sent, ui, focusCalls, toolUi, state, broker, focus, releaseSend };
+  return { sent, ui, editor, focusCalls, toolUi, state, broker, focus, releaseSend };
 }
 
 const flush = async (ticks = 3) => {
@@ -207,6 +209,24 @@ describe("#22 one ask call sends one Telegram message", () => {
     expect(sendsOf(sent)).toHaveLength(1);
     const sendId = sendsOf(sent)[0].messageId;
     expect(sent.filter((entry) => entry.kind === "edit" && entry.messageId !== sendId)).toEqual([]);
+  });
+
+  it("S7 closed while the first send is in flight: the summary and keyboard strip land on the sent message", async () => {
+    const { sent, ui, editor, toolUi, releaseSend } = setup({ holdSend: true });
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    // Focus goes back to the editor while the first send is still pending: the ask is closed in the terminal.
+    ui.setFocus(editor);
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+    releaseSend();
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+    const sendId = sendsOf(sent)[0].messageId;
+    const summaries = sent.filter((entry) => entry.kind === "edit" && entry.messageId === sendId && entry.text === "Answered in the terminal");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].rows).toEqual([]);
+    expect(sent.filter((entry) => entry.kind === "removeKeyboard" && entry.messageId === sendId)).toHaveLength(1);
   });
 
   it("S6 content changed while the first send is in flight: the message is edited to the latest content", async () => {
