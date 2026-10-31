@@ -617,6 +617,67 @@ async function runHost(host, label, phase = "main") {
     await settle();
   }
 
+  // ── Scripted `ask` tool round trip ─────────────────────────────────────
+  // The mock provider answers the marker message with a real tool_call for the
+  // host's `ask` tool, so the model→tool→UI→answer→model loop is exercised.
+  try {
+    const since = await cursor();
+    // The previous command's scope (OriginTracker) only ends after IDLE_MS (1.5 s) of quiet;
+    // before that the ask would be drawn on that command's message, not take the first-send path.
+    await sleep(2500);
+    // Slow network: every sendMessage with buttons takes 2.5 s, longer than one poll (#22).
+    await controlPost("/_control/delay", { method: "sendMessage", ms: 2500, withReplyMarkup: true });
+    await injectMessage("please run the ask probe ASK_TOOL_PROBE");
+    const mirror = await waitFor("ask prompt mirrored", (state) =>
+      state.calls.slice(since).findLast((entry) =>
+        !wasRejected(entry) && Array.isArray(rowsOf(entry)) && (isControllable(entry) || hasUi(entry))), 25_000)
+      .catch(() => undefined);
+    if (!mirror) {
+      const providerLog = join(ROOT, "provider.jsonl");
+      const askedTool = existsSync(providerLog)
+        && readFileSync(providerLog, "utf8").split("\n").filter(Boolean)
+          .map((line) => { try { return JSON.parse(line); } catch { return {}; } })
+          .some((entry) => (entry.tools ?? []).includes("ask"));
+      record("ask tool prompt reaches Telegram", !askedTool,
+        askedTool ? "tool offered but nothing reached the chat" : "skipped: host offers no ask tool");
+    } else {
+      const labels = buttonsOf(mirror).map((b) => String(b.text ?? ""));
+      record("ask tool prompt reaches Telegram", /red|green|blue/.test(labels.join(" ")),
+        String(mirror.body?.text ?? "").replace(/<[^>]+>/g, "") + " · " + labels.slice(0, 4).join(" / "));
+      // Several 1 s polls pass while the first sendButtons is still in flight.
+      await sleep(4000);
+      const askCalls = (await controlGet()).calls.slice(since).filter((c) =>
+        !wasRejected(c) && buttonsOf(c).some((b) => /red|green|blue/i.test(String(b.text ?? ""))));
+      const sendIds = new Set(askCalls.filter((c) => c.method === "sendMessage").map((c) => c.message_id));
+      const editIds = [...new Set(askCalls.filter((c) => c.method === "editMessageText").map((c) => c.body?.message_id))];
+      const distinct = new Set([...sendIds, ...editIds]);
+      record("ask sends one message on a slow network", distinct.size === 1,
+        `ask messages: ${distinct.size} (sends: ${sendIds.size}, edits on: [${editIds.join(", ")}])`);
+      record("ask slow-network path used a fresh send", sendIds.size === 1,
+        `fresh sends: ${sendIds.size}`);
+      await controlPost("/_control/delay", { ms: 0 });
+      const green = buttonsOf(mirror).find((b) => /green/.test(String(b.text ?? ""))) ?? buttonsOf(mirror)[0];
+      const mirrorId = mirror.body?.message_id ?? mirror.message_id;
+      if (green) {
+        const pickSince = await cursor();
+        await click(green, mirrorId);
+        const reply = await waitFor("ask answer reaches the model", (state) =>
+          state.calls.slice(pickSince).findLast((c) => c.method === "sendMessage" && /MOCK_OK/i.test(String(c.body?.text ?? ""))) ?? false,
+          30_000).catch(() => undefined);
+        record("ask answered from Telegram", Boolean(reply),
+          `${hasDialog(mirror) ? "broker" : "native"} · ${reply ? "turn completed" : "no follow-up reply"}`);
+      }
+    }
+    await settle();
+  } catch (error) {
+    record("ask tool round trip", false, String(error.message).slice(0, 220));
+  } finally {
+    await controlPost("/_control/delay", { ms: 0 }).catch(() => undefined);
+  }
+
+  // Scenario R1 runs after the ask round trip: the first user message of the session
+  // names it in /resume, and a long quoted-block name truncates the delete confirmation.
+  await sleep(2500);
   // ── Scenario R1: a reply to a rich message quotes its body (#25) ──────
   // Telegram keeps a rich message's body in rich_message.blocks and leaves text empty;
   // the quoted block given to the model must still carry the table as plain text.
@@ -659,55 +720,6 @@ async function runHost(host, label, phase = "main") {
     await settle();
   } catch (error) {
     record("reply to a rich message carries its text", false, String(error.message).slice(0, 220));
-  }
-
-  // ── Scripted `ask` tool round trip ─────────────────────────────────────
-  // The mock provider answers the marker message with a real tool_call for the
-  // host's `ask` tool, so the model→tool→UI→answer→model loop is exercised.
-  try {
-    const since = await cursor();
-    // Slow network: every sendMessage with buttons takes 2.5 s, longer than one poll (#22).
-    await controlPost("/_control/delay", { method: "sendMessage", ms: 2500, withReplyMarkup: true });
-    await injectMessage("please run the ask probe ASK_TOOL_PROBE");
-    const mirror = await waitFor("ask prompt mirrored", (state) =>
-      state.calls.slice(since).findLast((entry) =>
-        !wasRejected(entry) && Array.isArray(rowsOf(entry)) && (isControllable(entry) || hasUi(entry))), 25_000)
-      .catch(() => undefined);
-    if (!mirror) {
-      const providerLog = join(ROOT, "provider.jsonl");
-      const askedTool = existsSync(providerLog)
-        && readFileSync(providerLog, "utf8").split("\n").filter(Boolean)
-          .map((line) => { try { return JSON.parse(line); } catch { return {}; } })
-          .some((entry) => (entry.tools ?? []).includes("ask"));
-      record("ask tool prompt reaches Telegram", !askedTool,
-        askedTool ? "tool offered but nothing reached the chat" : "skipped: host offers no ask tool");
-    } else {
-      const labels = buttonsOf(mirror).map((b) => String(b.text ?? ""));
-      record("ask tool prompt reaches Telegram", /red|green|blue/.test(labels.join(" ")),
-        String(mirror.body?.text ?? "").replace(/<[^>]+>/g, "") + " · " + labels.slice(0, 4).join(" / "));
-      // Several 1 s polls pass while the first sendButtons is still in flight.
-      await sleep(4000);
-      const askMessages = (await controlGet()).calls.slice(since).filter((c) =>
-        c.method === "sendMessage" && !wasRejected(c) && buttonsOf(c).some((b) => /red|green|blue/i.test(String(b.text ?? "")))).length;
-      record("ask sends one message on a slow network", askMessages === 1, `ask messages: ${askMessages}`);
-      await controlPost("/_control/delay", { ms: 0 });
-      const green = buttonsOf(mirror).find((b) => /green/.test(String(b.text ?? ""))) ?? buttonsOf(mirror)[0];
-      const mirrorId = mirror.body?.message_id ?? mirror.message_id;
-      if (green) {
-        const pickSince = await cursor();
-        await click(green, mirrorId);
-        const reply = await waitFor("ask answer reaches the model", (state) =>
-          state.calls.slice(pickSince).findLast((c) => c.method === "sendMessage" && /MOCK_OK/i.test(String(c.body?.text ?? ""))) ?? false,
-          30_000).catch(() => undefined);
-        record("ask answered from Telegram", Boolean(reply),
-          `${hasDialog(mirror) ? "broker" : "native"} · ${reply ? "turn completed" : "no follow-up reply"}`);
-      }
-    }
-    await settle();
-  } catch (error) {
-    record("ask tool round trip", false, String(error.message).slice(0, 220));
-  } finally {
-    await controlPost("/_control/delay", { ms: 0 }).catch(() => undefined);
   }
 
   // ── Stage 1: output-only commands must return real body text ──────────
