@@ -84,19 +84,19 @@ describe("installTuiBridge version gate", () => {
   });
 
   it("patches the OMP entry points on a supported OMP version", async () => {
-    mockHosts({ piVersion: "1.4.0", ompVersion: "18.12.5" });
+    mockHosts({ piVersion: "1.4.0", ompVersion: "18.14.1" });
     const mod = await installFresh();
     expect(mod.tuiBridge.getUnsupportedReason()).toBeUndefined();
     expect(patched(holders.omp, "render")).toBe(true);
     expect(patched(holders.omp, "initHooksAndCustomTools")).toBe(true);
   });
 
-  it("refuses an OMP version outside the supported range", async () => {
-    mockHosts({ piVersion: "1.4.0", ompVersion: "18.13.0" });
+  it.each(["18.12.5", "18.15.0"])("refuses OMP %s, which is outside the supported range", async (ompVersion) => {
+    mockHosts({ piVersion: "1.4.0", ompVersion });
     const mod = await installFresh();
     const reason = mod.tuiBridge.getUnsupportedReason();
-    expect(reason).toContain("18.12.x");
-    expect(reason).toContain("18.13.0");
+    expect(reason).toContain("18.14.x");
+    expect(reason).toContain(ompVersion);
     expect(patched(holders.omp, "render")).toBe(false);
     expect(patched(holders.pi, "init")).toBe(false);
   });

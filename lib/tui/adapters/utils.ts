@@ -10,7 +10,10 @@
  */
 
 /** OMP versions the plugin supports: startup refuses anything else (§0.1). Single copy - tui-bridge gates on it too. */
-export const SUPPORTED_OMP_VERSIONS = /^18\.12\./;
+export const SUPPORTED_OMP_VERSIONS = /^18\.14\./;
+
+/** Human-readable form of SUPPORTED_OMP_VERSIONS, used in refusal messages. Keep both in sync. */
+export const SUPPORTED_OMP_RANGE = "18.14.x";
 
 /** CSI sequences, OSC strings and stray control bytes that colour the render. */
 const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|[\x07\x08]/g;

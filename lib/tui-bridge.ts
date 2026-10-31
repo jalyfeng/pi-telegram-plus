@@ -1,6 +1,6 @@
 import { log } from "./logger.ts";
 import { probeCapture } from "./tui/probe.ts";
-import { SUPPORTED_OMP_VERSIONS } from "./tui/adapters/utils.ts";
+import { SUPPORTED_OMP_RANGE, SUPPORTED_OMP_VERSIONS } from "./tui/adapters/utils.ts";
 
 const bridgeLog = log.child("tui-bridge");
 
@@ -144,7 +144,7 @@ function unsupportedVersionReason(ompVersion: string | undefined, piVersion: str
   if (ompVersion !== undefined) {
     return SUPPORTED_OMP_VERSIONS.test(ompVersion)
       ? undefined
-      : `Unsupported OMP version ${ompVersion}; requires 18.12.x`;
+      : `Unsupported OMP version ${ompVersion}; requires ${SUPPORTED_OMP_RANGE}`;
   }
   return piVersion === SUPPORTED_PI_VERSION
     ? undefined
