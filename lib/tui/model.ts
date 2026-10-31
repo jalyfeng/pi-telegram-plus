@@ -229,6 +229,11 @@ export type DialogSession = {
   page: number;
   /** The exact text+keyboard last put on the message; equal means no edit. */
   published?: string;
+  /**
+   * The first send is in flight and `telegram.messageId` is still 0. Polling keeps calling show()
+   * meanwhile, so this stops it from sending the dialog again.
+   */
+  sending?: boolean;
   state: "open" | "resolving" | "closed";
   closedBy?: "telegram" | "terminal" | "replaced";
   lastAction?: string;

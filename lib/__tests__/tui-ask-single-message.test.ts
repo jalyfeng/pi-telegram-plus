@@ -57,19 +57,23 @@ const QUESTION: AskQuestion = {
   recommended: 1,
 };
 
-type Sent = { chatId: number; messageId: number; kind: string; text?: string };
+type Sent = { chatId: number; messageId: number; kind: string; text?: string; rows?: unknown };
 
-function setup(options: { draftBeneath?: boolean } = {}) {
+function setup(options: { draftBeneath?: boolean; holdSend?: boolean } = {}) {
   const sent: Sent[] = [];
   let nextId = 100;
+  // With `holdSend`, sendButtons stays pending until the test calls `releaseSend()`.
+  const held: Array<() => void> = [];
   const transport = {
-    sendButtons: async (chatId: number) => {
+    sendButtons: (chatId: number) => {
       nextId += 1;
-      sent.push({ chatId, messageId: nextId, kind: "send" });
-      return { message_id: nextId };
+      const messageId = nextId;
+      sent.push({ chatId, messageId, kind: "send" });
+      if (options.holdSend) return new Promise<{ message_id: number }>((resolve) => held.push(() => resolve({ message_id: messageId })));
+      return Promise.resolve({ message_id: messageId });
     },
-    editButtons: async (chatId: number, messageId: number, text: string) => {
-      sent.push({ chatId, messageId, kind: "edit", text });
+    editButtons: async (chatId: number, messageId: number, text: string, rows: unknown) => {
+      sent.push({ chatId, messageId, kind: "edit", text, rows });
     },
     editText: async (chatId: number, messageId: number, text: string) => {
       sent.push({ chatId, messageId, kind: "editText", text });
@@ -128,7 +132,8 @@ function setup(options: { draftBeneath?: boolean } = {}) {
     enabled: () => true,
   });
   broker.start();
-  return { sent, ui, focusCalls, toolUi, state, broker, focus };
+  const releaseSend = () => { for (const release of held.splice(0)) release(); };
+  return { sent, ui, focusCalls, toolUi, state, broker, focus, releaseSend };
 }
 
 const flush = async (ticks = 3) => {
@@ -181,5 +186,48 @@ describe("#22 one ask call sends one Telegram message", () => {
     await flush();
     // The guard does not apply once the race is settled: the ask session retires and the prompt opens a message.
     expect(sendsOf(sent)).toHaveLength(2);
+  });
+
+  it("S5 pending first send: refreshes while the send is in flight do not send again", async () => {
+    const { sent, toolUi, broker, releaseSend } = setup({ holdSend: true });
+    const refresh = () => (broker as unknown as { refresh(): void }).refresh();
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    for (let i = 0; i < 3; i += 1) {
+      refresh();
+      await flush(1);
+    }
+    expect(sendsOf(sent)).toHaveLength(1);
+    releaseSend();
+    await flush();
+    for (let i = 0; i < 3; i += 1) {
+      refresh();
+      await flush(1);
+    }
+    expect(sendsOf(sent)).toHaveLength(1);
+    const sendId = sendsOf(sent)[0].messageId;
+    expect(sent.filter((entry) => entry.kind === "edit" && entry.messageId !== sendId)).toEqual([]);
+  });
+
+  it("S6 content changed while the first send is in flight: the message is edited to the latest content", async () => {
+    const { sent, toolUi, state, broker, focus, releaseSend } = setup({ holdSend: true });
+    const refresh = () => (broker as unknown as { refresh(): void }).refresh();
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    // The adapter reads the questions from the focus entry, so the change goes there.
+    const entry = focus.entryFor(state.ask as unknown as Record<string, unknown>) as unknown as { questions: AskQuestion[] };
+    entry.questions = [{ ...QUESTION, options: [{ label: "blue" }, { label: "green" }] }];
+    refresh();
+    await flush(1);
+    releaseSend();
+    await flush();
+    refresh();
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+    const sendId = sendsOf(sent)[0].messageId;
+    const edits = sent.filter((entry) => entry.kind === "edit");
+    expect(edits.length).toBeGreaterThan(0);
+    expect(edits.every((entry) => entry.messageId === sendId)).toBe(true);
+    expect(JSON.stringify(edits[edits.length - 1].rows)).toContain("blue");
   });
 });

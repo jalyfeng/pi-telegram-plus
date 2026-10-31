@@ -979,18 +979,30 @@ export class DialogBroker {
     this.rememberKeys(session, rendered.keyMap);
     const signature = `${session.page}|${rendered.text}|${JSON.stringify(rendered.rows)}`;
     const fresh = telegram.messageId <= 0;
+    // While the first send is pending the message id is still 0; the send's own completion
+    // redraws the live model, so nothing else is needed here.
+    if (fresh && session.sending) return;
     if (!fresh && session.published === signature) return;
     session.published = signature;
 
     if (fresh) {
       const chatId = telegram.chatId;
+      session.sending = true;
       void this.deps.transport
         .sendButtons(chatId, rendered.text, rendered.rows, telegram.messageThreadId, session.owner?.sourceMessageId)
         .then((sent) => {
+          session.sending = false;
           // The message may have been retired while the send was in flight.
-          if (this.session === session) session.telegram = { ...telegram, messageId: sent.message_id };
+          if (this.session !== session) return;
+          session.telegram = { ...telegram, messageId: sent.message_id };
+          // Content may have changed while the send was pending. `published` still holds what was
+          // sent, so show() edits only when the live content differs from it.
+          if (session.state !== "closed") this.show(session);
         })
-        .catch((err) => brokerLog.debug("sendButtons failed", { err, chatId }));
+        .catch((err) => {
+          session.sending = false;
+          brokerLog.debug("sendButtons failed", { err, chatId });
+        });
       return;
     }
     this.rate(telegram, () => {
