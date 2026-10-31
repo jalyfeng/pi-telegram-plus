@@ -20,6 +20,7 @@ vi.mock("../pairing.ts", async (importOriginal) => {
 });
 
 import { buildConfigMenuOptions, registerTgMenuCommand, type SwitchInstanceDeps } from "../commands/tg-menu.ts";
+import { configModeFlow } from "../commands/tg-config.ts";
 import type { TelegramCommandDeps, TelegramConnectionState } from "../commands/telegram-commands.ts";
 import type { TgConfigDeps } from "../commands/register.ts";
 import { readBotRegistry, readProjectBinding, addBot, writeProjectBinding, clearDefaultBot } from "../config.ts";
@@ -501,6 +502,16 @@ describe("/tg multi-level menu", () => {
     expect(notifyCalls.some((c) => c.message.includes("Removed Telegram project binding"))).toBe(true);
   });
 
+  it("Config → Message mode → switches to queue", async () => {
+    const { ui, notifyCalls } = makeScriptedUi({
+      select: ["⚙️ Config", "📨 Message mode: steer", "  queue", "⬅️ Back", "❌ Close"],
+    });
+    await commands.get("tg")!("", makeCtx(ui));
+
+    expect(config.messageMode).toBe("queue");
+    expect(notifyCalls.some((c) => c.message === "📨 Message mode set to queue")).toBe(true);
+  });
+
   it("Config → Tool → sets tool level", async () => {
     // Config menu → select "🔧 Tool: brief" → pickRenderLevel shows ["  hidden", "● brief", "  full"]
     // We pick "  full" (non-current = two-space prefix)
@@ -679,6 +690,35 @@ describe("/tg multi-level menu", () => {
   });
 });
 
+describe("configModeFlow", () => {
+  function makeDeps(initial: TelegramConfig) {
+    let current = initial;
+    const setConfig = vi.fn((c: TelegramConfig) => { current = c; });
+    const persistConfig = vi.fn(async (c: TelegramConfig) => { current = c; });
+    const deps = { getConfig: () => current, setConfig, persistConfig } as unknown as TgConfigDeps;
+    return { deps, setConfig, persistConfig, get current() { return current; } };
+  }
+
+  it("persists the selected mode and reports it", async () => {
+    const d = makeDeps({});
+    const ui = { notify: vi.fn(), select: vi.fn(async () => "  queue"), input: vi.fn(), confirm: vi.fn() };
+    await configModeFlow(ui, d.deps);
+    expect(d.setConfig).toHaveBeenCalledWith(expect.objectContaining({ messageMode: "queue" }));
+    expect(d.persistConfig).toHaveBeenCalledWith(expect.objectContaining({ messageMode: "queue" }));
+    expect(ui.notify).toHaveBeenCalledWith("📨 Message mode set to queue", "info");
+  });
+
+  it("accepts a direct value and rejects an invalid one", async () => {
+    const d = makeDeps({});
+    const ui = { notify: vi.fn(), select: vi.fn(), input: vi.fn(), confirm: vi.fn() };
+    await configModeFlow(ui, d.deps, "main");
+    expect(d.persistConfig).not.toHaveBeenCalled();
+    expect(ui.notify).toHaveBeenCalledWith("Invalid. Use: steer or queue", "error");
+    await configModeFlow(ui, d.deps, "steer");
+    expect(d.persistConfig).toHaveBeenCalledWith(expect.objectContaining({ messageMode: "steer" }));
+  });
+});
+
 describe("buildConfigMenuOptions", () => {
   const thinkingSession = {
     getAvailableThinkingLevels: () => ["off", "low", "high"],
@@ -691,6 +731,14 @@ describe("buildConfigMenuOptions", () => {
     // The rest of the Config menu is unchanged on pi.
     expect(options).toContain("💭 Thinking: brief");
     expect(options.at(-1)).toBe("⬅️ Back");
+  });
+
+  it("shows the message mode (default steer) before shell confirm", () => {
+    const options = buildConfigMenuOptions({}, undefined, "omp");
+    const modeIndex = options.indexOf("📨 Message mode: steer");
+    expect(modeIndex).toBeGreaterThanOrEqual(0);
+    expect(modeIndex).toBeLessThan(options.indexOf("🐚 Shell confirm: dangerous"));
+    expect(buildConfigMenuOptions({ messageMode: "queue" }, undefined, "omp")).toContain("📨 Message mode: queue");
   });
 
   it("keeps the 🧠 thinking-level entry on omp", () => {

@@ -122,6 +122,26 @@ describe("selector over a plain options list", () => {
     expect(bytes()).toEqual(["\u001b"]);
     expect(cancelled).toEqual(["cancelled"]);
   });
+
+  it("reports a choice as refused when the host's own handler throws on Enter", () => {
+    // The login auth selector's API-key row: the arrow key lands, the Enter that would
+    // select it throws inside the host. The adapter must not claim the choice landed.
+    const component = new host.ExtensionSelectorComponent(
+      "Select authentication method:",
+      ["Sign in with an account", "Sign in with an API key", "Sign in with Radius"],
+      () => {
+        throw new Error("host select failed");
+      },
+      () => {},
+    );
+    const { ctx, bytes } = harness(component);
+    const adapter = pickAdapter(component, ctx)!;
+
+    expect(adapter.act(component, { type: "choose", key: "1:Sign in with an API key" }, ctx)).toBe(false);
+    expect(bytes()).toEqual(["\u001b[B", "\r"]);
+    // The component's own cursor moved, so the next read shows what the terminal shows.
+    expect(expectSelect(adapter.read(component, ctx)).items.map((item) => item.focused)).toEqual([false, true, false]);
+  });
 });
 
 describe("selector that delegates keys to the list it wraps", () => {

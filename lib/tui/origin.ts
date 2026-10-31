@@ -42,7 +42,12 @@ export type CommandScope = {
   submitDone: boolean;
   lastOutputAt: number;
   startedAt: number;
+  /** The command's own Telegram message (its `▶️ /cmd` ack). Set by the gateway; a dialog the scope opens is drawn here. */
   telegramMessageId?: number;
+  /** True while a dialog owns the command message; OutputCapture leaves that message alone. */
+  dialogOpen?: boolean;
+  /** One line per dialog that closed on the command message; written with the output when the scope ends. */
+  dialogSummaries: string[];
   ended: boolean;
   endReason?: ScopeEndReason;
 };
@@ -97,6 +102,7 @@ export class OriginTracker {
       submitDone: false,
       lastOutputAt: now,
       startedAt: now,
+      dialogSummaries: [],
       ended: false,
     };
     this.activeScope = scope;

@@ -17,12 +17,13 @@ export function registerLifecycleCommands(registry: CommandRegistry): void {
     description: "Reload extensions, skills, prompts, and themes",
     handler: async (_args, ctx) => {
       const ui = ctx.ui;
-      ui.notify("Reloading…", "info");
       // ctx.reload() re-activates the plugin in-process, so this runtime is no
       // longer the active one by the time the reload lands: its transport drops
       // anything queued after the lease changes. Queue the completion notice for
       // the replacement runtime instead. Only Telegram-originated reloads have a
-      // turn scope; a terminal /reload has nothing to notify.
+      // turn scope; a terminal /reload has no chat to answer and only prints its line.
+      // A Telegram-started reload answers with one chat message, its result: the
+      // "Reloading…" line is only for the terminal, which is where a local reload is.
       const turn = getCurrentTelegramTurn();
       if (turn) {
         queuePendingNotice({
@@ -32,6 +33,8 @@ export function registerLifecycleCommands(registry: CommandRegistry): void {
           html: "✅ Reloaded.",
           createdAt: Date.now(),
         });
+      } else {
+        ui.notify("Reloading…", "info");
       }
       // /reload re-activates the plugin in-process; commit this update first so
       // the replacement runtime does not re-fetch and re-run the unconfirmed

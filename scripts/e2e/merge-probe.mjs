@@ -14,7 +14,7 @@
  *     --goal-confirm /tmp/probe-goal-confirm.json \
  *     --goal-question /tmp/probe-goal-question.json \
  *     --goal-questionnaire /tmp/probe-goal-questionnaire2.json \
- *     --out docs/host-probe/pi-0.81.1.json
+ *     --out docs/host-probe/pi-1.4.0.json
  *   node scripts/e2e/merge-probe.mjs --host omp \
  *     --main /tmp/probe-omp-final.json --approval /tmp/probe-omp-approval2.json \
  *     --out docs/host-probe/omp-18.12.5.json
@@ -54,7 +54,6 @@ function compactFocus(doc) {
     if (!(key in types)) types[key] = snapshot;
     return { typeRef: key };
   };
-  const frames = [];
   for (const event of doc.focusEvents ?? []) {
     const data = event.data ?? {};
     data.focusRef = ref(data.focus);
@@ -66,18 +65,8 @@ function compactFocus(doc) {
     delete data.hookSelector;
     delete data.hookInput;
     delete data.hookEditor;
-    // A drawn frame is the only label source for hosts that keep dialog rows in
-    // private fields, so keep every distinct frame once: the same shape draws a
-    // different dialog each time (a select and a confirm share one class).
-    if (data.rendered) {
-      if (!frames.some((frame) => frame.rendered === data.rendered)) {
-        frames.push({ ctor: data.constructor, keys: data.ownKeys, rendered: data.rendered });
-      }
-      delete data.rendered;
-    }
   }
   doc.focusTypes = types;
-  doc.frameSamples = frames;
   doc.chatChildren = (doc.chatChildren ?? []).map((event) => ({
     at: event.at,
     kind: event.kind,
@@ -93,8 +82,7 @@ function compactFocus(doc) {
 
 function piGoalShape(doc, label) {
   const candidates = (doc.customComponents ?? [])
-    .filter((event) => event.data?.source === "showExtensionCustom")
-    .filter((event) => !String(event.data?.render ?? "").includes("PROBE CUSTOM DIALOG"));
+    .filter((event) => event.data?.source === "showExtensionCustom");
   const component = candidates[candidates.length - 1];
   if (!component) return { label, found: false };
   return {
@@ -104,7 +92,6 @@ function piGoalShape(doc, label) {
     fieldKeys: component.data.fields?.keys ?? [],
     fields: component.data.fields?.fields ?? {},
     shapes: component.data.shapes,
-    render: component.data.render,
     entryArgs: (doc.entryCalls ?? [])
       .filter((event) => event.data?.name === "showExtensionCustom")
       .slice(-1)[0]?.data?.args,
@@ -152,31 +139,6 @@ const sessionAccessors = (main.prototype?.session ?? [])
 
 compactFocus(main);
 
-// Framed dialogs on some hosts keep their rows in private fields: the frame is
-// the label source T3.0's adapters parse, so record every frame a focus saw.
-const ROW_MARKER = /^\s*(?:│\s*)?[→❯▸>]\s+\S/;
-// A key-hint line lists at least two bindings ("↑/↓ navigate  ⏎ select  ⎋ cancel");
-// one hit is usually a title or a tab label.
-const KEY_HINTS = /navigate|submit|cancel|escape|ctrl\+c|enter|⎋|⏎|↑|↓|tab/i;
-const keyHints = (line) => (line.match(new RegExp(KEY_HINTS, "gi")) ?? []).length;
-const isKeyLine = (line) => keyHints(line) >= 2;
-const isRule = (line) => line.trim() !== "" && /^[\s─━│|╭╮╰╯┌┐└┘]+$/.test(line);
-const dialogFrames = (main.frameSamples ?? [])
-  .map((sample) => {
-    const lines = String(sample.rendered ?? "").split("\n");
-    const boxed = lines[0]?.match(/^[╭┌][─\s]*(.*?)[─\s]*[╮┐]$/);
-    const plainTitle = lines.find(
-      (line) => line.trim() !== "" && !isRule(line) && !ROW_MARKER.test(line) && !isKeyLine(line),
-    );
-    return {
-      ctor: sample.ctor,
-      keys: sample.keys,
-      title: (boxed?.[1] ?? plainTitle ?? "").replace(/[─\s]+$/, "").trim() || undefined,
-      rows: lines.filter((line) => ROW_MARKER.test(line)).slice(0, 8),
-      footer: lines.find(isKeyLine)?.trim(),
-    };
-  });
-
 main.conclusions = {
   host: HOST,
   hostVersion: main.hostVersion,
@@ -198,7 +160,6 @@ main.conclusions = {
       ? "OMP's setFocus receives the component directly; no {component, overlayFocusRestore} wrapper was observed."
       : "the overlay's setFocusInternal receives a {component, overlayFocusRestore} wrapper; take .component before classifying.",
   },
-  dialogFrames,
   mainLoop: HOST === "omp"
     ? {
         pendingUserInputs: modeKeys.includes("pendingUserInputs"),
@@ -212,7 +173,7 @@ main.conclusions = {
         pendingUserInputs: modeKeys.includes("pendingUserInputs"),
         onInputCallback: modeKeys.includes("onInputCallback"),
         sessionKeys,
-        note: "pi 0.81.1 has all three quietSince fields.",
+        note: "pi has all three quietSince fields.",
       },
   entryMethods: entryNames,
   toolUiMethods: uiMethods,

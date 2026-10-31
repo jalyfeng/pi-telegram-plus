@@ -40,7 +40,7 @@ const MAX_COMPONENT_DEPTH = 4;
 type HostRecord = Record<string, unknown>;
 
 /** A described node, matched by shape only (the host may load its own copy). */
-type NativeNodeLike = HostRecord & { k?: unknown; p?: unknown; c?: unknown; key?: unknown };
+export type NativeNodeLike = HostRecord & { k?: unknown; p?: unknown; c?: unknown; key?: unknown };
 
 /** The picker props this adapter reads (`TspPickerProps` in pi-wire). */
 type PickerProps = {
@@ -66,12 +66,31 @@ type PickerProps = {
   actions?: readonly PickerEntryLike[];
   /** Search box contents; null/absent means the picker has no search box. */
   query?: unknown;
+  /** The search box's hint while it is empty (`TspPickerProps.placeholder`). */
+  placeholder?: unknown;
+  /** Text under the title (`TspPickerProps.subtitle`). */
+  subtitle?: unknown;
+  /** What the list holds, plural ("sessions"). */
+  noun?: unknown;
+  /**
+   * Pending confirmation over the list (OMP session picker's Delete): `text`
+   * is the question, `act` the native action that answers yes. Null/absent
+   * when nothing waits for an answer.
+   */
+  confirm?: unknown;
 };
 
 /** Tab, scope or action-bar entry: an id, a `TspText` label, optional disable. */
 type PickerEntryLike = { id?: unknown; label?: unknown; disabled?: unknown };
 
-type PickerItemLike = { id?: unknown; label?: unknown; detail?: unknown; disabled?: unknown };
+type PickerItemLike = {
+  id?: unknown;
+  label?: unknown;
+  detail?: unknown;
+  disabled?: unknown;
+  /** Tags after the label (`TspPickerItem.badges`): a model's `default`, `vision`, … */
+  badges?: unknown;
+};
 
 /** The picker's action strip: chips the user picks after activating an item. */
 type StripChipLike = { id?: unknown; label?: unknown; on?: unknown };
@@ -87,6 +106,8 @@ type PrefsProps = {
   focus?: unknown;
   /** The program's search text; a string switches the page to search results. */
   query?: unknown;
+  /** Lead text of the current page (`TspPrefsProps.lead`). */
+  lead?: unknown;
 };
 
 type PrefsPageLike = { id?: unknown; label?: unknown; disabled?: unknown };
@@ -94,6 +115,9 @@ type PrefsPageLike = { id?: unknown; label?: unknown; disabled?: unknown };
 type PrefsSectionLike = { id?: unknown; title?: unknown; rows?: unknown };
 
 type PrefsRowLike = { id?: unknown; label?: unknown; hint?: unknown; disabled?: unknown; control?: unknown };
+
+/** A settings page's section: the heading its rows sit under (`TspPrefsSection.title`). */
+type PrefsGroupedRow = { row: PrefsRowLike; group?: string };
 
 /** The text-field props this adapter reads (`TspInputProps` in pi-wire):
  * what the field holds (mask dots when the host masks it) and the placeholder. */
@@ -124,16 +148,16 @@ function asComponent(value: unknown): Describable | undefined {
 /** A child slot to descend into when reading: only its own describe is needed.
  * OMP's form fields (`TextFormField`) describe themselves but take no events
  * of their own; the dialog root takes them. */
-type DescribableChild = Pick<Describable, "describe"> & object;
+export type DescribableChild = Pick<Describable, "describe"> & object;
 
-function describableChild(value: unknown): DescribableChild | undefined {
+export function describableChild(value: unknown): DescribableChild | undefined {
   if (!isObject(value)) return undefined;
   if (typeof (value as Partial<Describable>).describe !== "function") return undefined;
   return value as DescribableChild;
 }
 
 /** `TspText`: a plain string, or spans whose `t` pieces concatenate. */
-function tspText(value: unknown): string {
+export function tspText(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) {
     return value.map((span) => (isObject(span) && typeof span.t === "string" ? span.t : "")).join("");
@@ -149,7 +173,7 @@ function nodeText(node: NativeNodeLike): string {
   return tspText(node.p.text) || tspText(node.p.spans);
 }
 
-function describeTree(component: object): NativeNodeLike | undefined {
+export function describeTree(component: object): NativeNodeLike | undefined {
   const describe = (component as Partial<Describable>).describe;
   if (typeof describe !== "function") return undefined;
   try {
@@ -165,6 +189,16 @@ function describeTree(component: object): NativeNodeLike | undefined {
 function nodeProps<K extends NodeKind>(node: NativeNodeLike, kind: K): NodePropsByKind[K] | undefined {
   if (node.k !== kind || !isObject(node.p)) return undefined;
   return node.p as NodePropsByKind[K];
+}
+
+/**
+ * The keypath of a plain (non-component) child inside its parent's keypath
+ * (reconcile.ts rules): its `key` when keyed, else its index in `children`.
+ * The root's keypath is `""`, so its first segment has no leading `/`.
+ */
+export function childKeypath(parent: string, child: NativeNodeLike, index: number): string {
+  const segment = child.key === undefined ? String(index) : String(child.key);
+  return parent === "" ? segment : `${parent}/${segment}`;
 }
 
 function walkNode<K extends NodeKind>(node: NativeNodeLike, keypath: string, owner: object, kind: K, depth: number, visited: Set<object>): NodeFound<K> | undefined {
@@ -184,8 +218,7 @@ function walkNode<K extends NodeKind>(node: NativeNodeLike, keypath: string, own
     const childNode = child as NativeNodeLike;
     if (visited.has(childNode)) continue;
     visited.add(childNode);
-    const segment = childNode.key === undefined ? String(i) : String(childNode.key);
-    const found = walkNode(childNode, keypath === "" ? segment : `${keypath}/${segment}`, owner, kind, depth, visited);
+    const found = walkNode(childNode, childKeypath(keypath, childNode, i), owner, kind, depth, visited);
     if (found) return found;
   }
   return undefined;
@@ -216,6 +249,49 @@ function findNodeVisited<K extends NodeKind>(component: object, kind: K, depth: 
   if (!root) return undefined;
   visited.add(root);
   return walkNode(root, "", component, kind, depth, visited);
+}
+
+/** A described node found by {@link findDescribedNode}: `owner` is the component whose `handleNativeEvent` takes its events, `keypath` its path inside that owner. */
+export type DescribedNode = { owner: object; keypath: string; node: NativeNodeLike };
+
+/**
+ * The first node in `component`'s own description, or in a nested component it
+ * describes (up to {@link MAX_COMPONENT_DEPTH} boundaries deep), that `match`
+ * accepts. Matching is by shape only (`k`, `p.role`, `p.actions`, child keys);
+ * nothing here reads rendered text.
+ */
+export function findDescribedNode(component: object, match: (node: NativeNodeLike) => boolean): DescribedNode | undefined {
+  return findMatchVisited(component, match, 0, new Set<object>());
+}
+
+function findMatchVisited(component: object, match: (node: NativeNodeLike) => boolean, depth: number, visited: Set<object>): DescribedNode | undefined {
+  if (depth > MAX_COMPONENT_DEPTH || visited.has(component)) return undefined;
+  visited.add(component);
+  const root = describeTree(component);
+  if (!root) return undefined;
+  return walkMatch(root, "", component, match, depth, visited);
+}
+
+function walkMatch(node: NativeNodeLike, keypath: string, owner: object, match: (node: NativeNodeLike) => boolean, depth: number, visited: Set<object>): DescribedNode | undefined {
+  if (match(node)) return { owner, keypath, node };
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
+  if (!children) return undefined;
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
+    if (!isObject(child)) continue;
+    const component = describableChild(child);
+    if (component) {
+      const found = findMatchVisited(component, match, depth + 1, visited);
+      if (found) return found;
+      continue;
+    }
+    const childNode = child as NativeNodeLike;
+    if (visited.has(childNode)) continue;
+    visited.add(childNode);
+    const found = walkMatch(childNode, childKeypath(keypath, childNode, i), owner, match, depth, visited);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 /**
@@ -303,6 +379,57 @@ function visibleItems(props: PickerProps): PickerItemLike[] {
     ordered.push(...byId.values());
   }
   return ordered.filter((item) => !item.disabled);
+}
+
+/**
+ * An item's badges as message text: `text`, with the host's tooltip `title`
+ * after it when the title says something more than the text does.
+ */
+function pickerBadges(badges: unknown): string[] {
+  if (!Array.isArray(badges)) return [];
+  const shown: string[] = [];
+  for (const badge of badges) {
+    if (!isObject(badge) || typeof badge.text !== "string" || badge.text === "") continue;
+    const title = typeof badge.title === "string" ? badge.title.trim() : "";
+    const more = title !== "" && title.toLowerCase() !== badge.text.toLowerCase();
+    shown.push(more ? `${badge.text} (${title})` : badge.text);
+  }
+  return shown;
+}
+
+/** The search hint the host gives while the box is empty, when it has one. */
+function pickerPlaceholder(props: PickerProps): { placeholder?: string } {
+  const placeholder = tspText(props.placeholder).trim();
+  return placeholder ? { placeholder } : {};
+}
+
+/** The picker's pending confirmation: its question text and the yes action. */
+type PickerConfirmLike = { text?: unknown; act?: unknown; label?: unknown };
+
+/**
+ * The open confirmation over the picker, or undefined when none is pending.
+ * While one is open the host draws it in place of the list, so Telegram shows
+ * it as a yes/no dialog and the list actions stay out of reach.
+ */
+function pickerConfirm(props: PickerProps): PickerConfirmLike | undefined {
+  if (!isObject(props.confirm)) return undefined;
+  const confirm = props.confirm as PickerConfirmLike;
+  return typeof confirm.text === "string" && confirm.text.length > 0 ? confirm : undefined;
+}
+
+/**
+ * The native event that answers an open picker confirmation: yes sends the
+ * host's own confirm action, no (or Cancel) sends `close`, which the host maps
+ * onto cancelling the confirmation alone. Every other action is refused.
+ */
+function pickerConfirmEvent(keypath: string, confirm: PickerConfirmLike, action: DialogAction): unknown {
+  if (action.type === "cancel" || (action.type === "confirm" && !action.yes)) {
+    return { type: "action", key: keypath, act: "close", mods: [] };
+  }
+  if (action.type === "confirm" && typeof confirm.act === "string" && confirm.act.length > 0) {
+    return { type: "action", key: keypath, act: confirm.act, mods: [] };
+  }
+  return undefined;
 }
 
 /** Prefix of the synthetic keys that address a strip chip by index. */
@@ -393,6 +520,40 @@ function pickerBarEvent(keypath: string, props: PickerProps, name: string): unkn
   return undefined;
 }
 
+/**
+ * Action-bar ids that act on one list row (OMP session picker's Delete, and
+ * its siblings in other pickers). The host applies them to its own highlight,
+ * and Telegram has no highlight to move: tapping a row activates it. So these
+ * buttons first ask which row they are for, then send the host `select` for
+ * that row followed by the action, the order the TUI user follows with the
+ * arrow keys and the action key. Every other bar entry (the primary action,
+ * scope toggles, ...) keeps firing at once.
+ */
+const ROW_ACTION_IDS: Record<string, true> = { delete: true, rename: true, pin: true, unpin: true };
+
+/** Synthetic key of the "leave pick mode" button. */
+const PICK_BACK_KEY = "pick:back";
+
+/**
+ * Pick mode per picker component: the row-scoped action waiting for its row.
+ * Keyed by the component the picker belongs to, so a closed picker takes its
+ * mode with it and a new picker starts clean.
+ */
+const pendingRowAction = new WeakMap<object, string>();
+
+/** The enabled bar entry `id` names, when the live picker still offers it. */
+function rowActionEntry(props: PickerProps, id: string): { id: string; label?: unknown } | undefined {
+  if (!Array.isArray(props.actions)) return undefined;
+  const entry = props.actions.find((candidate) => isObject(candidate) && candidate.id === id && !candidate.disabled);
+  return isObject(entry) && typeof entry.id === "string" ? (entry as { id: string; label?: unknown }) : undefined;
+}
+
+/** "sessions" -> "session": the noun the picker lists, in the singular. */
+function pickerNoun(props: PickerProps): string {
+  const noun = typeof props.noun === "string" ? props.noun.trim() : "";
+  return noun ? noun.replace(/s$/, "") : "item";
+}
+
 export const tspPickerAdapter: DialogAdapter = {
   id: "tsp-picker",
 
@@ -405,6 +566,11 @@ export const tspPickerAdapter: DialogAdapter = {
     const found = findPicker(component);
     if (!found) return { kind: "unsupported", what: "OMP picker closed or no longer a picker" };
     const { props } = found;
+    const confirm = pickerConfirm(props);
+    if (confirm) {
+      const confirmLabel = tspText(confirm.label);
+      return { kind: "confirm", title: tspText(confirm.text), ...(confirmLabel ? { confirmLabel } : {}) };
+    }
     const strip = pickerStrip(props);
     if (strip) {
       // The strip is open (e.g. the model hub's role chips after activating a
@@ -422,36 +588,51 @@ export const tspPickerAdapter: DialogAdapter = {
         total: items.length,
       };
     }
+    const pendingAction = pendingRowAction.get(found.owner);
+    const pending = pendingAction === undefined ? undefined : rowActionEntry(props, pendingAction);
+    if (pendingAction !== undefined && !pending) pendingRowAction.delete(found.owner);
     const currentIds = Array.isArray(props.current) ? props.current : [];
     const items: DialogItem[] = visibleItems(props).map((item) => {
       const description = item.detail === undefined ? undefined : tspText(item.detail);
+      const badges = pickerBadges(item.badges);
       return {
         key: item.id as string,
         label: tspText(item.label),
-        ...(description ? { description } : {}),
+        ...(description ? { description, note: description } : {}),
+        ...(badges.length > 0 ? { badges } : {}),
         current: currentIds.includes(item.id),
         focused: props.selected === item.id,
       };
     });
-    const extraActions = pickerExtraActions(props);
-    const search = typeof props.query === "string" ? { query: props.query } : undefined;
+    const extraActions = pending
+      ? [
+          ...pickerExtraActions(props).filter((extra) => !extra.key.startsWith(BAR_KEY_PREFIX)),
+          { label: "Back", key: PICK_BACK_KEY },
+        ]
+      : pickerExtraActions(props);
+    const search = typeof props.query === "string" ? { query: props.query, ...pickerPlaceholder(props) } : undefined;
     const title = typeof props.title === "string" ? props.title : "Select";
+    const subtitle = pending
+      ? `${tspText(pending.label) || pending.id}: choose a ${pickerNoun(props)}`
+      : tspText(props.subtitle) || undefined;
     if (items.length === 0) {
       const text = tspText(props.empty) || tspText(props.message) || "Nothing to show";
       if (extraActions.length === 0 && !search) {
         // Nothing to choose and nothing to switch/filter/search by either
         // (e.g. `/hub` with no running agents): an info card whose only
         // action is close; `act` maps cancel onto the picker's `close`.
-        return { kind: "info", title, text, closable: true };
+        return { kind: "info", title, text: subtitle ? `${subtitle}\n${text}` : text, closable: true };
       }
       // Tabs, scopes, bar actions and search still apply to an empty result
       // (e.g. `/tree` filtered down to nothing): stay a select with no rows
-      // so those buttons survive, with the empty-state text in the title.
+      // so those buttons survive, with the empty-state text in the body.
       return {
         kind: "select",
-        title: `${title} — ${text}`,
+        title,
         items: [],
         total: 0,
+        notice: text,
+        ...(subtitle ? { subtitle } : {}),
         ...(search ? { search } : {}),
         ...(extraActions.length > 0 ? { extraActions } : {}),
       };
@@ -461,6 +642,7 @@ export const tspPickerAdapter: DialogAdapter = {
       title,
       items,
       total: typeof props.total === "number" ? props.total : items.length,
+      ...(subtitle ? { subtitle } : {}),
       ...(search ? { search } : {}),
       ...(extraActions.length > 0 ? { extraActions } : {}),
     };
@@ -471,6 +653,8 @@ export const tspPickerAdapter: DialogAdapter = {
     const found = findPicker(component);
     if (!found) return false;
     const { owner, keypath, props } = found;
+    const confirm = pickerConfirm(props);
+    if (confirm) return sendPickerEvent(owner, pickerConfirmEvent(keypath, confirm, action), ctx);
     if (action.type === "search") {
       // The picker filters through its own input box: replace its contents
       // and let the host re-filter the list.
@@ -481,6 +665,29 @@ export const tspPickerAdapter: DialogAdapter = {
         // A host without a live renderer has nothing to redraw; the text landed.
       }
       return true;
+    }
+    const pendingAction = pendingRowAction.get(owner);
+    if (pendingAction !== undefined && action.type === "key" && action.name === PICK_BACK_KEY) {
+      pendingRowAction.delete(owner);
+      return requestRedraw(ctx);
+    }
+    if (pendingAction !== undefined && action.type === "choose" && !action.key.startsWith(STRIP_KEY_PREFIX)) {
+      // The row the user picked for the waiting action: move the host's
+      // highlight there, then fire the action at it.
+      pendingRowAction.delete(owner);
+      if (!rowActionEntry(props, pendingAction)) return false;
+      if (!visibleItems(props).some((item) => item.id === action.key)) return false;
+      if (!sendPickerEvent(owner, { type: "select", key: keypath, item: action.key }, ctx)) return false;
+      return sendPickerEvent(owner, { type: "action", key: keypath, act: pendingAction, mods: [] }, ctx);
+    }
+    if (action.type === "key" && action.name.startsWith(BAR_KEY_PREFIX)) {
+      const entry = entryAt(props.actions, action.name.slice(BAR_KEY_PREFIX.length));
+      if (entry && ROW_ACTION_IDS[entry.id] && !entry.disabled) {
+        // Nothing to aim at: the host would ignore it, so say the press did nothing.
+        if (visibleItems(props).length === 0) return false;
+        pendingRowAction.set(owner, entry.id);
+        return requestRedraw(ctx);
+      }
     }
     let target: unknown;
     if (action.type === "choose" && action.key.startsWith(STRIP_KEY_PREFIX)) {
@@ -498,44 +705,69 @@ export const tspPickerAdapter: DialogAdapter = {
     } else if (action.type === "cancel") {
       target = { type: "action", key: keypath, act: "close", mods: [] };
     }
-    if (!target) return false;
-    const handle = (owner as Partial<Describable>).handleNativeEvent;
-    if (typeof handle !== "function") return false;
-    try {
-      handle.call(owner, target);
-    } catch {
-      return false;
-    }
-    // The native event mutates host state without a UI tick; ask the host to
-    // redraw so the terminal catches up with what Telegram just showed (3E).
-    try {
-      ctx.requestRender();
-    } catch {
-      // A host without a live renderer has nothing to redraw; the act landed.
-    }
-    return true;
+    return sendPickerEvent(owner, target, ctx);
   },
 };
 
+/** Ask the host to redraw after a change that lives only in this adapter. */
+function requestRedraw(ctx: AdapterContext): boolean {
+  try {
+    ctx.requestRender();
+  } catch {
+    // A host without a live renderer has nothing to redraw; the mode still changed.
+  }
+  return true;
+}
+
+/**
+ * Hand a native event to the picker's owner and ask the host to redraw so the
+ * terminal catches up with what Telegram just showed (3E). False when there is
+ * no event or the host refuses it.
+ */
+function sendPickerEvent(owner: object, target: unknown, ctx: AdapterContext): boolean {
+  if (!target) return false;
+  const handle = (owner as Partial<Describable>).handleNativeEvent;
+  if (typeof handle !== "function") return false;
+  try {
+    handle.call(owner, target);
+  } catch {
+    return false;
+  }
+  try {
+    ctx.requestRender();
+  } catch {
+    // A host without a live renderer has nothing to redraw; the act landed.
+  }
+  return true;
+}
+
 /** The live page's rows, in section order (the host only describes that page). */
 function prefsRows(props: PrefsProps): PrefsRowLike[] {
+  return prefsGroupedRows(props).map((entry) => entry.row);
+}
+
+/** The live page's rows with the title of the section each sits under. */
+function prefsGroupedRows(props: PrefsProps): PrefsGroupedRow[] {
   const sections = Array.isArray(props.sections) ? (props.sections as readonly PrefsSectionLike[]) : [];
-  const rows: PrefsRowLike[] = [];
+  const rows: PrefsGroupedRow[] = [];
   for (const section of sections) {
     if (!isObject(section) || !Array.isArray(section.rows)) continue;
+    const group = tspText(section.title).trim() || undefined;
     for (const row of section.rows as readonly unknown[]) {
-      if (isObject(row) && typeof (row as PrefsRowLike).id === "string") rows.push(row as PrefsRowLike);
+      if (isObject(row) && typeof (row as PrefsRowLike).id === "string") rows.push({ row: row as PrefsRowLike, group });
     }
   }
   return rows;
 }
 
 /** A choice control's usable options: entries carrying a string `value`. */
-function choiceOptions(control: HostRecord): { value: string; label: string }[] {
+function choiceOptions(control: HostRecord): { value: string; label: string; detail?: string }[] {
   const options = Array.isArray(control.options) ? (control.options as readonly unknown[]) : [];
-  const usable: { value: string; label: string }[] = [];
+  const usable: { value: string; label: string; detail?: string }[] = [];
   for (const option of options) {
-    if (isObject(option) && typeof option.value === "string") usable.push({ value: option.value, label: tspText(option.label) });
+    if (!isObject(option) || typeof option.value !== "string") continue;
+    const detail = tspText(option.detail).trim();
+    usable.push({ value: option.value, label: tspText(option.label), ...(detail ? { detail } : {}) });
   }
   return usable;
 }
@@ -620,8 +852,32 @@ type PrefsSubmenuKind = "text" | "number" | "multi";
 /** The submenu open on the plugin side, per prefs component: the row it edits and its kind. */
 const prefsSubmenus = new WeakMap<object, { rowId: string; kind: PrefsSubmenuKind }>();
 
+/** A choice's option detail for its current value, when the host gives one. */
+function choiceDetail(control: HostRecord): string | undefined {
+  const options = Array.isArray(control.options) ? (control.options as readonly unknown[]) : [];
+  const current = options.find((option) => isObject(option) && option.value === control.value);
+  const detail = isObject(current) ? tspText(current.detail).trim() : "";
+  return detail || undefined;
+}
+
+/** The text after a row's label: its hint, then a choice's current-option detail. */
+function prefsRowNote(row: PrefsRowLike, control: HostRecord | undefined): string | undefined {
+  const hint = tspText(row.hint).trim();
+  const detail = control?.k === "choice" ? choiceDetail(control) : undefined;
+  const note = [hint, detail].filter((part): part is string => part !== undefined && part !== "").join(" · ");
+  return note || undefined;
+}
+
 /** One prefs row as a settings item; controls Telegram cannot edit stay read-only. */
-function prefsRowItem(row: PrefsRowLike): DialogItem & { values?: string[]; hasSubmenu?: boolean } {
+function prefsRowItem(row: PrefsRowLike, group?: string): DialogItem & { values?: string[]; hasSubmenu?: boolean } {
+  const item = prefsControlItem(row);
+  const control = isObject(row.control) ? row.control : undefined;
+  const note = prefsRowNote(row, control);
+  return { ...item, ...(note ? { note } : {}), ...(group ? { group } : {}) };
+}
+
+/** The row's label, value and submenu flag, from its control. */
+function prefsControlItem(row: PrefsRowLike): DialogItem & { values?: string[]; hasSubmenu?: boolean } {
   const key = row.id as string;
   const label = tspText(row.label);
   const control = isObject(row.control) ? row.control : undefined;
@@ -716,6 +972,7 @@ function prefsSubmenuModel(owner: object, props: PrefsProps): { itemKey: string;
       key: option.value,
       label: option.label,
       checked: selected.includes(option.value),
+      ...(option.detail ? { note: option.detail } : {}),
     }));
     return { itemKey: state.rowId, model: { kind: "select", title, items, total: items.length, multi: true } };
   }
@@ -822,7 +1079,11 @@ export const tspPrefsAdapter: DialogAdapter = {
     const { owner, props } = found;
     const currentPage = typeof props.page === "string" ? props.page : "";
     const query = typeof props.query === "string" ? props.query : "";
-    const items: (DialogItem & { values?: string[]; hasSubmenu?: boolean })[] = [];
+    const items: (DialogItem & { values?: string[]; hasSubmenu?: boolean; shortcut?: boolean })[] = [];
+    // The current page's label is the subtitle; its lead text is the notice, which a search replaces.
+    const allPages = Array.isArray(props.pages) ? (props.pages as readonly PrefsPageLike[]) : [];
+    const currentLabel = tspText(allPages.find((page) => isObject(page) && page.id === currentPage)?.label).trim();
+    const lead = query ? "" : tspText(props.lead).trim();
     // While a search is active the host filters rows across every page, so the
     // page shortcuts would only push the results off the first page: show the
     // matches alone, the same view the terminal gives.
@@ -830,11 +1091,11 @@ export const tspPrefsAdapter: DialogAdapter = {
     for (const page of pages) {
       if (!isObject(page) || typeof page.id !== "string" || page.disabled) continue;
       if (page.id === currentPage) continue;
-      items.push({ key: `page:${page.id}`, label: `📄 ${tspText(page.label)}`, hasSubmenu: true });
+      items.push({ key: `page:${page.id}`, label: `📄 ${tspText(page.label)}`, hasSubmenu: true, shortcut: true });
     }
-    for (const row of prefsRows(props)) {
+    for (const { row, group } of prefsGroupedRows(props)) {
       if (row.disabled) continue;
-      items.push(prefsRowItem(row));
+      items.push(prefsRowItem(row, group));
     }
     const submenu = prefsSubmenuModel(owner, props);
     // The page takes typed text as a search term whenever no submenu holds the
@@ -846,6 +1107,8 @@ export const tspPrefsAdapter: DialogAdapter = {
       kind: "settings",
       title: typeof props.title === "string" ? props.title : "Settings",
       items,
+      ...(currentLabel ? { subtitle: currentLabel } : {}),
+      ...(lead ? { notice: lead } : {}),
       ...(submenu ? { submenu } : { search }),
     };
   },
@@ -923,13 +1186,65 @@ export const tspPrefsAdapter: DialogAdapter = {
 /** What the document-order scan of a prompt returns: the first `input` node
  * and the plain text of the last `text` node printed before it - the prompt
  * line OMP's login dialog puts above the field. */
-type PromptScan = { input: NodeFound<"input">; label?: string; detail?: string };
+type PromptScan = {
+  input: NodeFound<"input">;
+  label?: string;
+  detail?: string;
+  /** The step title of a wizard step (`omp.mcpAdd.title`), when the host marks one. */
+  heading?: string;
+  /** The wizard's phase strip, when the field sits in a wizard. */
+  steps?: { label: string; current: boolean }[];
+};
 
-type ScanState = { lastText?: string; detail: string[]; detailSeen: Set<object> };
+type ScanState = {
+  lastText?: string;
+  detail: string[];
+  detailSeen: Set<object>;
+  heading?: string;
+  steps?: { label: string; current: boolean }[];
+};
 
 /** OMP login dialog body above the field, by `p.role`: the lead text, the
- * device code, the login link (its URL text) and the local shortcut. */
-const PROMPT_DETAIL_ROLES = new Set(["omp.login.lead", "omp.login.code", "omp.login.url", "omp.login.shortcut"]);
+ * device code, the login link (its URL text) and the local shortcut. The MCP
+ * add wizard's step lead is the same kind of body text. */
+const PROMPT_DETAIL_ROLES = new Set([
+  "omp.login.lead",
+  "omp.login.code",
+  "omp.login.url",
+  "omp.login.shortcut",
+  "omp.mcpAdd.lead",
+]);
+
+/** The MCP add wizard's phase strip, its step title and the tone of the step on screen. */
+const WIZARD_PROGRESS_ROLE = "omp.mcpAdd.progress";
+const WIZARD_TITLE_ROLE = "omp.mcpAdd.title";
+const WIZARD_CURRENT_TONE = "accent";
+
+/** First text under a node, in document order: a phase segment's label. */
+function firstText(node: NativeNodeLike): string {
+  if (node.k === "text") return nodeText(node).trim();
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  for (const child of children) {
+    if (!isObject(child) || describableChild(child)) continue;
+    const text = firstText(child as NativeNodeLike);
+    if (text) return text;
+  }
+  return "";
+}
+
+/** The wizard's phases in order; the one lit with the current tone is the step on screen. */
+function wizardSteps(progress: NativeNodeLike): { label: string; current: boolean }[] {
+  const children = Array.isArray(progress.c) ? (progress.c as unknown[]) : [];
+  const steps: { label: string; current: boolean }[] = [];
+  for (const child of children) {
+    if (!isObject(child)) continue;
+    const label = firstText(child as NativeNodeLike);
+    if (!label) continue;
+    const tone = isObject(child.p) ? child.p.tone : undefined;
+    steps.push({ label, current: tone === WIZARD_CURRENT_TONE });
+  }
+  return steps;
+}
 
 /** Plain text of a detail node and its native descendants, in document order. */
 function collectPromptDetail(node: NativeNodeLike, state: ScanState): void {
@@ -967,11 +1282,20 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
       input: { owner, keypath: "", props },
       ...(state.lastText === undefined ? {} : { label: state.lastText }),
       ...(detail === undefined ? {} : { detail }),
+      ...(state.heading === undefined ? {} : { heading: state.heading }),
+      ...(state.steps === undefined ? {} : { steps: state.steps }),
     };
+  }
+  const role = isObject(node.p) && typeof node.p.role === "string" ? node.p.role : undefined;
+  if (role === WIZARD_PROGRESS_ROLE) {
+    // The phase strip holds labels only, no field: record it and do not let its text become the prompt's label.
+    state.steps = wizardSteps(node);
+    return undefined;
   }
   if (node.k === "text" && isObject(node.p)) {
     const text = tspText(node.p.text).trim();
     if (text) state.lastText = text;
+    if (role === WIZARD_TITLE_ROLE && text) state.heading = text;
   }
   if (isObject(node.p) && typeof node.p.role === "string" && PROMPT_DETAIL_ROLES.has(node.p.role)) {
     collectPromptDetail(node, state);
@@ -1046,7 +1370,7 @@ export const tspInputAdapter: DialogAdapter = {
   read(component): DialogModel {
     const found = findPrompt(component);
     if (!found) return { kind: "unsupported", what: "OMP text prompt closed or no longer an input" };
-    const title = promptTitle(found.label) ?? "Input";
+    const title = found.heading ?? promptTitle(found.label) ?? "Input";
     const secret = ownerMasks(found.input.owner) || SECRET_TITLE.test(title);
     const placeholder = tspText(found.input.props.placeholder).trim();
     return {
@@ -1054,6 +1378,7 @@ export const tspInputAdapter: DialogAdapter = {
       title,
       ...(placeholder ? { placeholder } : {}),
       ...(found.detail === undefined ? {} : { detail: found.detail }),
+      ...(found.steps === undefined ? {} : { steps: found.steps }),
       secret,
     };
   },

@@ -1,0 +1,253 @@
+/**
+ * Issue #22: one OMP `ask` call must reach Telegram as one message. The fake host
+ * mirrors OMP 18.12.5 `extension-ui-controller.ts`: the tool UI context forwards
+ * `askDialog` synchronously to the mode's `showAskDialog`, which builds one ask
+ * component and focuses it. A prompt editor opened on top and closed again
+ * focuses the same ask object once more.
+ */
+import { describe, expect, it } from "vitest";
+import { DialogBroker } from "../tui/broker.ts";
+import type { BrokerDeps } from "../tui/broker.ts";
+import { FocusTracker } from "../tui/focus.ts";
+import { OriginTracker } from "../tui/origin.ts";
+import type { AskQuestion } from "../tui/model.ts";
+import type { TelegramTurn } from "../types.ts";
+
+class AskDialogComponent {
+  constructor(private readonly question: AskQuestion) {}
+  render() { return ""; }
+  handleInput(_key: string) { /* keys are not modelled */ }
+  describe() {
+    const rows = this.question.options.map((option, index) => ({
+      k: "item",
+      key: `option:${index}`,
+      p: { label: [{ t: option.label }], role: "omp.ask.option" },
+    }));
+    return {
+      k: "col",
+      p: { role: "omp.editor.ask" },
+      c: [
+        { k: "list", key: "q0", p: { selected: "option:0", role: "omp.ask.options" }, c: rows },
+        {
+          k: "row",
+          key: "actions",
+          p: { role: "omp.actions" },
+          c: [
+            { k: "row", p: { role: "omp.btn", actions: { click: "cancel" } }, c: [] },
+            { k: "row", p: { role: "omp.btn", actions: { click: "submit" } }, c: [] },
+          ],
+        },
+      ],
+    };
+  }
+}
+
+/** Same shape as pi's and OMP's prompt editor; the name is what `HookEditorComponent` would carry. */
+class HookEditorComponent {
+  render() { return ""; }
+  handleInput(_key: string) { /* keys are not modelled */ }
+  getText() { return ""; }
+  setText(_text: string) { /* not modelled */ }
+}
+
+const QUESTION: AskQuestion = {
+  id: "colour",
+  question: "Pick a color for the acceptance run",
+  options: [{ label: "red" }, { label: "green" }],
+  recommended: 1,
+};
+
+type Sent = { chatId: number; messageId: number; kind: string; text?: string; rows?: unknown };
+
+function setup(options: { draftBeneath?: boolean; holdSend?: boolean } = {}) {
+  const sent: Sent[] = [];
+  let nextId = 100;
+  // With `holdSend`, sendButtons stays pending until the test calls `releaseSend()`.
+  const held: Array<() => void> = [];
+  const transport = {
+    sendButtons: (chatId: number) => {
+      nextId += 1;
+      const messageId = nextId;
+      sent.push({ chatId, messageId, kind: "send" });
+      if (options.holdSend) return new Promise<{ message_id: number }>((resolve) => held.push(() => resolve({ message_id: messageId })));
+      return Promise.resolve({ message_id: messageId });
+    },
+    editButtons: async (chatId: number, messageId: number, text: string, rows: unknown) => {
+      sent.push({ chatId, messageId, kind: "edit", text, rows });
+    },
+    editText: async (chatId: number, messageId: number, text: string) => {
+      sent.push({ chatId, messageId, kind: "editText", text });
+    },
+    sendText: async (chatId: number) => {
+      nextId += 1;
+      sent.push({ chatId, messageId: nextId, kind: "text" });
+      return [{ message_id: nextId }];
+    },
+    removeInlineKeyboard: async (chatId: number, messageId: number) => {
+      sent.push({ chatId, messageId, kind: "removeKeyboard" });
+    },
+    deleteMessage: async () => undefined,
+  };
+  const editor = { focused: false, render: () => "", handleInput: () => undefined, getText: () => "", setText: () => undefined };
+  const focusCalls: unknown[] = [];
+  const ui = {
+    focusedComponent: editor as unknown,
+    setFocus(component: unknown) {
+      focusCalls.push(component);
+      ui.focusedComponent = component;
+    },
+  };
+  const mode = {
+    editorContainer: { children: [] as unknown[] },
+    // OMP's `#showLocalAskDialog`: one component, mounted, focused once.
+    showAskDialog(questions: AskQuestion[], _dialogOptions?: unknown) {
+      const component = new AskDialogComponent(questions[0]);
+      mode.editorContainer.children = options.draftBeneath ? [component, editor] : [component];
+      editor.focused = options.draftBeneath === true;
+      state.ask = component;
+      ui.setFocus(component);
+      return new Promise<unknown>(() => undefined);
+    },
+  };
+  const toolUi = {
+    askDialog: (questions: AskQuestion[], dialogOptions?: unknown) => mode.showAskDialog(questions, dialogOptions),
+  };
+  const state: { ask?: AskDialogComponent } = {};
+  const turns: TelegramTurn[] = [{ chatId: 42, sourceMessageId: 7, queuedAttachments: [] } as TelegramTurn];
+
+  const focus = new FocusTracker();
+  (focus as unknown as { attach(s: unknown): void }).attach({
+    host: "omp",
+    ui,
+    editor,
+    mode,
+    session: { extensionRunner: { getUIContext: () => toolUi } },
+  });
+  const origin = new OriginTracker({ isEditorFocused: () => focus.isEditor(), readDraft: () => "", writeDraft: () => true });
+  const broker = new DialogBroker({
+    transport: transport as unknown as BrokerDeps["transport"],
+    focus,
+    origin,
+    activeChatId: () => 42,
+    activeTurns: () => turns,
+    writeText: () => true,
+    enabled: () => true,
+  });
+  broker.start();
+  const releaseSend = () => { for (const release of held.splice(0)) release(); };
+  return { sent, ui, editor, focusCalls, toolUi, state, broker, focus, releaseSend };
+}
+
+const flush = async (ticks = 3) => {
+  for (let i = 0; i < ticks; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+};
+/** OMP's ask tool passes dialogOptions with its own abort signal; the race wrapper adds one either way. */
+const askOptions = () => ({ signal: new AbortController().signal });
+const sendsOf = (sent: Sent[]) => sent.filter((entry) => entry.kind === "send");
+
+describe("#22 one ask call sends one Telegram message", () => {
+  it("S1 plain: a single askDialog call sends exactly one message", async () => {
+    const { sent, toolUi, focusCalls, focus, state } = setup();
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    expect(focus.entryFor(state.ask as unknown as Record<string, unknown>)?.race).toBeDefined();
+    expect(focusCalls).toHaveLength(1);
+    expect(sendsOf(sent)).toHaveLength(1);
+  });
+
+  it("S2 draft beneath: the editor mounted under the dialog does not add a message", async () => {
+    const { sent, toolUi } = setup({ draftBeneath: true });
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+  });
+
+  it("S3 nested prompt: opening and closing a prompt editor over the dialog sends one message", async () => {
+    const { sent, ui, toolUi, state } = setup();
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    const promptEditor = new HookEditorComponent();
+    ui.setFocus(promptEditor);
+    await flush();
+    ui.setFocus(state.ask);
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+    expect(sent.filter((entry) => (entry.kind === "edit" || entry.kind === "editText") && entry.text === "Answered in the terminal")).toEqual([]);
+  });
+
+  it("S4 settled ask: a prompt opened after the ask was answered is not kept, and opens its own message", async () => {
+    const { sent, ui, toolUi, state, focus } = setup();
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    const race = focus.entryFor(state.ask as unknown as Record<string, unknown>)?.race;
+    expect(race?.settled).toBe(false);
+    expect(race?.answer(undefined)).toBe(true);
+    expect(race?.settled).toBe(true);
+    await flush();
+    ui.setFocus(new HookEditorComponent());
+    await flush();
+    // The guard does not apply once the race is settled: the ask session retires and the prompt opens a message.
+    expect(sendsOf(sent)).toHaveLength(2);
+  });
+
+  it("S5 pending first send: refreshes while the send is in flight do not send again", async () => {
+    const { sent, toolUi, broker, releaseSend } = setup({ holdSend: true });
+    const refresh = () => (broker as unknown as { refresh(): void }).refresh();
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    for (let i = 0; i < 3; i += 1) {
+      refresh();
+      await flush(1);
+    }
+    expect(sendsOf(sent)).toHaveLength(1);
+    releaseSend();
+    await flush();
+    for (let i = 0; i < 3; i += 1) {
+      refresh();
+      await flush(1);
+    }
+    expect(sendsOf(sent)).toHaveLength(1);
+    const sendId = sendsOf(sent)[0].messageId;
+    expect(sent.filter((entry) => entry.kind === "edit" && entry.messageId !== sendId)).toEqual([]);
+  });
+
+  it("S7 closed while the first send is in flight: the summary and keyboard strip land on the sent message", async () => {
+    const { sent, ui, editor, toolUi, releaseSend } = setup({ holdSend: true });
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    // Focus goes back to the editor while the first send is still pending: the ask is closed in the terminal.
+    ui.setFocus(editor);
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+    releaseSend();
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+    const sendId = sendsOf(sent)[0].messageId;
+    const summaries = sent.filter((entry) => entry.kind === "edit" && entry.messageId === sendId && entry.text === "Answered in the terminal");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].rows).toEqual([]);
+    expect(sent.filter((entry) => entry.kind === "removeKeyboard" && entry.messageId === sendId)).toHaveLength(1);
+  });
+
+  it("S6 content changed while the first send is in flight: the message is edited to the latest content", async () => {
+    const { sent, toolUi, state, broker, focus, releaseSend } = setup({ holdSend: true });
+    const refresh = () => (broker as unknown as { refresh(): void }).refresh();
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    // The adapter reads the questions from the focus entry, so the change goes there.
+    const entry = focus.entryFor(state.ask as unknown as Record<string, unknown>) as unknown as { questions: AskQuestion[] };
+    entry.questions = [{ ...QUESTION, options: [{ label: "blue" }, { label: "green" }] }];
+    refresh();
+    await flush(1);
+    releaseSend();
+    await flush();
+    refresh();
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+    const sendId = sendsOf(sent)[0].messageId;
+    const edits = sent.filter((entry) => entry.kind === "edit");
+    expect(edits.length).toBeGreaterThan(0);
+    expect(edits.every((entry) => entry.messageId === sendId)).toBe(true);
+    expect(JSON.stringify(edits[edits.length - 1].rows)).toContain("blue");
+  });
+});

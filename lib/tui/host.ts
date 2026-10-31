@@ -9,7 +9,7 @@
  */
 import { getTuiHostState, installTuiBridge, onTuiCaptured, type TuiHost, type TuiHostState } from "../tui-bridge.ts";
 import { log } from "../logger.ts";
-import { hasStickyMark, inheritFunctionKinds, isFunctionKindMarked, mark, markFunctionKind } from "./install-marks.ts";
+import { installHook, methodOwner } from "./hooks.ts";
 
 const hostLog = log.child("tui-host");
 
@@ -40,17 +40,17 @@ export function onHostState(listener: (state: HostState) => void): () => void {
 }
 
 /**
- * Wrap a method on an instance or prototype. Multiple hooks may wrap the same
- * method: each object/method/kind is marked (see `install-marks.ts`), so a
- * re-capture does not install the same hook twice, while different modules
- * still compose.
+ * Wrap a method on an instance or prototype. The wrapper is the object's single
+ * plugin wrapper for `name` (see `hooks.ts`): `kind` names this hook as one
+ * stage on it, so installing the same kind again replaces the stage instead of
+ * adding a layer.
  *
- * `scope` (optional) limits the marks to one owner, such as a FocusTracker: a
- * second owner then wraps the same method again instead of being skipped. Without
- * it the process-wide marks are used.
+ * `scope` (optional) is the owner of the stage (such as a FocusTracker or an
+ * output capture); `removeOwnerHooks(scope)` removes it again.
  *
- * The wrapper never changes the return value and never lets an observer throw
- * into the host.
+ * `before` runs first and `after` runs after the host method, with its result.
+ * Observer errors are logged and never reach the host; a host error is rethrown
+ * unchanged, and the wrapper returns the host's result as it is.
  */
 export function hookMethod(
   target: unknown,
@@ -61,45 +61,50 @@ export function hookMethod(
   scope?: object,
 ): boolean {
   if (!isHostObject(target)) return false;
-  const object = target as Record<string, unknown>;
-  let current: unknown;
-  try {
-    current = object[name];
-  } catch {
-    return false;
-  }
-  if (typeof current !== "function") return false;
-  const hookKey = `hook:${name}:${kind}`;
-  // Pi hands one function to two objects; once it is wrapped for this kind,
-  // wrapping it again would report the same entry twice (H24).
-  if (hasStickyMark(object, name, hookKey, scope) || isFunctionKindMarked(current, kind, scope)) return false;
-  const original = current as HostMethod;
-  const wrapped: HostMethod = function patchedHostMethod(this: unknown, ...args: unknown[]): unknown {
+  return installHook(target, name, `hook:${kind}`, (next, args, self) => {
     if (before) {
-      try { before(args, this); } catch (err) { hostLog.debug("host before-hook failed", { kind, name, err }); }
+      try { before(args, self); } catch (err) { hostLog.debug("host before-hook failed", { kind, name, err }); }
     }
     let result: unknown;
+    let failed = false;
     let failure: unknown;
     try {
-      result = original.apply(this, args);
+      result = next(args);
     } catch (err) {
+      failed = true;
       failure = err;
     }
     if (after) {
-      try { after(args, result, this); } catch (err) { hostLog.debug("host after-hook failed", { kind, name, err }); }
+      try { after(args, result, self); } catch (err) { hostLog.debug("host after-hook failed", { kind, name, err }); }
     }
-    if (failure !== undefined) throw failure;
+    if (failed) throw failure;
     return result;
-  };
-  try {
-    object[name] = wrapped;
-  } catch {
+  }, { priority: 10, owner: scope });
+}
+
+/**
+ * `hookMethod` on the object that owns `name` (see `methodOwner` in `hooks.ts`).
+ * Use it for host references that forward reads to another object, such as
+ * pi's `mode.ui`, where an install on the reference itself never takes effect.
+ * Logs at debug when the method has no owner or the install returns false.
+ */
+export function hookOwnedMethod(
+  target: unknown,
+  name: string,
+  kind: string,
+  before?: (args: unknown[], self: unknown) => void,
+  after?: (args: unknown[], result: unknown, self: unknown) => void,
+  scope?: object,
+): boolean {
+  if (!isHostObject(target)) return false;
+  const owner = methodOwner(target, name);
+  if (!owner) {
+    hostLog.debug("hook target has no owner for method", { kind, name });
     return false;
   }
-  inheritFunctionKinds(original, wrapped, scope);
-  markFunctionKind(wrapped, kind, scope);
-  mark(object, hookKey, scope);
-  return true;
+  const installed = hookMethod(owner, name, kind, before, after, scope);
+  if (!installed) hostLog.debug("hook install returned false", { kind, name });
+  return installed;
 }
 
 /** Candidate objects that expose status/error/warning on pi and OMP. */

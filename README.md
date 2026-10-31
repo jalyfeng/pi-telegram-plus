@@ -67,14 +67,14 @@ The `/login` steps in `test:e2e:dialogs` put a stub `open` on `PATH` so no brows
 - **Quoted message context** — when you reply to a Telegram message, the quoted text/caption and attachment summary are included in the prompt sent to pi so the agent understands what “this” refers to
 
 ### 🎮 Host Commands, Run by the Host
-A slash command sent from Telegram is typed into the host's own editor and executed by the host, exactly as if you had typed it in the terminal: `/model`, `/resume`, `/tree`, `/fork`, `/settings`, `/login`, `/compact`, `/export` and every other command the host advertises. The plugin does not reimplement any of them. Their output is relayed back as a reply to your message, and any dialog they open appears in Telegram as buttons (see **Dialogs in Telegram**). The Telegram bot menu is built from the host's live command catalog plus `/tg`.
+A slash command sent from Telegram is typed into the host's own editor and executed by the host, exactly as if you had typed it in the terminal: `/model`, `/resume`, `/tree`, `/fork`, `/settings`, `/login`, `/compact`, `/export` and every other command the host advertises. The plugin does not reimplement any of them. Each command gets one reply message that is edited in place: the dialog it opens appears on it as buttons (see **Dialogs in Telegram**), then its result; long output is paged inside the same message. Text the command shows in the terminal (for example `/session`, `/changelog`) is sent as text, taken from the host's structured data rather than the rendered screen. Commands typed in the local terminal are not mirrored to Telegram. The Telegram bot menu is built from the host's live command catalog plus `/tg`.
 
-Shell commands work the same way: `!cmd` and `!!cmd` (output kept out of the model context) are handed to the host's shell path after the **Shell confirm** policy (`/tg` → Config) approves them, so extensions that guard shell commands still see them. The final output is sent back once the command finishes.
+Shell commands work the same way: `!cmd` and `!!cmd` (output kept out of the model context) are handed to the host's shell path after the **Shell confirm** policy (`/tg` → Config) approves them, so extensions that guard shell commands still see them. The final output is sent back once the command finishes, with `exit N` when it fails.
 
 ### 📨 Message Delivery (TUI Parity)
 Messages sent from Telegram behave **exactly like typing in the pi terminal**:
 
-- **Main thread running** — the message steers into the main turn, like typing while the agent works.
+- **Main thread running** — by default the message steers into the main turn, like typing while the agent works. Set **Message mode** to `queue` (`/tg` → Config) to send it as a follow-up after the turn ends instead.
 - **Background workflow running** (main loop idle) — the message is held (`⏳ π is busy — holding your message…`) and delivered as a **fresh main-thread turn** with a plain prompt once the main loop settles. It is never injected into a workflow agent's conversation.
 - **Everything idle** — the message starts a fresh main-thread turn immediately.
 
@@ -96,7 +96,7 @@ When a command or turn you started from Telegram makes the host ask something, t
 | pi built-in pickers: models, scoped models, sessions (`/resume`), session tree (`/tree`), fork/clone messages, settings (with search and submenus), project trust, login providers | Read from the component's own fields; your choice is applied through the host's input path |
 | pi login prompts (API key, pasted codes) | Always treated as secrets: your reply is deleted from the chat right after it is used and never echoed back. Remembered secrets are masked as `***` in everything the plugin sends afterwards; see [docs/compatibility.md](docs/compatibility.md#secrets) for the limits |
 | OMP built-in pickers and settings (`/model` including the role assignment step, `/settings`, `/login`, `/agents`, …) | Read from the components' semantic description and answered with structured events |
-| [`@capyup/pi-goal`](https://www.npmjs.com/package/@capyup/pi-goal) `custom()` dialogs (draft confirmation, `goal_question`, `goal_questionnaire`) | A dedicated adapter turns them into option buttons, a typed-answer path and Submit/Cancel |
+| OMP text panels and reports (`/session`, `/changelog`, `/hotkeys`, `/jobs`, `/usage`, `/mcp`, …) | Read from the components' semantic description and shown as text with the panel's own buttons |
 | Anything the plugin cannot model | A plain notice — "the terminal shows a dialog Telegram cannot handle, please answer it there" — with a single Cancel button. The plugin never guesses keystrokes or mirrors screen text |
 
 A new command from the same chat while one of its dialogs is open closes that dialog first; `/stop` cancels it.

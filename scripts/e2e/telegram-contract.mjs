@@ -61,8 +61,13 @@ function validateHtml(text) {
           if (open !== tag) problems.push(`</${tag}> closes <${open}>`);
         }
       } else if (!VOID_TAGS.has(tag)) {
-        if (stack.length > 0 && (stack[stack.length - 1] === "pre" || stack[stack.length - 1] === "code")) {
-          problems.push(`<${tag}> nested inside <${stack[stack.length - 1]}>`);
+        // Telegram allows exactly one nesting inside <pre>: a <code> element as
+        // its direct child (optionally with a language-* class). Everything
+        // else nested inside <pre> or <code> is rejected.
+        const parent = stack[stack.length - 1];
+        const codeInPre = tag === "code" && parent === "pre";
+        if (!codeInPre && (parent === "pre" || parent === "code")) {
+          problems.push(`<${tag}> nested inside <${parent}>`);
         }
         if (rest.trim()) {
           const allowed =

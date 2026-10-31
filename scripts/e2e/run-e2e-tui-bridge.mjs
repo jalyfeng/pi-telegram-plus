@@ -7,7 +7,7 @@
  * provider. Each run proves:
  *
  *   1. BotMenu includes commands discovered from the live host catalog.
- *   2. A local TUI command is mirrored to Telegram without opening a selector.
+ *   2. A local TUI command is not mirrored to Telegram (it stays in the terminal).
  *   3. Telegram `/settings` opens the real dialog brokered by the plugin:
  *      `tgplus:dlg:` semantic rows (the screen-mirror keyboard was removed in D2).
  *   4. Rows/keys/cancel reach the real host input path and mirror their
@@ -335,18 +335,25 @@ async function runHost(host, piCli, label) {
     record("BotMenu merges the host command catalog", false, String(error.message).slice(0, 400));
   }
 
-  // ── Local TUI → Telegram mirror ────────────────────────────────────────
+  // ── Local TUI command is not mirrored to Telegram ──────────────────────
+  // A command typed in the local terminal stays local: nothing about it may
+  // reach the chat (the old local-command mirror was removed on purpose).
   try {
     await sleep(800);
+    const sinceLocal = (await controlGet("/_control/log")).calls.length;
     const typed = tmux("send-keys", "-t", session, "-l", "!true");
     if (typed.status !== 0) throw new Error(typed.stderr || "send-keys failed");
     tmux("send-keys", "-t", session, "Enter");
-    await waitFor("local command mirrored to Telegram", (state) => messages(state)
-      .some((call) => String(call.body?.text ?? "").includes("TUI command")
-        && String(call.body?.text ?? "").includes("!true")));
-    record("local TUI command is mirrored to Telegram", true);
+    await sleep(4000);
+    const leaked = messages({ calls: (await controlGet("/_control/log")).calls.slice(sinceLocal) })
+      .filter((call) => String(call.body?.text ?? "").includes("!true")
+        || String(call.body?.text ?? "").includes("TUI command"));
+    if (leaked.length > 0) {
+      throw new Error(`local command leaked to Telegram: ${leaked.map((call) => String(call.body?.text ?? "").slice(0, 120)).join(" | ")}`);
+    }
+    record("local TUI command is not mirrored to Telegram", true, "nothing sent within 4 s");
   } catch (error) {
-    record("local TUI command is mirrored to Telegram", false, String(error.message).slice(0, 400));
+    record("local TUI command is not mirrored to Telegram", false, String(error.message).slice(0, 400));
   }
 
   // ── Telegram /settings → interactive TUI selector ──────────────────────
@@ -467,15 +474,16 @@ async function runHost(host, piCli, label) {
   // ── Telegram !bash ─────────────────────────────────────────────────────
   try {
     await injectMessage("!printf PTP_BASH_OK", 7210);
-    // D3b: the host runs the command; the receipt is the bash component's
-    // finished frame - command line plus a separate output line. The output
-    // must survive removing the command line, and a "Running…" streaming
-    // frame never counts as done.
+    // X-1: the command message is the ack header (`▶️ !printf PTP_BASH_OK`)
+    // plus the body the host's structured output produced. The body must hold
+    // the output itself; the header is dropped before checking. A "Running…"
+    // streaming frame never counts as done.
     await waitFor("!bash receipt shows the output", (state) => messages(state)
       .some((call) => {
         const text = String(call.body?.text ?? "");
-        if (!text.includes("$ printf PTP_BASH_OK") || /Running…|Running\.\.\./.test(text)) return false;
-        return text.split("\n").filter((line) => !line.includes("$ printf PTP_BASH_OK")).join("\n").includes("PTP_BASH_OK");
+        if (/Running…|Running\.\.\./.test(text)) return false;
+        const body = text.split("\n").filter((line) => !line.includes("▶️ !printf PTP_BASH_OK")).join("\n");
+        return body.includes("PTP_BASH_OK");
       }));
     record("Telegram !bash runs and reports exit 0", true);
   } catch (error) {
@@ -484,13 +492,10 @@ async function runHost(host, piCli, label) {
 
   try {
     await injectMessage("!!false", 7211);
-    // The host frame marks a failed command as `(exit 1)`; the removed
-    // plugin format said `exit: 1` - either spelling counts.
+    // X-1: a failed command's message carries the status line `exit 1`
+    // (the host's exit code, read from setComplete's arguments).
     await waitFor("!!bash reports nonzero exit", (state) => messages(state)
-      .some((call) => {
-        const text = String(call.body?.text ?? "");
-        return text.includes("$ false") && /\(exit 1\)|exit: 1/.test(text);
-      }));
+      .some((call) => String(call.body?.text ?? "").includes("exit 1")));
     record("Telegram !!bash reports exit 1", true);
   } catch (error) {
     record("Telegram !!bash reports exit 1", false, String(error.message).slice(0, 400));

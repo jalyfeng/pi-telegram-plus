@@ -12,13 +12,17 @@
  * - local input marking: the editor's own `handleInput` is wrapped once so a
  *   keystroke in the terminal is distinguishable from anything the plugin does.
  */
-import { onHostState, hookMethod, isHostObject, type HostState } from "./host.ts";
+import { onHostState, hookMethod, hookOwnedMethod, isHostObject, type HostState } from "./host.ts";
+import { removeOwnerHooks } from "./hooks.ts";
 import { hookEntryMethods, insideEntryCall, PI_ENTRY_SPECS, UI_CONTEXT_SPECS, OMP_ENTRY_SPECS, type EntrySink } from "./entry.ts";
 import { installRace, takePendingRace } from "./race.ts";
-import { isEditorShape, isFilteredList, isInputShape, isReadOnlyPanel, isSelectList, isSettingsList } from "./find-shape.ts";
+import { findShape, isControlShape, isEditorShape, isFilteredList, isInputShape, isReadOnlyPanel, isSelectList, isSettingsList } from "./find-shape.ts";
 import { describesDialog, describesLoginSheet } from "./adapters/tsp.ts";
+import { isDescribedPanel } from "./adapters/panel.ts";
 import type { EntryInfo } from "./model.ts";
 import { log } from "../logger.ts";
+import { currentCommandScope } from "./command-context.ts";
+import type { CommandScope } from "./origin.ts";
 
 const focusLog = log.child("tui-focus");
 
@@ -31,6 +35,9 @@ export type FocusInfo = {
   root?: Record<string, unknown>;
   /** How the value was obtained; useful in logs and tests. */
   source: "event" | "getter" | "field" | "none";
+  /** The command whose call chain made the host focus this component, when the focus
+   * came from the host's own `setFocus` call inside that chain (§4.3 rule 1). */
+  commandScope?: CommandScope;
 };
 
 type FocusListener = (info: FocusInfo) => void;
@@ -100,9 +107,11 @@ export class FocusTracker {
   private readonly localInput = new Map<object, number>();
   private verifyTarget?: Record<string, unknown>;
   private verifyCount = 0;
+  /** The host objects the entry hooks were last installed on (H-3, §0.2 #19). A tick
+   *  re-installs only when one of them has changed identity. */
+  private hookedTargets?: { ui: unknown; toolUi: unknown; mode: unknown };
   private timer?: NodeJS.Timeout;
   private unsubscribe?: () => void;
-  private readonly tagged = new WeakSet<object>();
 
   start(): void {
     if (this.unsubscribe) return;
@@ -117,13 +126,38 @@ export class FocusTracker {
     clearInterval(this.timer);
     this.timer = undefined;
     this.cancelGrace();
+    removeOwnerHooks(this);
+    this.hookedTargets = undefined;
   }
 
   current(): FocusInfo {
     return this.info;
   }
 
+  /**
+   * One live read of the focused object, compared with the recorded focus (§4.1.3). The Broker
+   * calls this before it judges a Telegram tap and right after the host call that tap made: a
+   * selector hands focus to the next list inside its own Enter, and the two-sample tick would
+   * still report the old dialog for seconds. A mismatch is a focus change now.
+   */
+  validate(): void {
+    const ui = this.lastState?.ui;
+    if (!ui) return;
+    const read = this.readCurrent(ui);
+    if (!read || read === this.info.component) return;
+    this.verifyTarget = undefined;
+    this.verifyCount = 0;
+    this.update(read, "getter");
+  }
+
+  /**
+   * Whether the editor has the keys. Asked by the command scope's idle end, which runs on a
+   * 250 ms tick, while a dialog the host opens without a `setFocus` event is only learned by
+   * the two-sample verify (up to about 2 s). The live focus is read first, so an idle end
+   * never closes a scope under a dialog the host already focused.
+   */
   isEditor(): boolean {
+    this.validate();
     return this.info.kind === "editor" || this.info.kind === "unknown";
   }
 
@@ -259,21 +293,7 @@ export class FocusTracker {
   }
 
   private watchEditor(component: Record<string, unknown>): void {
-    if (this.tagged.has(component)) return;
-    const original = component.handleInput;
-    if (typeof original !== "function") return;
-    this.tagged.add(component);
-    const tracker = this;
-    const wrapped = function patchedHandleInput(this: unknown, ...args: unknown[]): unknown {
-      // The plugin never calls the editor's handleInput, so this is local.
-      tracker.markLocalInput(component);
-      return (original as (...inputArgs: unknown[]) => unknown).apply(this, args);
-    };
-    try {
-      component.handleInput = wrapped;
-    } catch {
-      // Read-only host object; draft protection degrades to "keep".
-    }
+    hookMethod(component, "handleInput", "focus-local-input", () => this.markLocalInput(component), undefined, this);
   }
 
   // --- observation -----------------------------------------------------------
@@ -295,16 +315,18 @@ export class FocusTracker {
     const alreadyAttached = this.attached.has(ui);
     if (!alreadyAttached) {
       this.attached.add(ui);
+      // `ui` may be pi's reference proxy: the hooks go on the prototype that
+      // owns each method, and receive the real TUI as `self`.
       for (const name of ["setFocus", "setFocusInternal"]) {
-        hookMethod(ui, name, "focus-tracker", (args) => {
+        hookOwnedMethod(ui, name, "focus-tracker", (args) => {
           const component = unwrapFocus(args[0]);
-          if (component) this.update(component, "event");
+          if (component) this.update(component, "event", currentCommandScope());
         }, undefined, this);
       }
       // Overlay swaps that never reach `setFocus` are caught by the tick.
       for (const name of ["showOverlay", "hideOverlay"]) {
-        hookMethod(ui, name, "focus-tracker-overlay", undefined, () => {
-          const current = this.readCurrent(ui);
+        hookOwnedMethod(ui, name, "focus-tracker-overlay", undefined, (_args, _result, self) => {
+          const current = isHostObject(self) ? this.readCurrent(self) : undefined;
           if (current) this.update(current, "getter");
         }, this);
       }
@@ -313,17 +335,23 @@ export class FocusTracker {
 
   /** Install the entry-method hooks for this host (§4.1.2). */
   private attachEntryHooks(state: HostState): void {
+    const ui = state.ui;
+    const runner = (state.session as Record<string, unknown> | undefined)?.extensionRunner as
+      | { getUIContext?: () => unknown }
+      | undefined;
+    const toolUi = this.readUiContext(runner);
+    const mode = state.mode;
+    // H-3: the tick only compares host object identities. Unchanged objects mean
+    // every hook below is already installed on them, so there is nothing to do.
+    const hooked = this.hookedTargets;
+    if (hooked && hooked.ui === ui && hooked.toolUi === toolUi && hooked.mode === mode) return;
+    this.hookedTargets = { ui, toolUi, mode };
     const sink: EntrySink = {
       push: (info, nested) => this.pushEntry(info, nested),
       pop: (token) => this.popEntry(token),
       bind: (component, info) => this.bindEntry(component, info),
     };
-    const ui = state.ui;
     if (ui) hookEntryMethods(ui, UI_CONTEXT_SPECS, sink, state.host === "omp" ? "omp" : "pi", this);
-    const runner = (state.session as Record<string, unknown> | undefined)?.extensionRunner as
-      | { getUIContext?: () => unknown }
-      | undefined;
-    const toolUi = this.readUiContext(runner);
     if (toolUi && toolUi !== ui) hookEntryMethods(toolUi, UI_CONTEXT_SPECS, sink, state.host === "omp" ? "omp" : "pi", this);
     // The race wrapper goes on outside the entry wrapper: it registers its
     // handle before that wrapper pushes, so the entry above can take it (§4.12).
@@ -408,6 +436,12 @@ export class FocusTracker {
   private verify(): void {
     const ui = this.lastState?.ui;
     if (!ui) return;
+    // A progress panel can gain its input after it was classified (pi's login sheet mounts the key
+    // prompt after the sign-in step): re-classify the same object each tick and report the change.
+    const held = this.info.component;
+    if (this.info.kind === "progress" && held && this.classify(held) === "dialog") {
+      this.update(held, "getter");
+    }
     // The runner's UI context is a moving target: a Telegram swap can be what is
     // installed when the hooks first run. Re-check every tick that the host context
     // underneath it is hooked - `hookEntryMethods` skips what it already wrapped.
@@ -433,7 +467,7 @@ export class FocusTracker {
 
   private lastState?: HostState;
 
-  private update(component: Record<string, unknown>, source: FocusInfo["source"]): void {
+  private update(component: Record<string, unknown>, source: FocusInfo["source"], commandScope?: CommandScope): void {
     const previous = this.info;
     // A read-only dashboard returns from its entry call before it takes focus (OMP
     // `showAgentsDashboard`): the next non-editor component to take focus within a
@@ -447,6 +481,16 @@ export class FocusTracker {
       }
     }
 
+    // A described OMP text panel that a command's own call chain focused (`/session`, a long
+    // `/changelog`) is that command's question: it takes the keys, so it is recorded as a panel
+    // entry and classifies as a dialog. The described-panel adapter then draws its text and
+    // buttons on the command message. A spinner (a signal) or a picker never qualifies.
+    if (commandScope && this.lastState?.host === "omp" && !this.entryByComponent.has(component)
+      && !this.isEditorComponent(component) && isDescribedPanel(component)
+      && component.signal === undefined && component.abortController === undefined) {
+      this.entryByComponent.set(component, { kind: "panel", source: "omp", method: "command-panel" });
+    }
+
     const kind = this.classify(component);
     if (previous.kind === kind && previous.component === component) return;
     // A host that redraws an open dialog can drop focus to the editor for one
@@ -455,7 +499,7 @@ export class FocusTracker {
     // confirmed over a short window instead (§4.1.3).
     if (this.closeGrace?.component === component) this.cancelGrace();
     const root = this.findRoot(component);
-    this.info = { kind, component, root, source };
+    this.info = { kind, component, root, source, commandScope };
     focusLog.debug("focus changed", { kind, source, ctor: ctorName(component) });
     for (const listener of this.listeners) {
       try { listener(this.info); } catch (err) { focusLog.debug("focus listener failed", { err }); }
@@ -546,7 +590,12 @@ export class FocusTracker {
     // that has no input) is a dialog the TSP adapters can drive (§4.11.3). OMP only: pi has
     // no `describe`, and its loaders keep matching below.
     if (this.lastState?.host === "omp" && (describesDialog(component) || describesLoginSheet(component))) return "dialog";
-    if (name.endsWith("Loader") || component.signal !== undefined || component.abortController !== undefined) {
+    // A loader is progress. A component that carries a signal but still holds a live list or input
+    // field is a prompt the user answers (pi's login sheet): the plan's progress rule is "no list or
+    // input field at all" (§4.1.3), so only the field-less case is progress.
+    const carriesSignal = component.signal !== undefined || component.abortController !== undefined;
+    const holdsControl = findShape(component, isControlShape, 2) !== undefined;
+    if (name.endsWith("Loader") || (carriesSignal && !holdsControl)) {
       return "progress";
     }
     // The host asked the user something and this component receives the keys, so it is a
@@ -559,6 +608,8 @@ export class FocusTracker {
     if (DIALOG_NAME.test(name)) return "dialog";
     if (typeof component.options === "string" || Array.isArray(component.options)) return "dialog";
     if (typeof component.selectedIndex === "number") return "dialog";
+    // A list or input somewhere inside: the user answers it, so it is a dialog.
+    if (holdsControl) return "dialog";
     // Keys but no list, no input: a status/progress widget, not a dialog.
     return "progress";
   }

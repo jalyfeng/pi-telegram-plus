@@ -57,6 +57,8 @@ function fakeFocus(entry?: EntryInfo) {
   const listeners = new Set<(info: FocusInfo) => void>();
   const editor = { getText: () => "", setText: () => undefined, handleInput: () => undefined };
   let info: FocusInfo = { kind: "editor", component: editor, source: "field" };
+  // Where the host's focus really is; `info` is what the tracker has reported so far.
+  let live: object = editor;
   const emit = (next: FocusInfo) => {
     info = next;
     for (const listener of [...listeners]) listener(info);
@@ -64,6 +66,15 @@ function fakeFocus(entry?: EntryInfo) {
   return {
     current: () => info,
     entryFor: () => entry,
+    /** A live read the tracker runs when it validates (§4.1.3); a difference is a focus change. */
+    validate() {
+      if (live === info.component) return;
+      emit({ kind: live === editor ? "editor" : "dialog", component: live as Record<string, unknown>, source: "getter" });
+    },
+    /** The host moves focus without an event the tracker can see yet. */
+    handOverSilently(component: Record<string, unknown>) {
+      live = component;
+    },
     onChange: (listener: (info: FocusInfo) => void) => {
       listeners.add(listener);
       return () => {
@@ -71,9 +82,11 @@ function fakeFocus(entry?: EntryInfo) {
       };
     },
     openDialog(component: Record<string, unknown>) {
+      live = component;
       emit({ kind: "dialog", component, source: "event" });
     },
     closeToEditor() {
+      live = editor;
       emit({ kind: "editor", component: editor, source: "event" });
     },
     emitProgress(component: Record<string, unknown>) {
@@ -198,7 +211,7 @@ describe("dialog broker", () => {
       turns: [turn(42)],
       entry: { kind: "panel", source: "omp", title: "Status" },
     });
-    const component: Record<string, unknown> = { render: () => "session report text" };
+    const component: Record<string, unknown> = { children: [{ text: "session report text" }] };
     focus.openDialog(component);
     await settle();
 
@@ -206,6 +219,52 @@ describe("dialog broker", () => {
     expect(transport.sent[0]?.text).toContain("session report text");
     const buttons = transport.sent[0]!.rows.flat() as Array<{ text: string }>;
     expect(buttons.map((button) => button.text)).toEqual(["Close"]);
+  });
+
+  it("follows the dialog a tap opened inside the host call instead of redrawing the closed one", async () => {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    const keysNext: string[] = [];
+    const next: Record<string, unknown> = {
+      options: ["x", "y"],
+      selectedIndex: 0,
+      handleInput: (input: string) => {
+        keysNext.push(input);
+      },
+    };
+    const keysFirst: string[] = [];
+    // Shaped like pi's login selector: Enter answers, then the host shows the next list.
+    const first: Record<string, unknown> = {
+      options: ["alpha", "beta", "gamma"],
+      selectedIndex: 0,
+      handleInput: (input: string) => {
+        keysFirst.push(input);
+        if (input === "\r") focus.handOverSilently(next);
+      },
+    };
+    focus.openDialog(first);
+    await settle();
+
+    const session = broker.current();
+    const arg = [...(session?.keyMap.get(0) ?? [])].find(([, key]) => key === "1:beta")?.[0];
+    expect(arg).toBeDefined();
+    broker.handleCallback(42, undefined, { sessionId: session?.id ?? "", generation: 0, op: "c", arg });
+    await settle();
+
+    expect(keysFirst).toEqual(["\x1b[B", "\r"]);
+    expect(broker.current()?.focus).toBe(next);
+    const shown = transport.sent.at(-1);
+    expect(shown?.text).toContain("x");
+    expect(JSON.stringify(shown?.rows)).toContain("y");
+    expect(JSON.stringify(shown?.rows)).not.toContain("gamma");
+
+    // The next tap is for the list on screen: it reaches that list, not the closed one.
+    const nextSession = broker.current();
+    const yArg = [...(nextSession?.keyMap.get(0) ?? [])].find(([, key]) => key === "1:y")?.[0];
+    expect(yArg).toBeDefined();
+    broker.handleCallback(42, undefined, { sessionId: nextSession?.id ?? "", generation: 0, op: "c", arg: yArg });
+    await settle();
+    expect(keysNext).toEqual(["\x1b[B", "\r"]);
+    expect(keysFirst).toHaveLength(2);
   });
 
   it("walks the host key path on a row tap and retires the message", async () => {
@@ -473,6 +532,29 @@ describe("dialog broker", () => {
     // A late tap on the dead keyboard must not reach the host.
     const result = broker.handleCallback(42, undefined, { sessionId: "gone", generation: 0, op: "c", arg: "0.1" });
     expect(result).toEqual({ handled: true, toast: "Answered in the terminal", clear: true });
+  });
+
+  it("attributes a Telegram Cancel to Telegram when the host closes the dialog after the tap", async () => {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    const keys: string[] = [];
+    const component: Record<string, unknown> = {
+      render: () => "weird frame",
+      handleInput: (input: string) => {
+        keys.push(input);
+        // The host handles Esc later, so the close is observed after the tap has returned.
+        if (input === "\x1b") queueMicrotask(() => focus.closeToEditor());
+      },
+    };
+    focus.openDialog(component);
+    await settle();
+
+    const session = broker.current();
+    broker.handleCallback(42, undefined, { sessionId: session?.id ?? "", generation: 0, op: "x" });
+    await settle();
+
+    expect(keys).toEqual(["\x1b"]);
+    expect(transport.edits.at(-1)?.text).toContain("✖ Cancelled");
+    expect(transport.edits.at(-1)?.text).not.toContain("Answered in the terminal");
   });
 
   it("mirrors a dialog onto the chat whose command scope is running", async () => {

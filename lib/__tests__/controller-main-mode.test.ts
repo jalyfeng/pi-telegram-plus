@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTelegramController } from "../controller.ts";
 import type * as tuiBridgeModule from "../tui-bridge.ts";
+import type { TelegramConfig } from "../types.ts";
 
 // v6: the host bridge is the only path for host commands - run these with the bridge up.
 vi.mock("../tui-bridge.ts", async (importOriginal) => {
@@ -51,9 +52,10 @@ function createSession(streamingRef: { value: boolean }, idleRef: { value: boole
   return session;
 }
 
-function createController(session: any, sent: Array<{ text: string }>) {
+function createController(session: any, sent: Array<{ text: string }>, config: TelegramConfig = {}) {
   return createTelegramController({
     getSession: () => session,
+    getConfig: () => config,
     transport: {
       removeInlineKeyboard: vi.fn(async () => undefined),
       sendText: vi.fn(async (_chatId: number, text: string) => {
@@ -94,6 +96,161 @@ async function sendMessage(controller: ReturnType<typeof createTelegramControlle
     text,
   });
 }
+
+describe("messageMode while the main loop is busy", () => {
+  it("queues a follow-up when messageMode is queue", async () => {
+    const streamingRef = { value: true };
+    const idleRef = { value: false };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent, { messageMode: "queue" });
+
+    await sendMessage(controller, "queued follow-up");
+    await waitFor(() => prompts.length === 1);
+
+    expect(prompts[0].opts?.streamingBehavior).toBe("followUp");
+    expect(prompts[0].text).toBe("queued follow-up");
+  });
+
+  it("steers when messageMode is steer set explicitly", async () => {
+    const streamingRef = { value: true };
+    const idleRef = { value: false };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent, { messageMode: "steer" });
+
+    await sendMessage(controller, "explicit steer");
+    await waitFor(() => prompts.length === 1);
+
+    expect(prompts[0].opts?.streamingBehavior).toBe("steer");
+  });
+
+  it("reads messageMode per message, so a switch applies to the next message", async () => {
+    const streamingRef = { value: true };
+    const idleRef = { value: false };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const config: TelegramConfig = { messageMode: "steer" };
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent, config);
+
+    await sendMessage(controller, "first in steer", 1);
+    await waitFor(() => prompts.length === 1);
+    expect(prompts[0].opts?.streamingBehavior).toBe("steer");
+
+    config.messageMode = "queue";
+    await sendMessage(controller, "second in queue", 2);
+    await waitFor(() => prompts.length === 2);
+    expect(prompts[1].opts?.streamingBehavior).toBe("followUp");
+  });
+
+  it("sends no streamingBehavior when the main loop is idle, in either mode", async () => {
+    for (const messageMode of ["queue", "steer"] as const) {
+      const streamingRef = { value: false };
+      const idleRef = { value: true };
+      const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+      const sent: Array<{ text: string }> = [];
+      const controller = createController(createSession(streamingRef, idleRef, prompts), sent, { messageMode });
+
+      await sendMessage(controller, `idle ${messageMode}`);
+      await waitFor(() => prompts.length === 1);
+
+      expect(prompts[0].opts).toEqual({ source: "interactive" });
+    }
+  });
+});
+
+// A session whose first prompt starts a turn that only ends when the test calls
+// endTurn(), like both hosts: prompt() resolves when the whole turn ends.
+function createTurnSession(streamingRef: { value: boolean }, idleRef: { value: boolean }, prompts: Array<{ text: string; opts?: Record<string, unknown> }>) {
+  const session = createSession(streamingRef, idleRef, prompts);
+  let endTurnFn: () => void = () => undefined;
+  let started = false;
+  session.prompt = vi.fn((text: string, promptOpts?: Record<string, unknown>) => {
+    prompts.push({ text, opts: promptOpts });
+    if (started) return Promise.resolve();
+    started = true;
+    streamingRef.value = true;
+    idleRef.value = false;
+    return new Promise<void>((resolve) => {
+      endTurnFn = () => {
+        streamingRef.value = false;
+        idleRef.value = true;
+        resolve();
+      };
+    });
+  });
+  return { session, endTurn: () => endTurnFn() };
+}
+
+describe("Telegram message sent during a Telegram-started turn", () => {
+  for (const [messageMode, expected] of [["steer", "steer"], ["queue", "followUp"]] as const) {
+    it(`a second Telegram message steers into the turn the first one started (${messageMode})`, async () => {
+      const streamingRef = { value: false };
+      const idleRef = { value: true };
+      const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+      const sent: Array<{ text: string }> = [];
+      const { session, endTurn } = createTurnSession(streamingRef, idleRef, prompts);
+      const controller = createController(session, sent, { messageMode });
+
+      try {
+        await sendMessage(controller, "first starts turn", 1);
+        await waitFor(() => prompts.length === 1);
+        await sendMessage(controller, "second during turn", 2);
+        // Must reach the host while the first turn is still running (Esc not pressed).
+        await waitFor(() => prompts.length === 2, 1000);
+      } finally {
+        endTurn();
+      }
+
+      expect(prompts[1].opts?.streamingBehavior).toBe(expected);
+      expect(prompts[1].text).toBe("second during turn");
+    });
+  }
+});
+
+describe("prompt rejection keeps message order", () => {
+  it("a rejected first prompt keeps the next message behind its retry", async () => {
+    const streamingRef = { value: false };
+    const idleRef = { value: true };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const session = createSession(streamingRef, idleRef, prompts);
+    let calls = 0;
+    let endTurnFn: () => void = () => undefined;
+    session.prompt = vi.fn((text: string, promptOpts?: Record<string, unknown>) => {
+      prompts.push({ text, opts: promptOpts });
+      calls += 1;
+      if (calls === 1) return Promise.reject(new Error("Agent is already processing"));
+      if (calls === 2) {
+        // The retry starts the turn; it ends only when the test says so.
+        streamingRef.value = true;
+        idleRef.value = false;
+        return new Promise<void>((resolve) => {
+          endTurnFn = () => {
+            streamingRef.value = false;
+            idleRef.value = true;
+            resolve();
+          };
+        });
+      }
+      return Promise.resolve();
+    });
+    const controller = createController(session, sent, { messageMode: "steer" });
+
+    try {
+      await sendMessage(controller, "first", 1);
+      await waitFor(() => prompts.length === 1);
+      // Send the second message before the first retry (about 120 ms later).
+      await sendMessage(controller, "second", 2);
+      await waitFor(() => prompts.length === 3, 3000);
+    } finally {
+      endTurnFn();
+    }
+
+    expect(prompts.map((item) => item.text)).toEqual(["first", "first", "second"]);
+    expect(prompts[2].opts?.streamingBehavior).toBe("steer");
+  });
+});
 
 describe("TUI-parity message delivery", () => {
   it("steers into the main turn while the main loop is busy (like typing in the TUI)", async () => {

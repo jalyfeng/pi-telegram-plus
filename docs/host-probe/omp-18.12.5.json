@@ -10,9 +10,9 @@
     "bun",
     "/$bunfs/root/omp-darwin-arm64",
     "-e",
-    "/Users/jaly/Documents/project/research/pi-telegram-plus/index.ts",
+    "index.ts",
     "-e",
-    "/Users/jaly/Documents/project/research/pi-telegram-plus/scripts/e2e/probe-extension.ts",
+    "scripts/e2e/probe-extension.ts",
     "--model",
     "mock/mock-model",
     "--no-extensions",
@@ -21716,15 +21716,15 @@
         }
       ],
       "field": "mode.editor",
-      "note": "mode.editor 在捕获时 onSubmit 还是 undefined, 初始化后才赋值; 实例 hook 必须由每秒 tick 安装 (已在探测中记录 editor-submit 事件)。OMP 没有 defaultEditor。"
+      "note": "mode.editor still has onSubmit undefined at capture time and gets it only after initialization; the instance hook must be installed by the per-second tick (an editor-submit event was recorded during probing). OMP has no defaultEditor."
     },
     "focusRead": {
-      "omp": "ui.getFocused() 存在并返回当前焦点 (编辑器或对话框)。",
+      "omp": "ui.getFocused() exists and returns the current focus (editor or dialog).",
       "focusedComponent": {
         "type": "absent"
       },
       "overlayWrapper": false,
-      "note": "OMP 的 setFocus 直接收到组件, 未观察到 {component, overlayFocusRestore} 包装。"
+      "note": "OMP's setFocus receives the component directly; no {component, overlayFocusRestore} wrapper was observed."
     },
     "dialogFrames": [
       {
@@ -22434,7 +22434,7 @@
         "advisorCostRestore",
         "extensionRunner"
       ],
-      "note": "OMP 18.12.5 没有 mode.pendingUserInputs; session 有 isStreaming/isCompacting accessor。quietSince 用这两个 accessor + onInputCallback, 读不到时退回 60 秒上限。"
+      "note": "OMP 18.12.5 has no mode.pendingUserInputs; session has isStreaming/isCompacting accessors. quietSince uses these two accessors + onInputCallback, and falls back to a 60-second cap when they cannot be read."
     },
     "entryMethods": [
       "showNewVersionNotification",

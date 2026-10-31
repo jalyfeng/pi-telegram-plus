@@ -17,16 +17,18 @@ import type { TelegramUiRuntime } from "./telegram-ui.ts";
 import type { TuiBridgeAdapter } from "./tui-bridge.ts";
 import { tuiBridge as defaultTuiBridge, hostOwnsPrompts } from "./tui-bridge.ts";
 import { escapeHtml } from "./html.ts";
+import { richMessageToPlainText } from "./rich-text-plain.ts";
 import { recordCommandUsage } from "./command-usage.ts";
 import { getTelegramMenuOverflow } from "./menu-commands.ts";
 import { log } from "./logger.ts";
 import { commandErrorMessage, getRunnerMode, restoreRunnerUiContext, setRunnerUiContext, TELEGRAM_EXTENSION_MODE } from "./pi-compat.ts";
 import { isOmpHost } from "./session-capture.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "./turn-context.ts";
-import { OriginTracker } from "./tui/origin.ts";
+import { OriginTracker, type CommandScope } from "./tui/origin.ts";
 import { FocusTracker } from "./tui/focus.ts";
 import { OutputCapture } from "./tui/output.ts";
 import { CommandGateway } from "./tui/gateway.ts";
+import { runInCommand } from "./tui/command-context.ts";
 import { DialogBroker } from "./tui/broker.ts";
 import { SecretStore } from "./tui/secrets.ts";
 import { readEditorText as readHostEditorText, writeEditorText as writeHostEditorText } from "./tui/host.ts";
@@ -140,13 +142,15 @@ function buildTelegramQuotedMessageBlock(message: TelegramMessage | undefined): 
   const sender = formatTelegramSender(message.from);
   if (sender) lines.push(`from: ${sender}`);
   const text = message.text ?? message.caption;
-  if (text?.trim()) {
-    lines.push(message.caption !== undefined ? "caption:" : "text:");
-    lines.push(truncateQuotedText(text.trim()));
+  const hasPlainText = !!text?.trim();
+  const body = hasPlainText ? text!.trim() : richMessageToPlainText(message.rich_message);
+  if (body) {
+    lines.push(hasPlainText && message.caption !== undefined ? "caption:" : "text:");
+    lines.push(truncateQuotedText(body));
   }
   const media = buildTelegramIncomingMediaSummary(message, "[telegram quoted attachment]");
   if (media) lines.push(media);
-  if (lines.length === 2) lines.push("content: unavailable from Telegram update");
+  if (!body && !media) lines.push("content: unavailable from Telegram update");
   return lines.join("\n");
 }
 
@@ -646,8 +650,6 @@ async function holdThroughEnqueuedTurns(ctx: unknown, wasIdle: boolean): Promise
   }
 }
 
-const TUI_SCREEN_WIDTH = 100;
-
 // Host-control and terminal-only mappings (§9 decisions 21/22, §4.8): these run the
 // plugin's native handler instead of submitting to the host editor - editor
 // submission reloads the extension runtime outside pi's withSession sequencing.
@@ -698,54 +700,6 @@ function isBashRunning(session: CapturedAgentSession): boolean {
 
 function isDangerousBash(command: string): boolean {
   return DANGEROUS_BASH_PATTERNS.some((pattern) => pattern.test(command));
-}
-
-function preformatted(text: string): string {
-  return `<pre>${escapeHtml(text)}</pre>`;
-}
-
-// editText/editButtons only deliver the first split chunk, so a full-screen
-// snapshot must fit in one chunk (3600 bytes). Keep the bottom of the screen:
-// dialogs, prompts, and the latest output render there.
-const TUI_SNAPSHOT_MAX_BYTES = 3000;
-
-/**
- * Fit a rendered screen into a Telegram message without losing the parts a
- * user needs to interact: the host pads dialogs to the terminal height with
- * blank rows, which used to eat the budget and push the dialog's own header
- * (instructions, OAuth URL) out of the mirror. Collapse that padding first,
- * then keep both ends when the rest still overflows.
- */
-export function clipScreen(text: string, maxBytes: number): string {
-  const collapsed: string[] = [];
-  for (const line of text.split("\n")) {
-    if (line.trim() === "" && collapsed.length > 0 && collapsed[collapsed.length - 1].trim() === "") continue;
-    collapsed.push(line);
-  }
-  while (collapsed.length > 0 && collapsed[collapsed.length - 1].trim() === "") collapsed.pop();
-  const trimmed = collapsed.join("\n");
-  if (Buffer.byteLength(trimmed, "utf8") <= maxBytes) return trimmed;
-  const budget = maxBytes - 4; // "\n…\n"
-  const headLimit = Math.floor(budget * 0.45);
-  const head: string[] = [];
-  let headBytes = 0;
-  let index = 0;
-  for (; index < collapsed.length; index += 1) {
-    const size = Buffer.byteLength(collapsed[index], "utf8") + 1;
-    if (head.length > 0 && headBytes + size > headLimit) break;
-    head.push(collapsed[index]);
-    headBytes += size;
-  }
-  const tail: string[] = [];
-  let tailBytes = 0;
-  for (let i = collapsed.length - 1; i > index; i -= 1) {
-    const size = Buffer.byteLength(collapsed[i], "utf8") + 1;
-    if (tail.length > 0 && tailBytes + size > budget - headBytes) break;
-    tail.push(collapsed[i]);
-    tailBytes += size;
-  }
-  tail.reverse();
-  return [...head, "…", ...tail].join("\n");
 }
 
 /** Text that must not be swallowed by a dialog: shell input and slash commands. */
@@ -853,6 +807,7 @@ export function createTelegramController(deps: {
     activeChatId: () => deps.getConfig?.().activeChatId,
     activeTurns: () => deps.getActiveTurns?.() ?? [],
     writeText: (text) => bridge.write(text),
+    settleScope: (scope) => outputCapture.settleAfterDialog(scope),
     // One switch for both (§9 decision 27): the broker may only track a host whose
     // dialogs it can actually read. A host without a usable bridge has no focus to
     // track anyway, and OMP's components render in an overlay without focus, so
@@ -860,6 +815,8 @@ export function createTelegramController(deps: {
     enabled: () => hostOwnsPrompts(bridge),
   });
   dialogBroker.start();
+  // Output too long for the command's message is paged on it by the broker.
+  outputCapture.attachPager((target, title, html) => dialogBroker.showPaged(target, title, html));
 
   /**
    * §4.2.6 item 2: while the DialogBroker is live, prompts raised by work this
@@ -958,28 +915,48 @@ export function createTelegramController(deps: {
     });
   };
 
-  const unsubscribeLocalTui = bridge.onLocalSubmit((text) => {
-    if (deps.isTelegramActive?.() === false) return;
-    const command = text.trim();
-    if (!command.startsWith("/") && !command.startsWith("!")) return;
-    if (/^\/?tg(?:-|$)/.test(command)) return;
-    const chatId = deps.getConfig?.().activeChatId;
-    if (chatId === undefined) return;
-    void (async () => {
-      await deps.transport.sendText(chatId, `<b>⌨️ TUI command</b>\n${preformatted(command)}`)
-        .catch(ctrlLog.swallow("warn", "sendText local TUI command failed", { chatId }));
-      await sleep(450);
-      const snapshot = bridge.snapshot(TUI_SCREEN_WIDTH);
-      if (!snapshot) return;
-      await deps.transport.sendText(chatId, preformatted(clipScreen(snapshot.text ?? "(empty screen)", TUI_SNAPSHOT_MAX_BYTES)))
-        .catch(ctrlLog.swallow("warn", "sendText local TUI snapshot failed", { chatId }));
-    })();
-  });
-
   // Per chat/thread prompt queues: each Telegram topic chains independently.
+  // A queue entry is the "taken" signal of its message, not the whole turn.
   const promptTails = new Map<string, Promise<void>>();
   // Increasing generation per chat/thread lets stop invalidate pending queue items.
   const interruptGenerationByTarget = new Map<string, number>();
+
+  // Resolves once the host has taken the message: the prompt settled, or the
+  // session is streaming (checked right away, then every 25 ms). Needed because
+  // session.prompt() resolves only when the whole turn ends on both hosts.
+  // A rejected prompt was not taken: it only stops polling and never resolves,
+  // so a retry in deliverToMainThread keeps the next message behind it.
+  type TakenSignal = (taken: Promise<void>) => void;
+  const whenTaken = (session: { readonly isStreaming: boolean }, promptPromise: Promise<unknown>): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let finished = false;
+      const stop = () => {
+        finished = true;
+        if (timer !== undefined) clearTimeout(timer);
+      };
+      const poll = () => {
+        if (finished) return;
+        if (session.isStreaming) {
+          stop();
+          resolve();
+          return;
+        }
+        timer = setTimeout(poll, 25);
+      };
+      promptPromise.then(() => {
+        stop();
+        resolve();
+      }, stop);
+      poll();
+    });
+  // Calls session.prompt and reports to onTaken while still returning the prompt
+  // promise, so the caller awaits the turn exactly as before.
+  const promptAndSignal = (session: CapturedAgentSession, text: string, opts: Record<string, unknown>, onTaken: TakenSignal): Promise<unknown> => {
+    const promptPromise = Promise.resolve(session.prompt(text, opts as any));
+    onTaken(whenTaken(session, promptPromise));
+    return promptPromise;
+  };
 
   const getOrCreateTail = (key: string): Promise<void> => promptTails.get(key) ?? Promise.resolve();
   const setTail = (key: string, tail: Promise<void>) => promptTails.set(key, tail);
@@ -1013,7 +990,7 @@ export function createTelegramController(deps: {
   // While background workflow agents run, session.isStreaming stays true and
   // core rejects plain prompts; steer/followUp would drain into a workflow
   // agent's turn instead (repo issue #10).
-  const deliverToMainThread = async (text: string, chatId: number, messageThreadId: number | undefined, sourceMessageId: number | undefined): Promise<void> => {
+  const deliverToMainThread = async (text: string, chatId: number, messageThreadId: number | undefined, sourceMessageId: number | undefined, onTaken: TakenSignal): Promise<void> => {
     const session = deps.getSession();
     if (!session) return;
     const ctx = session.extensionRunner.createCommandContext();
@@ -1056,13 +1033,13 @@ export function createTelegramController(deps: {
         // A main turn (e.g. a goal continuation) started while we waited —
         // behave like the terminal and steer into it instead of holding.
         if (idleFn && !idleFn.call(ctx)) {
-          await session.prompt(text, { source: "interactive", streamingBehavior: "steer" as const });
+          await promptAndSignal(session, text, { source: "interactive", streamingBehavior: busyStreamingBehavior() }, onTaken);
           return;
         }
         continue;
       }
       try {
-        await session.prompt(text, { source: "interactive" });
+        await promptAndSignal(session, text, { source: "interactive" }, onTaken);
         return;
       } catch (err) {
         // A goal continuation or workflow step may have started between our
@@ -1077,7 +1054,7 @@ export function createTelegramController(deps: {
   // Hold-and-deliver path shared by "main" and idle-"tui": wait until the
   // main loop is idle, then submit a plain prompt so the message always
   // starts a fresh main-thread turn.
-  const runMainDelivery = async (text: string, chatId: number, replaceMessageId: number | undefined, messageThreadId: number | undefined, sourceMessageId: number | undefined) => {
+  const runMainDelivery = async (text: string, chatId: number, replaceMessageId: number | undefined, messageThreadId: number | undefined, sourceMessageId: number | undefined, onTaken: TakenSignal) => {
     const turn = deps.beginTelegramTurn(chatId, replaceMessageId, messageThreadId, sourceMessageId);
     if (!turn) {
       // Target already has an active turn — reject with a busy message.
@@ -1094,14 +1071,19 @@ export function createTelegramController(deps: {
         ui: telegramUi,
         turn,
         uiMode: promptUiMode(),
-        run: () => deliverToMainThread(text, chatId, messageThreadId, sourceMessageId),
+        run: () => deliverToMainThread(text, chatId, messageThreadId, sourceMessageId, onTaken),
       }));
     } finally {
       deps.endTelegramTurn(chatId, turn);
     }
   };
 
-  const runPrompt = async (text: string, chatId: number, replaceMessageId?: number, messageThreadId?: number, sourceMessageId?: number) => {
+  // Delivery while the main loop is busy: "steer" injects into the running
+  // turn, "queue" (messageMode) sends a follow-up after it ends. Read per call
+  // so a switch in the Config menu applies to the next message.
+  const busyStreamingBehavior = (): "steer" | "followUp" => (deps.getConfig?.().messageMode ?? "steer") === "queue" ? "followUp" : "steer";
+
+  const runPrompt = async (text: string, chatId: number, replaceMessageId: number | undefined, messageThreadId: number | undefined, sourceMessageId: number | undefined, onTaken: TakenSignal) => {
     const session = deps.getSession();
     if (!session) {
       if (replaceMessageId !== undefined) await deps.transport.editText(chatId, replaceMessageId, "π session is not ready yet.");
@@ -1129,13 +1111,13 @@ export function createTelegramController(deps: {
     // turn; it is never steered or queued into a background workflow agent's
     // turn.
     if (!mainBusy) {
-      await runMainDelivery(text, chatId, replaceMessageId, messageThreadId, sourceMessageId);
+      await runMainDelivery(text, chatId, replaceMessageId, messageThreadId, sourceMessageId, onTaken);
       return;
     }
 
-    // In steer mode, reuse the existing active turn for this chat/thread.
-    // Steer messages inject into a running stream — they must not acquire a
-    // new turn (which would fail since the target is already busy).
+    // Main loop busy: reuse the existing active turn for this chat/thread, in
+    // both steer and queue mode. Messages go into the running stream and must
+    // not acquire a new turn (which would fail since the target is already busy).
     if (isSteer) {
       const existingTurn = deps.getActiveTurn(chatId, messageThreadId);
       if (!existingTurn) {
@@ -1155,8 +1137,8 @@ export function createTelegramController(deps: {
             run: async () => {
               // Goal auto-continuations can be streaming without owning an
               // active TelegramTurn. Keep the delivery behavior tied to the
-              // configured mode rather than to our renderer bookkeeping.
-              await session.prompt(text, { source: "interactive", streamingBehavior: "steer" });
+              // configured messageMode rather than to our renderer bookkeeping.
+              await promptAndSignal(session, text, { source: "interactive", streamingBehavior: busyStreamingBehavior() }, onTaken);
             },
           }));
         } finally {
@@ -1170,7 +1152,7 @@ export function createTelegramController(deps: {
         ui: telegramUi,
         turn: existingTurn,
         uiMode: promptUiMode(),
-        run: () => session.prompt(text, { source: "interactive", streamingBehavior: "steer" as const }),
+        run: () => promptAndSignal(session, text, { source: "interactive", streamingBehavior: busyStreamingBehavior() }, onTaken),
       }));
       return;
     }
@@ -1181,13 +1163,19 @@ export function createTelegramController(deps: {
     // messages are delivered to the main thread in order.
     const key = targetKey(chatId, messageThreadId);
     const generation = getInterruptGeneration(key);
-    const task = getOrCreateTail(key)
+    // The next message for this chat/thread starts once this one is taken by the
+    // host (or this one finished for any reason), not when its turn ends.
+    let markTaken: () => void = () => undefined;
+    const taken = new Promise<void>((resolve) => { markTaken = resolve; });
+    const onTaken: TakenSignal = (signal) => { void signal.then(markTaken); };
+    void getOrCreateTail(key)
       .then(() => {
         if (generation !== getInterruptGeneration(key)) return;
-        return runPrompt(text, chatId, replaceMessageId, messageThreadId, sourceMessageId);
+        return runPrompt(text, chatId, replaceMessageId, messageThreadId, sourceMessageId, onTaken);
       })
-      .catch((err) => reportPromptFailure("prompt-delivery", chatId, messageThreadId, sourceMessageId, err));
-    setTail(key, task);
+      .catch((err) => reportPromptFailure("prompt-delivery", chatId, messageThreadId, sourceMessageId, err))
+      .finally(markTaken);
+    setTail(key, taken);
   };
 
   // §4.5 rule 6: a command arriving while a dialog is still waiting is the remote user
@@ -1212,7 +1200,18 @@ export function createTelegramController(deps: {
     return "proceed";
   };
 
-  const runCommandHandler = (handler: TelegramCommandHandler, args: string, session: CapturedAgentSession, chatId: number, messageThreadId?: number, sourceMessageId?: number, label = "command") => {
+  /** Sends a command's ack message and binds the command's output to it (the gateway's ack, for extension commands). */
+  const bindCommandAck = async (scope: CommandScope, text: string, chatId: number, messageThreadId?: number, sourceMessageId?: number): Promise<void> => {
+    const ackHtml = `<b>▶️ ${escapeHtml(text)}</b>`;
+    const sent = await deps.transport.sendText(chatId, ackHtml, messageThreadId, sourceMessageId)
+      .catch(ctrlLog.swallow("debug", "sendText command ack failed", { chatId }));
+    const messageId = sent?.[0]?.message_id;
+    if (messageId === undefined) return;
+    scope.telegramMessageId = messageId;
+    outputCapture.bind(scope, { chatId, messageThreadId, messageId, ackHtml });
+  };
+
+  const runCommandHandler = (handler: TelegramCommandHandler, args: string, session: CapturedAgentSession, chatId: number, messageThreadId?: number, sourceMessageId?: number, label = "command", ackMessage = false) => {
     // Commands run immediately — they do not acquire a turn and are never
     // blocked by an active agent prompt.  Fast config / status commands
     // briefly borrow the UI context; the rendering pipeline still finds the
@@ -1266,6 +1265,9 @@ export function createTelegramController(deps: {
     // user's TUI (modals would route to Telegram, editor would no-op).
     const wasIdle = typeof (ctx as any).isIdle === "function" ? (ctx as any).isIdle.call(ctx) : false;
     const commandTurn = deps.getActiveTurn(chatId, messageThreadId) ?? { chatId, messageThreadId, sourceMessageId, queuedAttachments: [] };
+    // An extension command with a scope gets one message of its own, its ack, as the gateway
+    // gives host commands: its notices and dialogs land there (one command, one message).
+    const ackSent = ackMessage && scope ? bindCommandAck(scope, `/${label}${args ? ` ${args}` : ""}`, chatId, messageThreadId, sourceMessageId) : undefined;
     void runWithTelegramTurn(commandTurn, () => runWithTelegramUi({
       session,
       ui: telegramUi,
@@ -1279,7 +1281,8 @@ export function createTelegramController(deps: {
       uiMode: promptUiMode(),
       run: async () => {
         try {
-          await handler(args, commandCtx);
+          await ackSent;
+          await (ackSent && scope ? runInCommand(scope, () => handler(args, commandCtx)) : handler(args, commandCtx));
           await holdThroughEnqueuedTurns(ctx, wasIdle);
         } finally {
           // The scope deliberately outlives the handler: a dialog answered a
@@ -1417,7 +1420,7 @@ export function createTelegramController(deps: {
     if (externalCommand) {
       ctrlLog.debug("command route", { name, route: "extension-command" });
       recordCommandUsage(name);
-      await runCommandHandler(externalCommand.handler, args, session, chatId, messageThreadId, sourceMessageId, name);
+      await runCommandHandler(externalCommand.handler, args, session, chatId, messageThreadId, sourceMessageId, name, true);
       return true;
     }
 
@@ -1426,16 +1429,18 @@ export function createTelegramController(deps: {
     // any dialog it raises.
     const candidates = new Set([name, name.replace(/_/g, "-"), name.replace(/-/g, "_")]);
     const catalog = await bridge.getCommands().catch(() => []);
-    const known = catalog.some((command) => candidates.has(command.name)
+    const served = catalog.find((command) => candidates.has(command.name)
       || (command.aliases ?? []).some((alias) => candidates.has(alias)));
-    if (known) {
+    if (served) {
       // §4.5 rule 6: same as the /new gateway path above.
       if (settleOpenDialog(chatId, messageThreadId, sourceMessageId) === "blocked") {
         ctrlLog.debug("command route", { name, route: "blocked-by-dialog" });
         return true;
       }
+      // Telegram cannot spell `-` in a command name, so `scoped-models` is advertised as
+      // `scoped_models`. The host only knows its own spelling: submit that one.
       const handled = await commandGateway.run({
-        name,
+        name: served.name,
         args,
         origin: { chatId, messageThreadId, sourceMessageId },
         transport: deps.transport,
@@ -1752,7 +1757,6 @@ export function createTelegramController(deps: {
 
     dispose() {
       dialogBroker.stop();
-      unsubscribeLocalTui();
       commandGateway.dispose();
     },
   };

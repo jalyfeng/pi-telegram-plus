@@ -3,7 +3,7 @@ import { createTelegramController, EXPIRED_TUI_CALLBACK_PREFIX, type TelegramCon
 import { CommandGateway } from "../tui/gateway.ts";
 import { DialogBroker } from "../tui/broker.ts";
 import type { CapturedAgentSession, TelegramTransport } from "../types.ts";
-import type { TuiBridgeAdapter } from "../tui-bridge.ts";
+import { tuiBridge, type TuiBridgeAdapter } from "../tui-bridge.ts";
 
 type Call = { method: string; text?: string; messageId?: number; toast?: string };
 
@@ -43,12 +43,10 @@ function createBridge(overrides: Partial<TuiBridgeAdapter> = {}): TuiBridgeAdapt
     getHost: () => "pi",
     getCommands: async () => [{ name: "tools", description: "List tools", source: "builtin" as const }],
     submit: vi.fn(() => true),
-    snapshot: vi.fn(() => ({ text: "screen", interactive: false, host: "pi" as const, width: 100 })),
     key: vi.fn(() => true),
     write: vi.fn(() => true),
     isEditorFocused: () => true,
     isInteractiveFocus: () => false,
-    onLocalSubmit: () => () => undefined,
     ...overrides,
   };
 }
@@ -124,6 +122,20 @@ describe("Command routing after the mirror removal (D2)", () => {
 
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ name: "settings" }));
     expect(nativeSettings).not.toHaveBeenCalled();
+    run.mockRestore();
+  });
+
+  it("submits the host's own spelling of a command Telegram advertises with an underscore", async () => {
+    const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
+    const harness = createHarness({
+      bridge: createBridge({
+        getCommands: async () => [{ name: "scoped-models", description: "Enable/disable models", source: "builtin" as const }],
+      }),
+    });
+
+    await send(harness.controller, "/scoped_models");
+
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ name: "scoped-models" }));
     run.mockRestore();
   });
 
@@ -248,5 +260,30 @@ describe("§4.5 rule 6: a command settles this chat's open dialog before the gat
     expect(harness.calls.some((call) => call.text?.includes("unanswered dialog"))).toBe(false);
     abandon.mockRestore();
     run.mockRestore();
+  });
+});
+
+describe("Local TUI submits stay in the terminal", () => {
+  const SHARED_STATE_KEY = "__piTelegramPlusTuiBridgeState";
+
+  it("sends nothing to Telegram for a local /model submit through the bridge", async () => {
+    // The bridge's shared state is process-wide and already created by the import
+    // above, so the fake host is written into that object and restored afterwards.
+    const state = (globalThis as unknown as Record<string, Record<string, unknown>>)[SHARED_STATE_KEY];
+    const saved = { host: state.host, mode: state.mode, ui: state.ui, editor: state.editor };
+    const onSubmit = vi.fn(() => undefined);
+    Object.assign(state, { host: "pi", mode: {}, ui: {}, editor: { onSubmit } });
+    try {
+      const harness = createHarness({ bridge: tuiBridge });
+
+      // The user submits in the terminal; the host's own editor handles it.
+      (state.editor as { onSubmit: (text: string) => unknown }).onSubmit("/model");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(onSubmit).toHaveBeenCalledWith("/model");
+      expect(harness.calls).toEqual([]);
+    } finally {
+      Object.assign(state, saved);
+    }
   });
 });

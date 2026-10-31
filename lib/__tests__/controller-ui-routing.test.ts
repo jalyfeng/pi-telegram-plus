@@ -45,12 +45,10 @@ function availableBridge(): TuiBridgeAdapter {
     getHost: () => "pi" as const,
     getCommands: async () => [],
     submit: () => false,
-    snapshot: () => undefined,
     key: () => false,
     write: () => false,
     isEditorFocused: () => true,
     isInteractiveFocus: () => false,
-    onLocalSubmit: () => () => undefined,
   };
 }
 

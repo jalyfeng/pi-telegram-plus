@@ -22,6 +22,16 @@ export type DialogItem = {
   checked?: boolean;
   /** Where the terminal cursor was when the model was read. */
   focused?: boolean;
+  /**
+   * Text shown after the label in the message body (never on the button): the
+   * host's row detail or settings hint. Telegram shows it as text, so it is
+   * truncated by the renderer, not by the producer.
+   */
+  note?: string;
+  /** Short tags shown in the message body after the label, e.g. a model's `[default]`. */
+  badges?: string[];
+  /** Section heading the row sits under; the renderer prints it once per run of rows. */
+  group?: string;
 };
 
 export type Question = {
@@ -41,15 +51,23 @@ export type DialogModel =
       items: DialogItem[];
       /** Full list size before filtering, when the host reports it. */
       total: number;
-      search?: { query: string };
+      search?: SearchModel;
       multi?: boolean;
       extraActions?: { label: string; key: string }[];
+      /** Host subtitle under the title (e.g. "Pick a provider"). */
+      subtitle?: string;
+      /** Host text shown in the body when the list is empty (or as its note). */
+      notice?: string;
     }
   | {
       kind: "settings";
       title: string;
-      items: (DialogItem & { values?: string[]; hasSubmenu?: boolean })[];
-      search?: { query: string };
+      items: (DialogItem & { values?: string[]; hasSubmenu?: boolean; /** A page switch drawn in the compact block under the list, not as a list row. */ shortcut?: boolean })[];
+      search?: SearchModel;
+      /** Host subtitle under the title: the current settings page's label. */
+      subtitle?: string;
+      /** The current page's lead text. */
+      notice?: string;
       /** A submenu is nested state of the same session (§4.6.4 #5). */
       submenu?: { itemKey: string; model: DialogModel };
     }
@@ -61,13 +79,32 @@ export type DialogModel =
       canSubmit: boolean;
     }
   | { kind: "approval"; title: string; detail?: string; options: { key: string; label: string }[] }
-  | { kind: "confirm"; title: string; message?: string }
-  | { kind: "input"; title: string; detail?: string; placeholder?: string; secret: boolean; prefill?: string }
+  /** `confirmLabel` / `cancelLabel` are the host's own button names when it gives them. */
+  | { kind: "confirm"; title: string; message?: string; confirmLabel?: string; cancelLabel?: string }
+  | {
+      kind: "input";
+      title: string;
+      detail?: string;
+      placeholder?: string;
+      secret: boolean;
+      prefill?: string;
+      /** A multi-step wizard's step list, with the step on screen marked `current`. */
+      steps?: { label: string; current: boolean }[];
+    }
   | { kind: "editor"; title: string; prefill?: string }
   | { kind: "progress"; text: string; cancellable: boolean }
-  | { kind: "info"; title?: string; text: string; closable: boolean }
+  /**
+   * Read-only panel. `text` is plain text unless `html` is set, in which case it is
+   * Telegram HTML already escaped by its producer. `actions` become one button each;
+   * `closable` adds the renderer's own Close button (an adapter whose actions already
+   * include a close sets it false).
+   */
+  | { kind: "info"; title?: string; text: string; closable: boolean; html?: boolean; actions?: { label: string; key: string }[] }
   /** §4.6.5 #13: nothing can model this dialog; the chat gets a plain notice, never a frame. */
   | { kind: "unsupported"; title?: string; what: string };
+
+/** A search box; `placeholder` is the host's hint shown while the query is empty. */
+export type SearchModel = { query: string; placeholder?: string };
 
 export type DialogAction =
   | { type: "choose"; key: string }
@@ -123,6 +160,12 @@ export type AdapterContext = {
   /** Root component; only used to find titles/entry info, never for identity. */
   root?: object;
   entry?: EntryInfo;
+  /**
+   * Secret redaction for the dialog's chat (§4.7.4): adapters that build text from raw
+   * host data apply it to each text run before converting or escaping it. Absent when
+   * no secret store is wired; identity then.
+   */
+  redact?: (text: string) => string;
   /** Send one named key to the focused component's handleInput. */
   sendKey(name: string): boolean;
   requestRender(): void;
@@ -186,7 +229,20 @@ export type DialogSession = {
   page: number;
   /** The exact text+keyboard last put on the message; equal means no edit. */
   published?: string;
+  /**
+   * The first send is in flight and `telegram.messageId` is still 0. Polling keeps calling show()
+   * meanwhile, so this stops it from sending the dialog again.
+   */
+  sending?: boolean;
+  /** Summary of a close that happened while the first send was in flight; published once the message id is known. */
+  pendingSummary?: string;
   state: "open" | "resolving" | "closed";
   closedBy?: "telegram" | "terminal" | "replaced";
   lastAction?: string;
+  /**
+   * Set when the broker itself sent a Telegram tap to the host and the host has not closed the
+   * dialog yet. The close that follows belongs to Telegram, even when it is observed after the
+   * session already left `resolving`. `cancelled` tells a Cancel button from an answer.
+   */
+  telegramAction?: { cancelled: boolean };
 };

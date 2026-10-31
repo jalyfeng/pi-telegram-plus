@@ -116,7 +116,7 @@ const CANCEL_ONLY_PANELS = new Set(["BorderedLoader", "CancellableLoader", "Load
 const INERT_PANELS = new Set(["BtwHistoryPanel", "BackgroundToolsPanel", "CustomMessage", "Container", "Panel"]);
 
 /** Real choice/text controls: a panel must not hide one of these. */
-const isControlShape = (value: unknown): value is Record<string, unknown> =>
+export const isControlShape = (value: unknown): value is Record<string, unknown> =>
   isSelectList(value) || isInputShape(value) || isEditorShape(value) || isFilteredList(value);
 
 export function isReadOnlyPanel(value: unknown): boolean {

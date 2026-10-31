@@ -211,6 +211,84 @@ describe("createTelegramTransport — network-failure suppression & logging", ()
   });
 });
 
+describe("createTelegramTransport — retries only transient failures", () => {
+  let originalFetch: FetchImpl;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let logDir: string;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    logDir = freshLogDir();
+    __resetSinkForTests();
+    initLogger({ dir: logDir, level: "debug" });
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    warnSpy.mockRestore();
+    await rm(logDir, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  const httpError = (status: number, description: string, retryAfter?: number) => new Response(JSON.stringify({
+    ok: false,
+    description,
+    ...(retryAfter === undefined ? {} : { parameters: { retry_after: retryAfter } }),
+  }), { status, headers: { "content-type": "application/json" } });
+
+  it("a 400 parse rejection makes one HTML attempt and one plain-text attempt, even with retries configured", async () => {
+    const stub = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      return body.parse_mode === "HTML"
+        ? httpError(400, "Bad Request: can't parse entities: unexpected character")
+        : telegramResponse(true, { message_id: 7 });
+    });
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 3 });
+    await expect(transport.sendText(1, "<pre><code>x &lt; y</code></pre>")).resolves.toEqual([{ message_id: 7 }]);
+
+    expect(stub).toHaveBeenCalledTimes(2);
+    const bodies = stub.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string));
+    expect(bodies[0].parse_mode).toBe("HTML");
+    expect(bodies[1].parse_mode).toBeUndefined();
+  });
+
+  it("a 400 rejection on the plain-text fallback is not retried either", async () => {
+    const stub = vi.fn(async () => httpError(400, "Bad Request: message is too long"));
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 3 });
+    await expect(transport.sendText(1, "<b>hi</b>")).rejects.toThrow(/message is too long/);
+
+    expect(stub).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a 5xx answer per retryCount", async () => {
+    const stub = vi.fn(async () => httpError(502, "Bad Gateway"));
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 2 });
+    await expect(transport.sendText(1, "hello")).rejects.toThrow(/Bad Gateway/);
+
+    expect(stub).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries a 429 answer per retryCount", async () => {
+    const stub = vi.fn(async () => httpError(429, "Too Many Requests: retry later", 0));
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 2 });
+    await expect(transport.sendText(1, "hello")).rejects.toThrow(/Too Many Requests/);
+
+    expect(stub).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("createTelegramTransport — Rich Messages (native Markdown tables)", () => {
   let originalFetch: FetchImpl;
   let warnSpy: ReturnType<typeof vi.spyOn>;

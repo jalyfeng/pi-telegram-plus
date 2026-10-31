@@ -1,4 +1,5 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { routeCommandNotice } from "./tui/command-context.ts";
 import { encodeUiCallback } from "./callback-protocol.ts";
 import { escapeHtml } from "./html.ts";
 import type { SecretStore } from "./tui/secrets.ts";
@@ -123,6 +124,10 @@ export function createTelegramUiRuntime(deps: {
       // chat typed must never leak through plugin notices or prompts (§4.7.4).
       const redact = (text: string) => deps.secrets?.redact(target, text) ?? text;
       const notifyFn = (message: string, level: "info" | "warning" | "error" = "info") => {
+        // Inside a command's call chain the line belongs to that command's message
+        // (one command, one message); otherwise it is a message of its own.
+        const prefix = level === "error" ? "❌ " : level === "warning" ? "⚠️ " : "";
+        if (routeCommandNotice(`${prefix}${escapeHtml(redact(message))}`)) return;
         const fid = activeFlowByTarget.get(target);
         void sendOrReplaceText(chatId, messageThreadId, sourceMessageId, `<b>${escapeHtml(String(level))}</b>\n${escapeHtml(redact(message))}`, fid);
       };

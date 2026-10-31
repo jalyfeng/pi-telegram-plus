@@ -10,7 +10,10 @@
  */
 
 /** OMP versions the plugin supports: startup refuses anything else (§0.1). Single copy - tui-bridge gates on it too. */
-export const SUPPORTED_OMP_VERSIONS = /^18\.12\./;
+export const SUPPORTED_OMP_VERSIONS = /^18\.14\./;
+
+/** Human-readable form of SUPPORTED_OMP_VERSIONS, used in refusal messages. Keep both in sync. */
+export const SUPPORTED_OMP_RANGE = "18.14.x";
 
 /** CSI sequences, OSC strings and stray control bytes that colour the render. */
 const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|[\x07\x08]/g;
@@ -24,19 +27,6 @@ export function plain(value: unknown): string {
   if (typeof value === "string") return value.replace(ANSI_PATTERN, "");
   if (Array.isArray(value)) return value.map((line) => plain(line)).join("\n");
   return "";
-}
-
-/** Render a component's own text; theme colours removed, width 80 by default. */
-export function renderText(component: unknown, width = 80): string {
-  const render = (component as Record<string, unknown> | undefined)?.render;
-  if (typeof render !== "function") return "";
-  try {
-    return plain((render as (renderWidth: number) => unknown).call(component, width));
-  } catch {
-    // A component that cannot draw itself (no theme, missing context) can still
-    // own focus: mirror nothing rather than throw into the Broker.
-    return "";
-  }
 }
 
 /**

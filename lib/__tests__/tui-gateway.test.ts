@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommandGateway, type GatewayDeps } from "../tui/gateway.ts";
 import { OriginTracker, IDLE_MS } from "../tui/origin.ts";
-import { OutputCapture, renderComponent } from "../tui/output.ts";
+import { OutputCapture, contentHtml } from "../tui/output.ts";
+import { runInCommand } from "../tui/command-context.ts";
+import type { CommandScope } from "../tui/origin.ts";
 import { FocusTracker } from "../tui/focus.ts";
 import type { TuiBridgeAdapter } from "../tui-bridge.ts";
 import { takePendingNotices } from "../pending-notices.ts";
@@ -40,22 +42,25 @@ function fakeBridge(result: Promise<unknown>): TuiBridgeAdapter {
     submitResult: () => ({ ok: true, result }),
     readEditorText: () => "",
     writeEditorText: () => true,
-    snapshot: () => undefined,
     key: () => true,
     write: () => true,
     isEditorFocused: () => true,
     isInteractiveFocus: () => false,
-    onLocalSubmit: () => () => undefined,
   };
 }
 
 describe("command gateway", () => {
-  it("renders text, markdown and arbitrary components", () => {
-    expect(renderComponent({ text: "plain" })).toBe("plain");
-    expect(renderComponent({ text: "a\nb" })).toBe("<pre>a\nb</pre>");
-    expect(renderComponent({ markdown: "**bold**" })).toContain("<b>bold</b>");
-    expect(renderComponent({ render: () => ["a", "b"] })).toBe("<pre>a\nb</pre>");
-    expect(renderComponent({ render: () => [] })).toBeUndefined();
+  it("reads command output from data fields only, never render()", () => {
+    expect(contentHtml({ text: "plain" })).toBe("plain");
+    expect(contentHtml({ text: "a\nb" })).toBe("<pre>a\nb</pre>");
+    expect(contentHtml({ markdown: "**bold**" })).toContain("<b>bold</b>");
+    expect(contentHtml({ text: "**x**", theme: {} })).toContain("<b>x</b>");
+    expect(contentHtml({ text: "", build: () => "\x1b[36mSession: abc\x1b[0m" })).toBe("Session: abc");
+    expect(contentHtml({ children: [{}, { text: "child" }] })).toBe("child");
+    expect(contentHtml({})).toBeUndefined();
+    const render = vi.fn(() => ["a", "b"]);
+    expect(contentHtml({ render })).toBeUndefined();
+    expect(render).not.toHaveBeenCalled();
   });
 
   it("ends an idle scope and restores the saved draft", async () => {
@@ -178,7 +183,9 @@ describe("command gateway", () => {
     expect(text).toContain("second");
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
-    expect(transport.edits.at(-1)?.text).toContain("✓ Done");
+    // Done is shown only when there is nothing else to show.
+    expect(transport.edits.at(-1)?.text).toContain("second");
+    expect(transport.edits.at(-1)?.text).not.toContain("✓ Done");
     origin.end(scope, "idle");
   });
 
@@ -287,7 +294,7 @@ describe("OutputCapture command reports", () => {
   }
   const report = {
     title: "MCP Server Management",
-    body: { render: () => ["Commands:", "  /mcp add   Add a new MCP server"] },
+    body: { text: "Commands:\n  /mcp add   Add a new MCP server" },
   };
 
   it("returns a titled report as command output inside the scope", async () => {
@@ -297,13 +304,26 @@ describe("OutputCapture command reports", () => {
     const { transport, origin, output } = attached(mode);
     const scope = origin.begin({ chatId: 1 }, "mcp", "/mcp", "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ /mcp</b>" });
-    mode.showCommandReport(report);
+    runInCommand(scope, () => mode.showCommandReport(report));
     expect(hostCalls).toBe(1);
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
     const text = transport.edits.at(-1)?.text ?? "";
     expect(text).toContain("MCP Server Management");
     expect(text).toContain("/mcp add");
+    origin.end(scope, "idle");
+  });
+
+  it("does not claim a report shown outside the command chain while a scope is open", async () => {
+    vi.useFakeTimers();
+    const mode: ReportMode = { showCommandReport() {} };
+    const { transport, origin, output } = attached(mode);
+    const scope = origin.begin({ chatId: 1 }, "mcp", "/mcp", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ /mcp</b>" });
+    mode.showCommandReport(report);
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(transport.edits.every((edit) => !edit.text.includes("MCP Server Management"))).toBe(true);
     origin.end(scope, "idle");
   });
 
@@ -333,21 +353,21 @@ describe("OutputCapture command reports", () => {
 });
 
 describe("OutputCapture shell scope", () => {
-  // The capture identifies the host's component by constructor name
-  // (BASH_EXECUTOR_CTORS) or, when the bundle minifies names, by its four
-  // bash methods (isBashExecutor).
+  // The bash executor is identified by its constructor name or, in minified
+  // bundles, by its four methods (isBashExecutor). Its text comes from
+  // getOutput(); these mocks have no render(), so a render call would fail.
   class BashExecutionComponent {
     constructor(public lines: string[]) {}
-    render() { return ["$ echo hi", ...this.lines, "exit: 0"]; }
+    setExpanded(_expanded: boolean): void {}
+    appendOutput(_chunk: string): void {}
     setComplete(_exitCode: number, _cancelled?: boolean): void {}
+    getOutput(): string { return this.lines.join("\n"); }
   }
 
-  // OMP's bundle minifies class names; `qs` is also in AGENT_CTORS, so this
-  // pins that the bash claim runs before the agent gate and wins inside a
-  // ! scope (3E: the running frame used to be pushed as plain output).
+  // OMP's bundle minifies class names; `qs` is also in AGENT_CTORS before the
+  // removal, so this pins that the bash claim wins inside a ! scope by shape.
   class qs {
     constructor(public lines: string[]) {}
-    render() { return ["$ echo hi", ...this.lines, "exit: 0"]; }
     setExpanded(_expanded: boolean): void {}
     appendOutput(_chunk: string): void {}
     setComplete(_exitCode: number, _cancelled?: boolean): void {}
@@ -364,18 +384,23 @@ describe("OutputCapture shell scope", () => {
     return { transport, origin, output, chat };
   }
 
+  // The gateway adds host output inside the command's call chain; the tests do the same.
+  function addInScope(chat: { addChild(child: unknown): unknown }, scope: CommandScope, child: unknown) {
+    runInCommand(scope, () => chat.addChild(child));
+  }
+
   it("renders the bash component's final output into the ack inside a ! scope", async () => {
     vi.useFakeTimers();
     const { transport, origin, output, chat } = attachedChat();
     const scope = origin.begin({ chatId: 1 }, "!", "!echo hi", "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !echo hi</b>" });
-    const component = new BashExecutionComponent(["hi"]);
-    chat.addChild(component);
+    const component = new BashExecutionComponent(["bash-line-1", "exit: 0"]);
+    addInScope(chat, scope, component);
     component.setComplete(0);
     await vi.advanceTimersByTimeAsync(1100);
     const text = transport.edits.at(-1)?.text ?? "";
     expect(text).toContain("<pre>");
-    expect(text).toContain("$ echo hi");
+    expect(text).toContain("bash-line-1");
     expect(text).toContain("exit: 0");
     output.finish();
     origin.end(scope, "idle");
@@ -386,30 +411,30 @@ describe("OutputCapture shell scope", () => {
     const { transport, origin, output, chat } = attachedChat();
     const scope = origin.begin({ chatId: 1 }, "!", "!sleep 5", "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !sleep 5</b>" });
-    chat.addChild(new BashExecutionComponent(["⠋ Running…"]));
+    addInScope(chat, scope, new BashExecutionComponent(["⠋ Running…"]));
     expect(output.hasRunningBash()).toBe(true);
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
     // The scope ended (timeout/replacement) while the command still ran;
     // pushing the spinner frame would strand it as the "final" output.
-    expect(transport.edits.every((edit) => !edit.text.includes("exit: 0"))).toBe(true);
+    expect(transport.edits.every((edit) => !edit.text.includes("Running"))).toBe(true);
     origin.end(scope, "timeout");
   });
 
-  it("pushes the frame rendered after setComplete, not the running one", async () => {
+  it("pushes the output read after setComplete, not the running one", async () => {
     vi.useFakeTimers();
     const { transport, origin, output, chat } = attachedChat();
     const scope = origin.begin({ chatId: 1 }, "!", "!echo hi", "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !echo hi</b>" });
     const component = new BashExecutionComponent(["⠋ Running…"]);
     expect(output.hasRunningBash()).toBe(false);
-    chat.addChild(component);
+    addInScope(chat, scope, component);
     expect(output.hasRunningBash()).toBe(true);
     component.setComplete(0);
     expect(output.hasRunningBash()).toBe(false);
     // OMP flushes the remaining PTY output asynchronously after setComplete;
-    // the pushed frame is the render taken after the settle delay.
-    component.lines = ["hi", "exit: 0"];
+    // the pushed text is the output read after the settle delay.
+    component.lines = ["bash-line-2", "exit: 0"];
     await vi.advanceTimersByTimeAsync(299);
     expect(transport.edits).toEqual([]);
     await vi.advanceTimersByTimeAsync(750);
@@ -425,8 +450,8 @@ describe("OutputCapture shell scope", () => {
     const { transport, origin, output, chat } = attachedChat();
     const scope = origin.begin({ chatId: 1 }, "session", "/session", "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ /session</b>" });
-    const component = new BashExecutionComponent(["nope"]);
-    chat.addChild(component);
+    const component = new BashExecutionComponent(["nope", "exit: 0"]);
+    addInScope(chat, scope, component);
     component.setComplete(0);
     await vi.advanceTimersByTimeAsync(1100);
     output.finish();
@@ -440,8 +465,8 @@ describe("OutputCapture shell scope", () => {
     const { transport, origin, output, chat } = attachedChat();
     const scope = origin.begin({ chatId: 1 }, "!", "!echo hi", "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !echo hi</b>" });
-    const component = new BashExecutionComponent(["once"]);
-    chat.addChild(component);
+    const component = new BashExecutionComponent(["once", "exit: 0"]);
+    addInScope(chat, scope, component);
     component.setComplete(0);
     component.setComplete(0);
     output.finish();
@@ -451,18 +476,74 @@ describe("OutputCapture shell scope", () => {
     origin.end(scope, "idle");
   });
 
+  it("shows only the output for a successful bash run with output", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "!", "!printf ok", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !printf ok</b>" });
+    const component = new BashExecutionComponent(["bash-ok"]);
+    addInScope(chat, scope, component);
+    component.setComplete(0, false);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(transport.edits.at(-1)?.text).toBe("<b>▶️ !printf ok</b>\n\n<pre>bash-ok</pre>");
+    output.finish();
+    origin.end(scope, "idle");
+  });
+
+  it("shows exit N for a failed bash run without output", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "!", "!!false", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !!false</b>" });
+    const component = new BashExecutionComponent([]);
+    addInScope(chat, scope, component);
+    component.setComplete(1, false);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(transport.edits.at(-1)?.text).toBe("<b>▶️ !!false</b>\n\n<i>exit 1</i>");
+    output.finish();
+    origin.end(scope, "idle");
+  });
+
+  it("shows cancelled for a cancelled bash run", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "!", "!sleep 9", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !sleep 9</b>" });
+    const component = new BashExecutionComponent([]);
+    addInScope(chat, scope, component);
+    component.setComplete(130, true);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(transport.edits.at(-1)?.text).toBe("<b>▶️ !sleep 9</b>\n\n<i>cancelled</i>");
+    output.finish();
+    origin.end(scope, "idle");
+  });
+
+  it("shows Done for a successful bash run without output", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = origin.begin({ chatId: 1 }, "!", "!true", "");
+    output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !true</b>" });
+    const component = new BashExecutionComponent([]);
+    addInScope(chat, scope, component);
+    component.setComplete(0, false);
+    output.finish();
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(transport.edits.at(-1)?.text).toBe("<b>▶️ !true</b>\n\n<i>✓ Done</i>");
+    origin.end(scope, "idle");
+  });
+
   it("tracks a minified bash component by its methods, pushing only after setComplete", async () => {
     vi.useFakeTimers();
     const { transport, origin, output, chat } = attachedChat();
     const scope = origin.begin({ chatId: 1 }, "!", "!echo hi", "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !echo hi</b>" });
     const component = new qs(["⠋ Running…"]);
-    chat.addChild(component);
+    addInScope(chat, scope, component);
     expect(output.hasRunningBash()).toBe(true);
     await vi.advanceTimersByTimeAsync(1100);
     // The running frame never reaches the transport while the command runs.
     expect(transport.edits).toEqual([]);
-    component.lines = ["hi", "exit: 0"];
+    component.lines = ["bash-line-3", "exit: 0"];
     component.setComplete(0);
     expect(output.hasRunningBash()).toBe(false);
     await vi.advanceTimersByTimeAsync(1100);
@@ -473,11 +554,9 @@ describe("OutputCapture shell scope", () => {
     origin.end(scope, "idle");
   });
 
-  // A bash executor whose name is not an agent ctor and that is not in the
-  // chat's agent gate: only the pending-area claim or the dedup can decide it.
+  // A bash executor that is parked in the host's pending area (not the chat).
   class BashRunner {
     constructor(public lines: string[]) {}
-    render() { return ["$ ls", ...this.lines, "exit: 0"]; }
     setExpanded(_expanded: boolean): void {}
     appendOutput(_chunk: string): void {}
     setComplete(_exitCode: number, _cancelled?: boolean): void {}
@@ -503,7 +582,7 @@ describe("OutputCapture shell scope", () => {
     const { transport, origin, output, pending } = attachedPending();
     const scope = origin.begin({ chatId: 1 }, "!", "!ls", "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: "<b>▶️ !ls</b>" });
-    const component = new BashRunner(["file.txt"]);
+    const component = new BashRunner(["file.txt", "exit: 0"]);
     pending.addChild(component);
     expect(output.hasRunningBash()).toBe(true);
     component.setComplete(0);
@@ -531,7 +610,7 @@ describe("OutputCapture shell scope", () => {
     // The next submit flushes the pending area into the chat under another scope.
     const later = origin.begin({ chatId: 1 }, "model", "/model", "");
     output.bind(later, { chatId: 1, messageId: 10, ackHtml: "<b>▶️ /model</b>" });
-    chat.addChild(component);
+    addInScope(chat, later, component);
     output.finish();
     await vi.advanceTimersByTimeAsync(1100);
     const laterEdits = transport.edits.slice(editsBefore).map((edit) => edit.text);
@@ -554,94 +633,221 @@ describe("OutputCapture shell scope", () => {
   });
 });
 
-describe("OutputCapture transcript-reset scopes", () => {
-  // OMP's /clear and /delete reset the transcript, then present their result
-  // component in the same task (command-controller.ts 1349/1380). The `clear`
-  // hook marks the chat as rebuilding until the next tick, so
-  // REBUILD_OUTPUT_LABELS must keep claiming children added during it.
-  class ResetResultComponent {
-    constructor(public line: string) {}
-    render() { return [this.line]; }
-  }
-  // Name matches AGENT_CTORS: rebuilt history stays excluded even inside a
-  // reset scope.
-  class AssistantMessageComponent {
-    render() { return ["old assistant message"]; }
-  }
-
-  function attachedChat() {
+describe("OutputCapture command-chain attribution (v8 §0.2)", () => {
+  function attachedChat(extra: Record<string, unknown> = {}) {
     const transport = fakeTransport();
     const origin = new OriginTracker({ isEditorFocused: () => true, readDraft: () => "", writeDraft: () => true });
     const output = new OutputCapture(transport, origin);
-    const chat = {
-      clear(): void {},
-      addChild: (_child: unknown) => undefined,
-    };
-    (output as unknown as { attach(state: unknown): void }).attach({ host: "pi", mode: {}, chat });
+    const chat = { addChild: (_child: unknown) => undefined };
+    (output as unknown as { attach(state: unknown): void }).attach({ host: "pi", mode: {}, chat, ...extra });
     return { transport, origin, output, chat };
   }
 
-  function resetScope(origin: OriginTracker, output: OutputCapture, label: string) {
+  function beginCommand(origin: OriginTracker, output: OutputCapture, label: string) {
     const scope = origin.begin({ chatId: 1 }, label, `/${label}`, "");
     output.bind(scope, { chatId: 1, messageId: 9, ackHtml: `<b>▶️ /${label}</b>` });
     return scope;
   }
 
-  it("keeps the /clear result mounted right after the transcript reset", async () => {
+  it("claims a ThemedText-shaped component added synchronously in the command chain, without ANSI", async () => {
     vi.useFakeTimers();
     const { transport, origin, output, chat } = attachedChat();
-    const scope = resetScope(origin, output, "clear");
-    chat.clear();
-    chat.addChild(new ResetResultComponent("\u2713 Context reset \u2014 0 messages dropped"));
+    const scope = beginCommand(origin, output, "session");
+    // pi ThemedText: empty `text`, the themed string comes from `build`.
+    runInCommand(scope, () => chat.addChild({ text: "", build: () => "\x1b[36mSession: abc\x1b[0m" }));
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
-    expect(transport.edits.at(-1)?.text).toContain("\u2713 Context reset \u2014 0 messages dropped");
+    const text = transport.edits.at(-1)?.text ?? "";
+    expect(text).toContain("Session: abc");
+    expect(text).not.toContain("\u001b");
     origin.end(scope, "idle");
   });
 
-  it("keeps the /delete result mounted right after the transcript reset", async () => {
+  it("claims a Text-shaped component added after an await inside the command chain", async () => {
     vi.useFakeTimers();
     const { transport, origin, output, chat } = attachedChat();
-    const scope = resetScope(origin, output, "delete");
-    chat.clear();
-    chat.addChild(new ResetResultComponent("Session deleted"));
+    const scope = beginCommand(origin, output, "hotkeys");
+    const done = runInCommand(scope, async () => {
+      await Promise.resolve();
+      chat.addChild({ text: "added after await" });
+    });
+    await done;
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
-    expect(transport.edits.at(-1)?.text).toContain("Session deleted");
+    expect(transport.edits.at(-1)?.text).toContain("added after await");
     origin.end(scope, "idle");
   });
 
-  it("still skips children added during a reset outside the reset labels", async () => {
+  it("does not claim a tool-call box that agent events add while the command runs (#20)", async () => {
     vi.useFakeTimers();
     const { transport, origin, output, chat } = attachedChat();
-    const scope = resetScope(origin, output, "resume");
-    chat.clear();
-    chat.addChild(new ResetResultComponent("must not reach the ack"));
+    const scope = beginCommand(origin, output, "login");
+    // Command continuation: awaits inside the command chain (microtasks keep
+    // the context under fake timers as well).
+    const done = runInCommand(scope, async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      chat.addChild({ text: "Logged in" });
+    });
+    // Agent event at the same time: a timer created outside any command chain.
+    setTimeout(() => chat.addChild({ text: "$ sed -n '1,2p' a.py" }), 0);
+    await vi.advanceTimersByTimeAsync(50);
+    await done;
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
-    expect(transport.edits.every((edit) => !edit.text.includes("must not reach the ack"))).toBe(true);
+    const text = transport.edits.at(-1)?.text ?? "";
+    expect(text).toContain("Logged in");
+    expect(text).not.toContain("sed -n");
     origin.end(scope, "idle");
   });
 
-  it("excludes rebuilt agent history inside a clear scope", async () => {
+  it("does not claim components added by the agent turn a command starts (session.prompt)", async () => {
     vi.useFakeTimers();
-    const { transport, origin, output, chat } = attachedChat();
-    const scope = resetScope(origin, output, "clear");
-    chat.clear();
-    chat.addChild(new AssistantMessageComponent());
+    let chatRef: { addChild(child: unknown): unknown } | undefined;
+    class FakeSession {
+      prompt(_text: string): Promise<void> {
+        chatRef?.addChild({ text: "agent turn output" });
+        return Promise.resolve();
+      }
+    }
+    const session = new FakeSession();
+    const { transport, origin, output, chat } = attachedChat({ session });
+    chatRef = chat;
+    const scope = beginCommand(origin, output, "clone");
+    await runInCommand(scope, async () => {
+      await session.prompt("continue");
+      chat.addChild({ text: "command line" });
+    });
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
-    expect(transport.edits.every((edit) => !edit.text.includes("old assistant message"))).toBe(true);
+    const text = transport.edits.at(-1)?.text ?? "";
+    expect(text).toContain("command line");
+    expect(text).not.toContain("agent turn output");
     origin.end(scope, "idle");
   });
 
-  it("sends the final ack without a blank separator when nothing was captured", async () => {
+  it("does not claim rebuilt history inside a command scope, but claims the summary added after it", async () => {
     vi.useFakeTimers();
-    const { transport, origin, output } = attachedChat();
-    const scope = resetScope(origin, output, "x");
+    let chatRef: { addChild(child: unknown): unknown } | undefined;
+    const mode = {
+      renderInitialMessages(): void {
+        chatRef?.addChild({ text: "old history message" });
+      },
+    };
+    const { transport, origin, output, chat } = attachedChat({ mode });
+    chatRef = chat;
+    const scope = beginCommand(origin, output, "compact");
+    runInCommand(scope, () => {
+      mode.renderInitialMessages();
+      chat.addChild({ text: "Compacted summary" });
+    });
     output.finish();
     await vi.advanceTimersByTimeAsync(20);
-    expect(transport.edits.at(-1)?.text).toBe("<b>\u25b6\ufe0f /x</b>\n\n<i>\u2713 Done</i>");
+    const text = transport.edits.at(-1)?.text ?? "";
+    expect(text).toContain("Compacted summary");
+    expect(text).not.toContain("old history message");
+    origin.end(scope, "idle");
+  });
+
+  it("keeps the /clear result added in its own command chain", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = beginCommand(origin, output, "clear");
+    runInCommand(scope, () => chat.addChild({ text: "✓ Context reset — 0 messages dropped" }));
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(transport.edits.at(-1)?.text).toContain("✓ Context reset — 0 messages dropped");
+    origin.end(scope, "idle");
+  });
+
+  it("converts a Markdown-shaped component to Telegram HTML", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = beginCommand(origin, output, "report");
+    // pi Markdown: its source is in `text`, and only Markdown has the `theme` field.
+    runInCommand(scope, () => chat.addChild({ text: "**x**", theme: {} }));
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(transport.edits.at(-1)?.text).toContain("<b>x</b>");
+    origin.end(scope, "idle");
+  });
+
+  it("produces no output for a Spacer-shaped component", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = beginCommand(origin, output, "x");
+    runInCommand(scope, () => chat.addChild({ invalidate(): void {} }));
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(transport.edits.at(-1)?.text).toBe("<b>▶️ /x</b>\n\n<i>✓ Done</i>");
+    origin.end(scope, "idle");
+  });
+
+  it("never calls render() on a component that only has render()", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = beginCommand(origin, output, "x");
+    const render = vi.fn(() => ["rendered picture"]);
+    runInCommand(scope, () => chat.addChild({ render }));
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(render).not.toHaveBeenCalled();
+    expect(transport.edits.every((edit) => !edit.text.includes("rendered picture"))).toBe(true);
+    origin.end(scope, "idle");
+  });
+
+  it("claims a deferred presentCommandOutput component at call time, once, and ignores its later mount", async () => {
+    vi.useFakeTimers();
+    const queued: unknown[] = [];
+    const component = { text: "deferred output" };
+    const mode = {
+      presentCommandOutput(child: unknown): void {
+        queued.push(child);
+      },
+    };
+    const { transport, origin, output, chat } = attachedChat({ mode });
+    const scope = beginCommand(origin, output, "usage");
+    runInCommand(scope, () => mode.presentCommandOutput(component));
+    // The host mounts the queued component later, from agent_end, outside the command chain.
+    chat.addChild(queued[0]);
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    const text = transport.edits.at(-1)?.text ?? "";
+    expect(text.split("deferred output").length - 1).toBe(1);
+    origin.end(scope, "idle");
+  });
+
+  it("pushes a presentCommandOutput component exactly once when the host mounts it synchronously", async () => {
+    vi.useFakeTimers();
+    const mode = {
+      presentCommandOutput(child: unknown): void {
+        chatRef?.addChild(child);
+      },
+    };
+    let chatRef: { addChild(child: unknown): unknown } | undefined;
+    const { transport, origin, output, chat } = attachedChat({ mode });
+    chatRef = chat;
+    const scope = beginCommand(origin, output, "usage");
+    runInCommand(scope, () => mode.presentCommandOutput({ text: "sync output" }));
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    const text = transport.edits.at(-1)?.text ?? "";
+    expect(text.split("sync output").length - 1).toBe(1);
+    origin.end(scope, "idle");
+  });
+
+  it("reads a describe-only component through its tree and never calls render()", async () => {
+    vi.useFakeTimers();
+    const { transport, origin, output, chat } = attachedChat();
+    const scope = beginCommand(origin, output, "jobs");
+    const render = vi.fn(() => ["rendered picture"]);
+    const describe = vi.fn(() => ({ k: "text", p: { text: "Described line" } }));
+    runInCommand(scope, () => chat.addChild({ render, describe }));
+    output.finish();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(describe).toHaveBeenCalled();
+    expect(render).not.toHaveBeenCalled();
+    expect(transport.edits.at(-1)?.text).toContain("Described line");
     origin.end(scope, "idle");
   });
 });

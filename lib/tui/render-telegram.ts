@@ -11,13 +11,22 @@
  * `i` free text, `k` terminal key, `x` cancel.
  */
 import { encodeDialogCallback } from "../callback-protocol.ts";
+import { splitTelegramHtml } from "../text-split.ts";
 import type { TelegramButton } from "../types.ts";
-import type { DialogItem, DialogModel } from "./model.ts";
+import type { DialogItem, DialogModel, SearchModel } from "./model.ts";
 
 /** §4.7.2: ten items per page, one button per row. */
 export const PAGE_SIZE = 10;
 export const BUTTONS_PER_ROW = 3;
 const MAX_LABEL = 45;
+/** Longest host detail or hint shown after an item's label in the message body. */
+const MAX_NOTE = 100;
+/** Longest host lead or notice shown in the message body. */
+const MAX_NOTICE = 300;
+/** Longest badge shown after an item's label. */
+const MAX_BADGE = 40;
+/** Body text one list page may carry; past it the page drops its details, not its items (Telegram caps a message at 4096). */
+const MAX_LIST_BODY = 3400;
 
 export type RenderedDialog = {
   text: string;
@@ -107,7 +116,11 @@ function itemButtons(items: DialogItem[], page: number, ctx: RenderContext, op: 
 }
 
 function pageButtons(total: number, page: number, ctx: RenderContext): TelegramButton[] {
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  return pageNav(Math.max(1, Math.ceil(total / PAGE_SIZE)), page, ctx);
+}
+
+/** ◀ / ▶ and the position, for a list of `pages` pages; empty when there is one page. */
+function pageNav(pages: number, page: number, ctx: RenderContext): TelegramButton[] {
   if (pages <= 1) return [];
   const previous = page > 0 ? button("◀ Prev", ctx, "p", String(page - 1)) : undefined;
   const next = page < pages - 1 ? button("Next ▶", ctx, "p", String(page + 1)) : undefined;
@@ -126,9 +139,53 @@ function header(title: string, subtitle: string | undefined, body: string[]): st
   return `${lines.join("\n")}${body.join("")}`;
 }
 
-function listText(title: string, subtitle: string | undefined, items: DialogItem[], page: number, multi = false): string {
-  const body = items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE).map((item) => `${escapeHtml(itemLabel(item, multi))}\n`);
-  return header(title, subtitle, body);
+/**
+ * One item as a line of message text: its label, then the host's badges in
+ * brackets and its note after a dash. The buttons still carry the label only.
+ */
+function itemLine(item: DialogItem, multi: boolean, details: boolean): string {
+  if (!details) return escapeHtml(itemLabel(item, multi));
+  const badges = (item.badges ?? []).map((badge) => ` [${escapeHtml(shorten(badge, MAX_BADGE))}]`).join("");
+  const note = item.note ? ` — ${escapeHtml(shorten(item.note, MAX_NOTE))}` : "";
+  return `${escapeHtml(itemLabel(item, multi))}${badges}${note}`;
+}
+
+/** The page's lines, with a bold heading wherever the section (`group`) changes. */
+function itemBody(items: DialogItem[], multi: boolean, details: boolean): string[] {
+  const body: string[] = [];
+  let group: string | undefined;
+  for (const item of items) {
+    if (item.group !== undefined && item.group !== group) {
+      body.push(`<b>${escapeHtml(shorten(item.group, 60))}</b>\n`);
+    }
+    group = item.group;
+    body.push(`${itemLine(item, multi, details)}\n`);
+  }
+  return body;
+}
+
+/** A host lead or notice, as plain text above the items; empty when there is none. */
+function noticeBody(notice: string | undefined): string[] {
+  return notice ? [`${escapeHtml(shorten(notice, MAX_NOTICE))}\n\n`] : [];
+}
+
+function listText(
+  title: string,
+  subtitle: string | undefined,
+  items: DialogItem[],
+  page: number,
+  multi = false,
+  notice?: string,
+): string {
+  const visible = items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+  const detailed = [...noticeBody(notice), ...itemBody(visible, multi, true)];
+  const fits = detailed.join("").length <= MAX_LIST_BODY;
+  return header(title, subtitle, fits ? detailed : [...noticeBody(notice), ...itemBody(visible, multi, false)]);
+}
+
+/** The search box's shown text: its query, else the host's placeholder, else `empty`. */
+function searchHint(search: SearchModel, empty = "(all)"): string {
+  return shorten(search.query || search.placeholder || empty, 30);
 }
 
 function renderSelect(model: Extract<DialogModel, { kind: "select" }>, ctx: RenderContext): RenderedDialog {
@@ -157,14 +214,16 @@ function renderSelect(model: Extract<DialogModel, { kind: "select" }>, ctx: Rend
   if (nav.length > 0) rows.push(nav);
   rows.push(...chunk(extras));
   rows.push(actions);
-  const subtitle = `Page ${page + 1}/${pages} · ${total} items`;
+  const pageLine = `Page ${page + 1}/${pages} · ${total} items`;
+  const searchLine = model.search ? `${pageLine} · 🔍 ${searchHint(model.search)}` : pageLine;
   return {
     text: listText(
       model.title,
-      model.search ? `${subtitle} · 🔍 ${shorten(model.search.query || "(all)", 20)}` : subtitle,
+      [model.subtitle, searchLine].filter((line) => line !== undefined && line !== "").join("\n"),
       model.items,
       page,
       model.multi,
+      model.notice,
     ),
     rows,
     keyMap,
@@ -186,8 +245,11 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
     return { text: `${inner.text}\n<i>Submenu · Back sends Esc</i>`, rows, keyMap, page: 0, pages: 1 };
   }
   const page = Math.max(0, ctx.page ?? 0);
-  const pages = Math.max(1, Math.ceil(model.items.length / PAGE_SIZE));
-  const window = model.items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+  // Page switches (shortcuts) are not list rows: they form a compact block under the list.
+  const rowItems = model.items.filter((item) => item.shortcut !== true);
+  const shortcutItems = model.items.filter((item) => item.shortcut === true);
+  const pages = Math.max(1, Math.ceil(rowItems.length / PAGE_SIZE));
+  const window = rowItems.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
   const rows: TelegramButton[][] = [];
   const keyMap = new Map<string, string>();
   window.forEach((item, index) => {
@@ -216,16 +278,30 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
     rows.push([built]);
     keyMap.set(arg, item.key);
   });
-  const nav = pageButtons(model.items.length, page, ctx);
+  const nav = pageButtons(rowItems.length, page, ctx);
   if (nav.length > 0) rows.push(nav);
+  // The compact block of page switches sits under the list on every page; the
+  // arg `g<n>` cannot collide with the row args (`<page>.<index>...`).
+  const shortcutButtons: TelegramButton[] = [];
+  shortcutItems.forEach((item, index) => {
+    const arg = `g${index}`;
+    const built = button(shorten(item.label, MAX_LABEL), ctx, "m", arg);
+    if (!built) return;
+    shortcutButtons.push(built);
+    keyMap.set(arg, item.key);
+  });
+  rows.push(...chunk(shortcutButtons));
   rows.push(cancelRow(ctx));
-  const subtitle = `Page ${page + 1}/${pages} · ${model.items.length} items`;
+  const pageLine = `Page ${page + 1}/${pages} · ${rowItems.length} items`;
+  const searchLine = model.search ? `${pageLine} · 🔍 ${searchHint(model.search, "Type to search")}` : pageLine;
   return {
     text: listText(
       model.title,
-      model.search ? `${subtitle} · 🔍 ${shorten(model.search.query || "Type to search", 20)}` : subtitle,
-      model.items,
+      [model.subtitle, searchLine].filter((line) => line !== undefined && line !== "").join("\n"),
+      rowItems,
       page,
+      false,
+      model.notice,
     ),
     rows,
     keyMap,
@@ -281,13 +357,27 @@ function renderApproval(model: Extract<DialogModel, { kind: "approval" }>, ctx: 
 
 function renderConfirm(model: Extract<DialogModel, { kind: "confirm" }>, ctx: RenderContext): RenderedDialog {
   const body = model.message ? `${escapeHtml(shorten(model.message, 900))}\n` : "";
+  if (model.confirmLabel) {
+    // The host named its own buttons (e.g. Delete / Cancel): use them, not Yes / No.
+    const answers = keep([
+      button(shorten(model.confirmLabel, MAX_LABEL), ctx, "y"),
+      button(shorten(model.cancelLabel ?? "Cancel", MAX_LABEL), ctx, "n"),
+    ]);
+    return { text: header(model.title, undefined, [body]), rows: [answers], keyMap: new Map(), page: 0, pages: 1 };
+  }
   const rows = [keep([button("✅ Yes", ctx, "y"), button("❌ No", ctx, "n")]), cancelRow(ctx)];
   return { text: header(model.title, undefined, [body]), rows, keyMap: new Map(), page: 0, pages: 1 };
 }
 
 function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: RenderContext): RenderedDialog {
   // Plain text, not `<pre>`: Telegram makes a bare URL tappable and copyable.
+  const steps = model.steps && model.steps.length > 0
+    ? [`${model.steps
+        .map((step) => (step.current ? `<b>${escapeHtml(shorten(step.label, 20))}</b>` : escapeHtml(shorten(step.label, 20))))
+        .join(" › ")}\n\n`]
+    : [];
   const body = [
+    ...steps,
     model.detail ? `${escapeHtml(clean(model.detail).slice(0, 900))}\n` : "",
     model.placeholder ? `<pre>${escapeHtml(shorten(model.placeholder, 300))}</pre>\n` : "",
     model.secret ? "<i>Secret input: send a message; the bot will not echo it.</i>\n" : "",
@@ -324,14 +414,33 @@ function renderProgress(model: Extract<DialogModel, { kind: "progress" }>, ctx: 
 }
 
 /** Read-only panel: the text plus one way out (§4.6.5 #12). */
+/** Bytes of HTML one info message carries; the rest of the message is buttons and header. */
+const INFO_PAGE_BYTES = 3400;
+
+/**
+ * A read-only panel: the text (one page of it for HTML, split at block
+ * boundaries so no tag is cut), the panel's own action buttons, paging, and
+ * the renderer's Close when the panel has none of its own.
+ */
 function renderInfo(model: Extract<DialogModel, { kind: "info" }>, ctx: RenderContext): RenderedDialog {
-  const body = `<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>\n`;
+  const pages = model.html === true ? splitTelegramHtml(model.text, INFO_PAGE_BYTES) : [`<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>`];
+  const count = Math.max(1, pages.length);
+  const page = Math.min(Math.max(0, ctx.page ?? 0), count - 1);
+  const body = `${pages[page] ?? ""}\n`;
+  const actions = model.actions ?? [];
+  const buttons = actions.map((action) => button(action.label, ctx, "c", action.key)).filter((built): built is TelegramButton => built !== undefined);
+  const keyMap = new Map<string, string>();
+  actions.forEach((action) => keyMap.set(action.key, action.key));
+  const rows = chunk(buttons);
+  const nav = pageNav(count, page, ctx);
+  if (nav.length > 0) rows.push(nav);
+  if (model.closable) rows.push(cancelRow(ctx, "Close"));
   return {
-    text: header(model.title ?? "Terminal", undefined, [body]),
-    rows: [cancelRow(ctx, "Close")],
-    keyMap: new Map(),
-    page: 0,
-    pages: 1,
+    text: header(model.title ?? "Terminal", count > 1 ? `Page ${page + 1}/${count}` : undefined, [body]),
+    rows: fitRows(rows),
+    keyMap,
+    page,
+    pages: count,
   };
 }
 
