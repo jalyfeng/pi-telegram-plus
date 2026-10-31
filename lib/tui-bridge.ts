@@ -94,6 +94,15 @@ async function loadOmpMode(): Promise<HostObject | undefined> {
   }
 }
 
+async function loadOmpExtensionUiController(): Promise<HostObject | undefined> {
+  try {
+    const mod: unknown = await import("@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller");
+    return asHostObject(mod);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Read a module's VERSION export, which hosts expose as a string or getter. */
 function versionFromModule(mod: HostObject | undefined): string | undefined {
   const version = mod?.VERSION;
@@ -161,6 +170,27 @@ function patchMethod(prototype: HostObject, name: string, host: TuiHost): boolea
   };
   wrapped.__ptpBridgePatched = true;
   prototype[name] = wrapped;
+  return true;
+}
+
+/**
+ * Patch the status entry point of OMP's ExtensionUiController. Its `ctx` is the
+ * InteractiveMode instance. A deferred extension (see the comment in
+ * installTuiBridge) never sees initHooksAndCustomTools, so its first status update
+ * is the earliest hook that can capture the mode. Only a mode not yet captured is
+ * passed on: captureMode notifies every subscriber, and status updates are frequent.
+ */
+function patchExtensionStatus(prototype: HostObject): boolean {
+  const original = asCallable(prototype.setHookStatus);
+  if (!original || original.__ptpBridgePatched) return false;
+  const wrapped: HostCallable = function patched(this: unknown, ...args: unknown[]) {
+    const result = original.apply(this, args);
+    const mode = asHostObject((this as { ctx?: unknown } | undefined)?.ctx);
+    if (mode && mode !== state.mode) captureMode(mode, "omp");
+    return result;
+  };
+  wrapped.__ptpBridgePatched = true;
+  prototype.setHookStatus = wrapped;
   return true;
 }
 
@@ -262,11 +292,12 @@ export function writeEditorText(text: string): boolean {
 export function installTuiBridge(): Promise<void> {
   if (installPromise) return installPromise;
   installPromise = (async () => {
-    const [omp, ompCommands, pi, ompVersion] = await Promise.all([
+    const [omp, ompCommands, pi, ompVersion, ompController] = await Promise.all([
       loadOmpMode(),
       loadOmpCommands(),
       loadPiMode(),
       loadOmpVersion(),
+      loadOmpExtensionUiController(),
     ]);
     state.hostCommands = ompCommands;
     // The pi version comes off the module loadPiMode already imported; a second
@@ -283,8 +314,21 @@ export function installTuiBridge(): Promise<void> {
     }
     const ompProto = asHostConstructor(omp?.InteractiveMode);
     if (ompProto) {
+      // Two OMP entry points, because OMP may load extensions after startup.
+      // Extensions that can wait for startup are loaded later (OMP 18.14.1,
+      // packages/coding-agent/src/extensibility/extensions/startup-deferral.ts),
+      // after initHooksAndCustomTools has already run. Such a load skips that
+      // patch, so the first status update of the plugin captures the mode instead.
+      // Eager loads keep the initHooksAndCustomTools patch.
       patchMethod(ompProto, "initHooksAndCustomTools", "omp");
       patchMethod(ompProto, "render", "omp");
+    }
+    const ompControllerProto = asHostConstructor(ompController?.ExtensionUiController);
+    if (ompControllerProto) patchExtensionStatus(ompControllerProto);
+    if (!asCallable(ompControllerProto?.setHookStatus) && ompVersion !== undefined) {
+      bridgeLog.warn("OMP ExtensionUiController has no setHookStatus; the bridge stays unavailable for extensions loaded after startup", {
+        ompVersion,
+      });
     }
     const piProto = asHostConstructor(pi?.InteractiveMode);
     if (piProto) {
