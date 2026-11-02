@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { extname, join, resolve } from "node:path";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createActiveTelegramTransport } from "./lib/active-transport.ts";
 import { registerTelegramAttachmentTool } from "./lib/attachments.ts";
 import { enableConfiguredTelegramOnStartup, readResolvedTelegramConfig, persistProjectRuntimeState, resetProjectBindingCursor, updateBot, getAgentDir } from "./lib/config.ts";
-import { createTelegramController, type TelegramCommandHandler } from "./lib/controller.ts";
+import { createTelegramController, saveIncomingAttachment, type TelegramCommandHandler } from "./lib/controller.ts";
 import { escapeHtml } from "./lib/html.ts";
 import { createHeartbeat } from "./lib/heartbeat.ts";
 import { replayTelegramHistory, type TelegramHistoryEntry } from "./lib/history-replay.ts";
@@ -108,31 +107,6 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
   const currentSessionCwd = (): string => {
     const session = getActiveSession();
     return session?.extensionRunner?.createCommandContext?.().cwd ?? process.cwd();
-  };
-
-  const sanitizeIncomingFileName = (value: string): string => {
-    const trimmed = value.trim().replace(/\.[^./\\]+$/, "");
-    const sanitized = trimmed
-      .replace(/[^a-zA-Z0-9._-]/g, "_")
-      .replace(/_+/g, "_");
-    const compact = sanitized.replace(/^\.+/, "").replace(/\.+$/, "");
-    return compact.slice(0, 120) || "attachment";
-  };
-
-  const inferIncomingExtension = (fileName: string | undefined, filePath: string | undefined): string => {
-    const source = filePath || fileName;
-    if (!source) return ".bin";
-    const extension = extname(source).toLowerCase();
-    return extension || ".bin";
-  };
-
-  const buildIncomingAttachmentPath = (fileId: string, fileName: string | undefined, filePath: string): string => {
-    const ext = inferIncomingExtension(fileName, filePath);
-    const base = fileName
-      ? sanitizeIncomingFileName(fileName)
-      : sanitizeIncomingFileName(filePath || "telegram-file");
-    const safeFileId = fileId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    return resolve(currentSessionCwd(), `${Date.now()}-${safeFileId.slice(0, 18)}-${base}${ext}`);
   };
 
   const persistCurrentConfig = async (nextConfig = config): Promise<void> => {
@@ -356,11 +330,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
       }
       const fileInfo = await getTelegramFile(token, fileId, undefined, config.apiBase);
       const data = await downloadTelegramFile(token, fileInfo.file_path, undefined, config.apiBase);
-      await mkdir(currentSessionCwd(), { recursive: true });
-      const candidateName = buildIncomingAttachmentPath(fileId, fileName || kind, fileInfo.file_path);
-      const outputPath = candidateName;
-      await writeFile(outputPath, data);
-      return outputPath;
+      return saveIncomingAttachment(currentSessionCwd(), fileName || kind, fileInfo.file_path, data);
     },
     getActiveTurn: (chatId: number, messageThreadId?: number) => activeTurns.get(activeTurnKey(chatId, messageThreadId)),
     getActiveTurns: () => [...activeTurns.values()],

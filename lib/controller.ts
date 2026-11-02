@@ -1,4 +1,6 @@
 import type { ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, extname, join } from "node:path";
 import { DIALOG_CALLBACK_PREFIX, decodeDialogCallback, decodeMoreCallback, decodeRunCallback, decodeUiCallback, encodeMoreCallback, encodeRunCallback } from "./callback-protocol.ts";
 import { parseLeadingCommand, normalizeLeadingCommand } from "./command-parser.ts";
 import type {
@@ -164,7 +166,9 @@ function extractTelegramMediaEntries(message: TelegramMessage): IncomingMediaSum
   return entries;
 }
 
-function buildTelegramIncomingMediaSummary(message: TelegramMessage, title = "[telegram attachment]"): string {
+const TELEGRAM_ATTACHMENT_TITLE = "[telegram attachment]";
+
+function buildTelegramIncomingMediaSummary(message: TelegramMessage, title = TELEGRAM_ATTACHMENT_TITLE): string {
   const parts: string[] = [];
   if (message.photo && message.photo.length > 0) {
     parts.push(`- photo (${message.photo.length} photo frame(s))`);
@@ -274,14 +278,50 @@ function logTelegramReplyContext(message: TelegramMessage): void {
   });
 }
 
-function formatSavedIncomingAttachmentLine(kind: string, fileId: string, fileName: string | undefined, path: string): string {
-  const savedName = fileName ? `${fileName} (${fileId})` : fileId;
-  return `- ${kind}: ${savedName} => ${path}`;
+const INCOMING_ATTACHMENT_DIR = join(".pi", "telegram-attachments");
+
+function sanitizeIncomingFileName(value: string): string {
+  const trimmed = value.trim().replace(/\.[^./\\]+$/, "");
+  const sanitized = trimmed
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/_+/g, "_");
+  const compact = sanitized.replace(/^\.+/, "").replace(/\.+$/, "");
+  return compact.slice(0, 120) || "attachment";
 }
 
-function formatIncomingAttachmentErrorLine(kind: string, fileId: string, fileName: string | undefined, reason: string): string {
-  const target = fileName ? `${fileName} (${fileId})` : fileId;
-  return `- ${kind}: ${target} -> failed to save (${reason})`;
+function inferIncomingExtension(fileName: string, filePath: string): string {
+  const extension = extname(filePath || fileName).toLowerCase();
+  return extension || ".bin";
+}
+
+/**
+ * Saves one incoming Telegram file under `<sessionCwd>/.pi/telegram-attachments/`, keeping its
+ * sanitized name. A name already taken there gets " (2)", " (3)", ... before the extension.
+ * The exclusive create ("wx") claims the name, so concurrent saves cannot pick the same path.
+ */
+export async function saveIncomingAttachment(sessionCwd: string, fileName: string, filePath: string, data: Uint8Array): Promise<string> {
+  const dir = join(sessionCwd, INCOMING_ATTACHMENT_DIR);
+  await mkdir(dir, { recursive: true });
+  const base = sanitizeIncomingFileName(fileName);
+  const ext = inferIncomingExtension(fileName, filePath);
+  for (let n = 1; ; n++) {
+    const candidate = join(dir, n === 1 ? `${base}${ext}` : `${base} (${n})${ext}`);
+    try {
+      await writeFile(candidate, data, { flag: "wx" });
+      return candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+  }
+}
+
+function formatSavedIncomingAttachmentLine(kind: string, fileName: string | undefined, path: string): string {
+  return `- ${kind}: ${fileName || basename(path)} => ${path}`;
+}
+
+function formatIncomingAttachmentErrorLine(kind: string, fileName: string | undefined, reason: string): string {
+  const label = fileName ? `${kind}: ${fileName}` : kind;
+  return `- ${label} -> failed to save (${reason})`;
 }
 
 function formatIncomingAttachmentReceipt(state: "saved" | "failed", lines: string[]): string {
@@ -1790,6 +1830,8 @@ export function createTelegramController(deps: {
       const incomingMedia = hasMediaInput ? extractTelegramMediaEntries(message) : [];
       const downloadedMediaLines: string[] = [];
       const failedMediaLines: string[] = [];
+      // One line per attachment, in message order, for the prompt (the saved or failed outcome only).
+      const promptMediaLines: string[] = [];
       if (deps.saveIncomingTelegramAttachment && incomingMedia.length > 0) {
         const mediaSaveResults = await Promise.allSettled(
           incomingMedia.map((attachment) => deps.saveIncomingTelegramAttachment!(
@@ -1802,10 +1844,14 @@ export function createTelegramController(deps: {
           const media = incomingMedia[i];
           const saveResult = mediaSaveResults[i];
           if (saveResult.status === "fulfilled") {
-            downloadedMediaLines.push(formatSavedIncomingAttachmentLine(media.type, media.fileId, media.fileName, saveResult.value));
+            const line = formatSavedIncomingAttachmentLine(media.type, media.fileName, saveResult.value);
+            downloadedMediaLines.push(line);
+            promptMediaLines.push(line);
           } else {
             const reason = saveResult.reason instanceof Error ? saveResult.reason.message : String(saveResult.reason);
-            failedMediaLines.push(formatIncomingAttachmentErrorLine(media.type, media.fileId, media.fileName, reason));
+            const line = formatIncomingAttachmentErrorLine(media.type, media.fileName, reason);
+            failedMediaLines.push(line);
+            promptMediaLines.push(line);
           }
         }
         if (downloadedMediaLines.length > 0 || failedMediaLines.length > 0) {
@@ -1863,12 +1909,11 @@ export function createTelegramController(deps: {
       if (hasPromptInput) {
         const mediaBlock = (() => {
           if (!hasMediaInput) return "";
-          const lines = [mediaSummary];
-          const statusLines = [...downloadedMediaLines, ...failedMediaLines];
-          if (statusLines.length > 0) {
-            lines.push(statusLines.join("\n"));
-          }
-          return `\n\n${lines.filter(Boolean).join("\n")}`;
+          // Saved files are listed by their save result only; without a save hook the summary is the only listing.
+          const lines = promptMediaLines.length > 0
+            ? [TELEGRAM_ATTACHMENT_TITLE, ...promptMediaLines]
+            : [mediaSummary];
+          return `\n\n${lines.join("\n")}`;
         })();
         const handled = trimmed ? await tryHandleSlashCommand(text, chatId, messageThreadId, sourceMessageId) : false;
         if (!handled) {

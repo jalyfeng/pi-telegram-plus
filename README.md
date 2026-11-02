@@ -121,7 +121,7 @@ A new command from the same chat while one of its dialogs is open closes that di
 - Automatic photo detection (jpg/png/webp → send as photo, fallback to document)
 
 **Download (Telegram → user → agent):**
-- Automatically saves incoming photos, documents, videos, audio, voice, stickers to the working directory
+- Automatically saves incoming photos, documents, videos, audio, voice, stickers to `.pi/telegram-attachments/` in the working directory (original file name; a repeated name gets ` (2)`, ` (3)`, …)
 - Reports saved paths back to the user
 - Handles name sanitization and deduplication
 

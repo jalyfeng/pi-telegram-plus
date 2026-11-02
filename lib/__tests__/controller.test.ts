@@ -652,13 +652,169 @@ describe("createTelegramController media message behavior", () => {
     });
 
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain("photo (2 photo frame(s))");
-    expect(prompts[0]).toContain("photo-large");
-    expect(prompts[0]).toContain("/tmp/saved/photo-large.jpg");
+    expect(prompts[0]).toContain("- photo: photo-large.jpg => /tmp/saved/photo-large.jpg");
+    expect(prompts[0].match(/^- photo:/gm)).toHaveLength(1);
     expect(saved).toEqual([{ fileId: "photo-large", kind: "photo", fileName: undefined }]);
     expect(transportSendText).toHaveBeenCalledTimes(1);
     expect(sent[0]).toContain("✅ Saved attachments (local paths):");
     expect(sent[0]).toContain("/tmp/saved/photo-large.jpg");
+  });
+
+  it("lists a saved document once in the prompt, after the caption", async () => {
+    const prompts: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+    const sent: string[] = [];
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async (_chatId, text) => {
+          sent.push(text);
+          return [{ message_id: 1 }];
+        },
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      saveIncomingTelegramAttachment: async () => "/project/.pi/telegram-attachments/report.txt",
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 1,
+      chat: { id: 999 },
+      caption: "please read this file",
+      document: { file_id: "doc-file-1", file_name: "report.txt" },
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toBe([
+      "please read this file",
+      "",
+      "[telegram attachment]",
+      "- document: report.txt => /project/.pi/telegram-attachments/report.txt",
+    ].join("\n"));
+    expect(sent[0]).not.toContain("doc-file-1");
+  });
+
+  it("lists a failed document once in the prompt with the reason", async () => {
+    const prompts: string[] = [];
+    const sent: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async (_chatId, text) => {
+          sent.push(text);
+          return [{ message_id: 1 }];
+        },
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      saveIncomingTelegramAttachment: async () => {
+        throw new Error("disk full");
+      },
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 1,
+      chat: { id: 999 },
+      caption: "please read this file",
+      document: { file_id: "doc-file-1", file_name: "report.txt" },
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].match(/report\.txt/g)).toHaveLength(1);
+    expect(prompts[0]).toContain("- document: report.txt -> failed to save (disk full)");
+    expect(prompts[0]).not.toContain("=>");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("⚠️ Attachments not saved:");
+    expect(sent[0]).not.toContain("doc-file-1");
+  });
+
+  it("saves incoming files under .pi/telegram-attachments with the original name and numbers duplicates", async () => {
+    const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { saveIncomingAttachment } = await import("../controller.ts");
+    const root = await mkdtemp(join(tmpdir(), "pi-tg-incoming-"));
+    try {
+      const first = await saveIncomingAttachment(root, "report.txt", "documents/file_7.txt", new Uint8Array([1]));
+      const second = await saveIncomingAttachment(root, "report.txt", "documents/file_8.txt", new Uint8Array([2]));
+      const third = await saveIncomingAttachment(root, "report.txt", "documents/file_9.txt", new Uint8Array([3]));
+      const photo = await saveIncomingAttachment(root, "photo", "photos/file_1.jpg", new Uint8Array([4]));
+
+      expect(first).toBe(join(root, ".pi", "telegram-attachments", "report.txt"));
+      expect(second).toBe(join(root, ".pi", "telegram-attachments", "report (2).txt"));
+      expect(third).toBe(join(root, ".pi", "telegram-attachments", "report (3).txt"));
+      expect(photo).toBe(join(root, ".pi", "telegram-attachments", "photo.jpg"));
+      expect(await readFile(second, "utf8")).toBe("\u0002");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("does not block message handling while waiting for prompt completion", async () => {
