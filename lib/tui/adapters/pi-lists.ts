@@ -32,7 +32,28 @@ type PiListSpec = {
   checked?(item: HostRecord): boolean;
   title(component: HostRecord): string;
   multi?: boolean;
+  /** The host's search box: its current text. Typing goes in as keystrokes, so the host re-filters itself. */
+  search?: { query(component: HostRecord): string };
+  /**
+   * Host keys that act on the selected row (`key` is the host's key name). Telegram
+   * has no highlight to move, so a press picks the row first, then moves the cursor
+   * there and sends the key (the same pick as the session list).
+   */
+  rowActions?: { label: string; key: string }[];
 };
+
+/** Text of a host `Input` (`searchInput`), "" when the component has none. */
+function searchTextOf(component: HostRecord): string {
+  const input = asRecord(component.searchInput);
+  const getValue = input.getValue;
+  return typeof getValue === "function" ? text((getValue as () => unknown).call(input)) : "";
+}
+
+/** A row action waiting for its row: the host key to send once the cursor is there. */
+const pendingListKey = new WeakMap<object, string>();
+
+/** Row action ids in the extra-action keys: `row:<host key>`. */
+const ROW_ACTION_PREFIX = "row:";
 
 const messageLabel = (item: HostRecord): string => {
   const oneLine = text(item.text).replace(/\n/g, " ").trim();
@@ -51,6 +72,9 @@ const PI_LIST_SPECS: Record<string, PiListSpec> = {
         && current.id === item.id;
     },
     title: () => "Select model",
+    search: { query: searchTextOf },
+    // Ctrl+S saves the selected row as the default (`app.models.save`).
+    rowActions: [{ label: "Set as default", key: "ctrl-s" }],
   },
   // `/scoped-models`: Enter toggles the row, ctrl+s persists, so it is a
   // multi-select on Telegram; `enabled` is the checkbox.
@@ -60,12 +84,14 @@ const PI_LIST_SPECS: Record<string, PiListSpec> = {
     checked: (item) => item.enabled === true,
     title: () => "Model Configuration",
     multi: true,
+    search: { query: searchTextOf },
   },
   // `/login` and `/logout`: one provider list with two titles.
   OAuthSelectorComponent: {
     items: (c) => (Array.isArray(c.filteredProviders) ? (c.filteredProviders as unknown[]) : []),
     label: (item) => text(item.name),
     title: (c) => (c.mode === "login" ? "Select provider to configure" : "Select provider to logout"),
+    search: { query: searchTextOf },
   },
   // `/trust`: the saved decision marks the current row.
   TrustSelectorComponent: {
@@ -97,6 +123,11 @@ function rowsOf(component: object, spec: PiListSpec): { raw: HostRecord[]; label
   return { raw, labels: raw.map((item) => spec.label(item)), cursor: readNumber(record.selectedIndex) };
 }
 
+/** Live rows of a table spec, empty when the shape is gone. */
+function readRows(component: object, spec: PiListSpec): HostRecord[] {
+  return rowsOf(component, spec)?.raw ?? [];
+}
+
 export const piListAdapter: DialogAdapter = {
   id: "pi-list",
 
@@ -119,11 +150,20 @@ export const piListAdapter: DialogAdapter = {
       ...(spec.current ? { current: spec.current(component as HostRecord, item) } : {}),
       ...(spec.multi && spec.checked ? { checked: spec.checked(item) } : {}),
     }));
+    const record = component as HostRecord;
+    const pending = pendingListKey.get(component);
+    const actions = pending !== undefined
+      ? [{ label: "Back", key: "back" }]
+      : (spec.rowActions ?? []).map((action) => ({ label: action.label, key: `${ROW_ACTION_PREFIX}${action.key}` }));
+    const pickLabel = spec.rowActions?.find((action) => action.key === pending)?.label;
     return {
       kind: "select",
-      title: spec.title(component as HostRecord),
+      title: spec.title(record),
+      ...(pickLabel !== undefined ? { subtitle: `${pickLabel}: choose one` } : {}),
       items,
       total: items.length,
+      ...(spec.search ? { search: { query: spec.search.query(record), placeholder: "Type to search" } } : {}),
+      ...(actions.length > 0 ? { extraActions: actions } : {}),
       ...(spec.multi ? { multi: true } : {}),
     };
   },
@@ -131,7 +171,33 @@ export const piListAdapter: DialogAdapter = {
   act(component, action, ctx) {
     const spec = specFor(component);
     if (!spec) return false;
-    if (action.type === "cancel") return ctx.sendKey("esc");
+    if (action.type === "cancel") {
+      pendingListKey.delete(component);
+      return ctx.sendKey("esc");
+    }
+    if (action.type === "search") {
+      if (!spec.search) return false;
+      // Replace the box text, then let the host re-filter its own list.
+      if (!setInputValue(component, action.query)) return false;
+      ctx.requestRender();
+      return true;
+    }
+    const pending = pendingListKey.get(component);
+    if (action.type === "key") {
+      if (pending !== undefined) {
+        if (action.name !== "back") return false;
+        pendingListKey.delete(component);
+        ctx.requestRender();
+        return true;
+      }
+      const hostKey = action.name.startsWith(ROW_ACTION_PREFIX) ? action.name.slice(ROW_ACTION_PREFIX.length) : undefined;
+      if (hostKey === undefined || !spec.rowActions?.some((row) => row.key === hostKey)) return false;
+      if (readRows(component, spec).length === 0) return false;
+      pendingListKey.set(component, hostKey);
+      ctx.requestRender();
+      return true;
+    }
+    if (pending !== undefined && action.type !== "choose") return false;
 
     const multi = spec.multi === true;
     if (action.type === "submit") {
@@ -151,6 +217,11 @@ export const piListAdapter: DialogAdapter = {
     if (!rows) return false;
     const target = resolveRowKey(rows.labels, action.key);
     if (target === undefined) return false;
+    if (pending !== undefined) {
+      pendingListKey.delete(component);
+      // Move the cursor without choosing, then send the host's key for the action.
+      return moveCursor(ctx.sendKey, rows.cursor, target) && ctx.sendKey(pending);
+    }
     return selectRow(ctx.sendKey, rows.cursor, target);
   },
 };
@@ -196,13 +267,6 @@ function sessionListOf(component: object): HostRecord | undefined {
 function sessionRows(list: HostRecord): { raw: HostRecord[]; labels: string[]; cursor: number } {
   const raw = (list.filteredSessions as unknown[]).map((node) => asRecord(asRecord(node).session));
   return { raw, labels: raw.map(sessionLabel), cursor: readNumber(list.selectedIndex) };
-}
-
-/** The host's search box text (`SessionList.searchInput`); "" when unreadable. */
-function sessionSearchText(list: HostRecord): string {
-  const input = asRecord(list.searchInput);
-  const getValue = input.getValue;
-  return typeof getValue === "function" ? text((getValue as () => unknown).call(input)) : "";
 }
 
 /** The session with `path` in the first pool that has it. */
@@ -377,7 +441,7 @@ export const piSessionAdapter: DialogAdapter = {
       ...(pending !== undefined ? { subtitle: `${pending === "rename" ? "Rename" : "Delete"}: choose a session` } : {}),
       items,
       total: items.length,
-      search: { query: sessionSearchText(list), placeholder: "Type to search" },
+      search: { query: searchTextOf(list), placeholder: "Type to search" },
       extraActions,
       ...(notice !== undefined ? { notice } : {}),
     };
