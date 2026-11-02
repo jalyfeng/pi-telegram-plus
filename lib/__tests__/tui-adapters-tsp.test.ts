@@ -1907,3 +1907,61 @@ describe("tsp input wizard review step", () => {
     expect(component.events).toEqual([]);
   });
 });
+
+describe("tsp input wizard review summary", () => {
+  it("puts every summary entry on its own line of the confirmation body", () => {
+    const tree = {
+      k: "col",
+      c: [
+        {
+          k: "overlay",
+          p: { role: "omp.overlay.mcpAdd", head: "Add MCP server" },
+          c: [
+            {
+              k: "col",
+              c: [
+                { k: "text", p: { text: "Review and save", role: "omp.mcpAdd.title" } },
+                { k: "text", p: { text: "omp connects to the server as soon as it is saved.", role: "omp.mcpAdd.lead" } },
+                {
+                  k: "kv",
+                  p: {
+                    role: "omp.mcpAdd.summary",
+                    items: [
+                      { k: "Name", v: "localfs" },
+                      { k: "Transport", v: "stdio" },
+                      { k: "Arguments", v: "hello" },
+                      { k: "Auth", v: [{ t: "None" }] },
+                      { k: "Saved in", v: [{ t: "This project  " }, { t: ".omp/mcp.json" }] },
+                    ],
+                  },
+                },
+                {
+                  k: "row",
+                  p: { role: "omp.actions" },
+                  c: [
+                    { k: "row", p: { role: "omp.btn", actions: { click: "back" } }, c: [{ k: "text", p: { text: "Back" } }] },
+                    { k: "row", p: { role: "omp.btn", actions: { click: "next" } }, c: [{ k: "text", p: { text: "Save server" } }] },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    expect(tspInputAdapter.read(makeComponent(tree), ctxFor())).toEqual({
+      kind: "confirm",
+      title: "Review and save",
+      message: [
+        "omp connects to the server as soon as it is saved.",
+        "Name: localfs",
+        "Transport: stdio",
+        "Arguments: hello",
+        "Auth: None",
+        "Saved in: This project  .omp/mcp.json",
+      ].join("\n"),
+      confirmLabel: "Save server",
+      cancelLabel: "Back",
+    });
+  });
+});

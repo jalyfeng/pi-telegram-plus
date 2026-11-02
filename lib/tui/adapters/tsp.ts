@@ -1528,6 +1528,16 @@ function collectWizardBodyNode(node: NativeNodeLike, depth: number, visited: Set
     if (text) lines.push(text);
     return;
   }
+  if (node.k === "kv" && isObject(node.p) && Array.isArray(node.p.items)) {
+    // A key/value summary (the review's "Name: github" rows): one line per entry.
+    for (const item of node.p.items) {
+      if (!isObject(item)) continue;
+      const key = tspText(item.k).trim();
+      const value = tspText(item.v).trim();
+      if (key || value) lines.push(key && value ? `${key}: ${value}` : key || value);
+    }
+    return;
+  }
   const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
   for (const child of children) {
     if (!isObject(child)) continue;
