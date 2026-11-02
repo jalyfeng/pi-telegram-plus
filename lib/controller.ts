@@ -27,7 +27,7 @@ import { isOmpHost } from "./session-capture.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "./turn-context.ts";
 import { OriginTracker, type CommandScope } from "./tui/origin.ts";
 import { FocusTracker } from "./tui/focus.ts";
-import { OutputCapture } from "./tui/output.ts";
+import { OutputCapture, type NoticeTarget, type TurnNotice } from "./tui/output.ts";
 import { CommandGateway } from "./tui/gateway.ts";
 import { runInCommand } from "./tui/command-context.ts";
 import { DialogBroker } from "./tui/broker.ts";
@@ -36,6 +36,41 @@ import { readEditorText as readHostEditorText, writeEditorText as writeHostEdito
 import type { DialogSession } from "./tui/model.ts";
 
 const ctrlLog = log.child("controller");
+
+/** The same host notice is sent to one turn at most once per this window (#33). */
+const TURN_NOTICE_DEDUPE_MS = 5000;
+
+/** Forwards host notices raised during a Telegram turn to that turn's chat. The newest
+ * active turn owns the notice; with no active turn the notice stays in the terminal. */
+export function createTurnNotice(
+  getTurns: () => TelegramTurn[],
+  transport: Pick<TelegramTransport, "sendText">,
+  now: () => number = Date.now,
+): TurnNotice {
+  const lastSent = new Map<string, number>();
+  return {
+    turn(): NoticeTarget | undefined {
+      const turn = getTurns().at(-1);
+      if (!turn) return undefined;
+      return { chatId: turn.chatId, messageThreadId: turn.messageThreadId, sourceMessageId: turn.sourceMessageId };
+    },
+    send(target, html) {
+      const current = now();
+      const key = `${target.chatId}:${target.messageThreadId ?? "main"}:${target.sourceMessageId ?? ""}\n${html}`;
+      for (const [known, at] of lastSent) {
+        if (current - at >= TURN_NOTICE_DEDUPE_MS) lastSent.delete(known);
+      }
+      if (lastSent.has(key)) return;
+      lastSent.set(key, current);
+      const deliver = async () => {
+        await transport.sendText(target.chatId, html, target.messageThreadId, target.sourceMessageId);
+      };
+      deliver().catch((err: unknown) => {
+        ctrlLog.debug("forwarding host notice to telegram turn failed", { err });
+      });
+    },
+  };
+}
 
 /** Callbacks from the removed screen-mirror keyboards: answered as expired and
  * never injected (§0.1 #4). Exported so the regression test shares one source. */
@@ -773,7 +808,12 @@ export function createTelegramController(deps: {
     holdOpen: (): boolean => outputCapture.hasRunningBash(),
   });
   const secretStore = deps.secrets ?? new SecretStore();
-  const outputCapture = new OutputCapture(deps.transport, originTracker, secretStore);
+  const outputCapture = new OutputCapture(
+    deps.transport,
+    originTracker,
+    secretStore,
+    createTurnNotice(() => deps.getActiveTurns?.() ?? [], deps.transport),
+  );
   const commandGateway = new CommandGateway({
     bridge,
     origin: originTracker,

@@ -63,6 +63,23 @@ export type OutputPager = (target: { chatId: number; messageThreadId?: number; m
 
 type OutputTransport = Pick<TelegramTransport, "sendText" | "editText" | "sendDocument">;
 
+/** The Telegram turn a host notice belongs to (the turn's chat, topic and source message). */
+export type NoticeTarget = { chatId: number; messageThreadId?: number; sourceMessageId?: number };
+
+/** Host notices (`showStatus` / `showError` / `showWarning`) raised while a Telegram turn
+ * runs, outside any command scope. Without it they would be dropped (#33). */
+export type TurnNotice = {
+  /** The turn a notice raised now belongs to; undefined when no Telegram turn runs (the notice stays in the terminal). */
+  turn(): NoticeTarget | undefined;
+  /** Deliver one formatted notice (HTML) to that turn. */
+  send(target: NoticeTarget, html: string): void;
+};
+
+/** Key of a chat (or topic) in the SecretStore; the one place it is spelled out. */
+export function secretChatKey(chatId: number, messageThreadId?: number): string {
+  return `${chatId}:${messageThreadId ?? "main"}`;
+}
+
 type Binding = {
   scope: CommandScope;
   telegram: OutputTelegram;
@@ -133,6 +150,7 @@ export class OutputCapture {
     private readonly transport: OutputTransport,
     private readonly origin: OriginTracker,
     private readonly secrets?: SecretStore,
+    private readonly turnNotice?: TurnNotice,
   ) {}
 
   /** Where the final output goes when it does not fit one message. */
@@ -268,7 +286,27 @@ export class OutputCapture {
     const binding = this.binding;
     if (!binding || !this.secrets) return text;
     const { chatId, messageThreadId } = binding.telegram;
-    return this.secrets.redact(`${chatId}:${messageThreadId ?? "main"}`, text);
+    return this.secrets.redact(secretChatKey(chatId, messageThreadId), text);
+  }
+
+  /** True when `push` would accept output now: a live binding whose scope is the active one. */
+  private ownsOutput(): boolean {
+    const binding = this.binding;
+    return !!binding && !binding.finished && !binding.scope.ended && this.origin.active() === binding.scope;
+  }
+
+  /** A host notice raised outside any command during a Telegram turn goes to that turn's chat.
+   * With no Telegram turn (a terminal turn) nothing is sent. */
+  private forwardTurnNotice(prefix: string, message: string): void {
+    const notice = this.turnNotice;
+    const target = notice?.turn();
+    if (!notice || !target) return;
+    const plain = stripAnsi(message);
+    const masked = this.secrets?.redact(secretChatKey(target.chatId, target.messageThreadId), plain) ?? plain;
+    const html = `${prefix}${escapeHtml(masked)}`;
+    if (html.trim().length === 0) return;
+    outputLog.debug("forward host notice to telegram turn", { length: html.length });
+    notice.send(target, html);
   }
 
   /** Debug trace of one claimed component: what it was and what the render
@@ -305,7 +343,11 @@ export class OutputCapture {
           const message = args[0];
           if (typeof message !== "string" || message.trim().length === 0) return;
           const prefix = name === "showError" ? "❌ " : name === "showWarning" ? "⚠️ " : "";
-          this.push(`${prefix}${escapeHtml(this.redact(stripAnsi(message)))}`);
+          if (this.ownsOutput()) {
+            this.push(`${prefix}${escapeHtml(this.redact(stripAnsi(message)))}`);
+            return;
+          }
+          this.forwardTurnNotice(prefix, message);
         }, this);
       }
     }
