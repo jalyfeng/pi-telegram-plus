@@ -49,6 +49,13 @@ const CONTENT_MAX_DEPTH = 3;
 const BASH_EXECUTOR_CTORS = /^BashExecutionComponent$/;
 const BASH_EXECUTOR_METHODS = ["setExpanded", "appendOutput", "setComplete", "getOutput"] as const;
 
+/** Containers the host gives its live panels (/btw, /omfg, /cleanse; oh-my-pi@v18.14.1
+ * interactive-mode.ts 2134-2136). A panel streams its text, so only its settled
+ * result is output: it is read when the panel's terminal method runs. */
+const LIVE_PANEL_CONTAINERS = ["btwContainer", "omfgContainer", "cleanseContainer"] as const;
+/** Terminal methods of those panels (btw-panel.ts, omfg-panel.ts, cleanse-panel.ts). */
+const LIVE_PANEL_TERMINAL_METHODS = ["markComplete", "markError", "markAborted", "markSaved", "markRejected", "finish"] as const;
+
 export type OutputTelegram = {
   chatId: number;
   messageThreadId?: number;
@@ -135,6 +142,9 @@ export class OutputCapture {
   private readonly presentClaimed = new WeakSet<object>();
   /** Mode objects that already carry the `presentCommandOutput` stage. */
   private readonly presentHooked = new WeakSet<object>();
+  /** Live panels claimed inside a command chain, and the ones whose result already went out. */
+  private readonly livePanels = new WeakSet<object>();
+  private readonly livePanelDone = new WeakSet<object>();
   private pager?: OutputPager;
   /** Registered while this capture runs: a command's own lines (notices) and its message. */
   private readonly route: CommandMessageRoute = {
@@ -269,6 +279,41 @@ export class OutputCapture {
     }
   }
 
+  /** Claim a live panel added to a command's container. Its first terminal method call
+   * delivers the panel's one-line result to that command's message; nothing else of the
+   * panel is output. */
+  private claimLivePanel(panel: Record<string, unknown>, binding: Binding): void {
+    if (this.livePanels.has(panel)) return;
+    this.livePanels.add(panel);
+    for (const name of LIVE_PANEL_TERMINAL_METHODS) {
+      if (typeof panel[name] !== "function") continue;
+      hookMethod(panel, name, `output-live-panel-${name}`, undefined, (args) => {
+        if (this.livePanelDone.has(panel)) return;
+        this.livePanelDone.add(panel);
+        const html = livePanelResultHtml(name, args, panel, this.redactFor(binding));
+        outputLog.debug("live panel settled", { method: name, captured: !!html });
+        if (html) this.addPanelResult(binding, html);
+      }, this);
+    }
+  }
+
+  /** A panel's result while its command is live goes out with the normal output. Once the
+   * command has ended, it joins the entries and the message is written again with it. */
+  private addPanelResult(binding: Binding, html: string): void {
+    if (!binding.finished && !binding.scope.ended) {
+      this.push(html);
+      return;
+    }
+    binding.entries.push(html);
+    void this.flush(binding, true);
+  }
+
+  /** Redaction for one binding's chat, also after the binding has ended (`this.binding` is gone by then). */
+  private redactFor(binding: Binding): (text: string) => string {
+    const { chatId, messageThreadId } = binding.telegram;
+    return (text) => this.secrets?.redact(secretChatKey(chatId, messageThreadId), text) ?? text;
+  }
+
   private emitBashOutput(child: Record<string, unknown>, binding: Binding, final: boolean): void {
     if (this.bashPushed.has(child)) return;
     this.bashPushed.add(child);
@@ -396,6 +441,22 @@ export class OutputCapture {
         if (!title && !body) return;
         this.push(title ? `<b>${escapeHtml(this.redact(title))}</b>\n${body ?? ""}` : body!);
       }, this);
+    }
+    // /btw, /omfg and /cleanse: the host adds their live panel to its own container
+    // (btw-controller.ts 474/590, omfg-controller.ts 90, cleanse-command-controller.ts 83),
+    // which the chat hook never sees. A panel added inside a command's chain is claimed.
+    if (isHostObject(mode)) {
+      for (const name of LIVE_PANEL_CONTAINERS) {
+        const container = (mode as Record<string, unknown>)[name];
+        if (!isHostObject(container) || this.attached.has(container)) continue;
+        this.attached.add(container);
+        hookMethod(container, "addChild", "output-live-panel-add-child", undefined, (args) => {
+          const binding = this.binding;
+          if (!binding || binding.finished || currentCommandScope() !== binding.scope) return;
+          const child = args[0];
+          if (isHostObject(child)) this.claimLivePanel(child, binding);
+        }, this);
+      }
     }
     // OMP `presentCommandOutput` (oh-my-pi@v18.12.5 interactive-mode.ts
     // presentCommandOutput ~7633) defers command output while the agent streams.
@@ -623,6 +684,47 @@ export class OutputCapture {
         binding.scope.origin.sourceMessageId,
       ).catch(outputLog.swallow("warn", "send exported session failed", { chatId, path: value }));
     }, () => undefined);
+  }
+}
+
+/** The one result line of a settled live panel, from the arguments of its terminal method
+ * and its public getters only. `undefined` for a method that carries no result. */
+function livePanelResultHtml(
+  method: string,
+  args: unknown[],
+  panel: Record<string, unknown>,
+  redact: (text: string) => string,
+): string | undefined {
+  switch (method) {
+    case "markComplete": {
+      // /btw: the answer is the panel's copy text (undefined until the panel is complete).
+      const getCopyText = panel.getCopyText;
+      const answer = typeof getCopyText === "function" ? (getCopyText as () => unknown).call(panel) : undefined;
+      if (typeof answer !== "string" || answer.trim().length === 0) return "✓ Done";
+      return markdownToTelegramHtml(redact(stripAnsi(answer)));
+    }
+    case "markError": {
+      const message = typeof args[0] === "string" ? stripAnsi(args[0]) : "";
+      return `❌ ${escapeHtml(redact(message.trim() || "Error"))}`;
+    }
+    case "markAborted":
+      return "✖ Cancelled";
+    case "markSaved": {
+      const path = typeof args[0] === "string" ? args[0] : "";
+      return `✅ Rule saved: ${escapeHtml(redact(path))}`;
+    }
+    case "markRejected":
+      return "✖ Rule rejected";
+    case "finish": {
+      // /cleanse: the status is a string; an object status is read by its kind or state.
+      const status = args[0];
+      let label = "finished";
+      if (typeof status === "string") label = status;
+      else if (isHostObject(status)) label = String(status.kind ?? status.state ?? "finished");
+      return `Cleanse ${escapeHtml(redact(label))}`;
+    }
+    default:
+      return undefined;
   }
 }
 
