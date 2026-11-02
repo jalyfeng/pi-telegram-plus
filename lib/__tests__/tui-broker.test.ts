@@ -974,6 +974,31 @@ describe("who closed a dialog and what they tapped", () => {
     }
   });
 
+  it("counts a typed answer as Telegram's even when the host closes the dialog during the write", async () => {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    // The host closes the dialog synchronously inside the submit, before handleText returns.
+    const model: DialogModel = { kind: "input", title: "Paste your API key", secret: false };
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: (_component, action) => {
+        if (action.type === "submit") focus.closeToEditor();
+        return true;
+      },
+    };
+    session.model = model;
+
+    expect(broker.handleText(session, "sk-test-123", 57)).toEqual({ handled: true });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ Sent an answer");
+    expect(lastText(transport)).not.toContain("Answered in the terminal");
+  });
+
   it("says the terminal closed the dialog when the Telegram tap was a button that kept it open", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {

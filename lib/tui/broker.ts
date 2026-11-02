@@ -672,6 +672,15 @@ export class DialogBroker {
     // search box (or the editor), which the user never asked for.
     const subject = (session.subject ?? session.focus) as Record<string, unknown>;
     const ctx = this.context(subject, this.deps.focus.current());
+    // A typed answer closes the dialog just like a tap does. The host may close it inside the
+    // submit below, before this function returns, so the marker is set before the write; it is
+    // put back if the write is refused.
+    const answered = purpose === "input" || purpose === "editor";
+    const before = { telegramAction: session.telegramAction, lastAction: session.lastAction };
+    if (answered) {
+      session.telegramAction = { cancelled: false, at: Date.now() };
+      session.lastAction = "Sent an answer";
+    }
     const driven = purpose === "input" || purpose === "editor"
       ? this.act(subject, { type: "submit", text }, ctx)
       : purpose === "search"
@@ -687,12 +696,11 @@ export class DialogBroker {
       void this.deps.transport.deleteMessage(telegram.chatId, messageId).catch(() => undefined);
     }
     if (!written) {
+      if (answered) {
+        session.telegramAction = before.telegramAction;
+        session.lastAction = before.lastAction;
+      }
       return { handled: true, toast: "The host did not accept this input" };
-    }
-    // A typed answer closes the dialog just like a tap does, so the close belongs to Telegram.
-    if (purpose === "input" || purpose === "editor") {
-      session.telegramAction = { cancelled: false, at: Date.now() };
-      session.lastAction = "Sent an answer";
     }
     if (this.session === session && session.state !== "closed") {
       if (this.canDrive(session)) this.redraw(session);
