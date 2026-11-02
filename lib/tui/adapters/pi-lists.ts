@@ -230,6 +230,14 @@ type SessionRowAction = "rename" | "delete";
 const pendingSessionAction = new WeakMap<object, SessionRowAction>();
 const SESSION_ROW_KEYS: Record<SessionRowAction, string> = { rename: "ctrl-r", delete: "ctrl-d" };
 
+/**
+ * The host is loading a list (`SessionSelectorHeader.loading`). Its rename and
+ * delete keys are ignored then, so the adapter must not claim they landed.
+ */
+function sessionLoading(component: HostRecord): boolean {
+  return asRecord(component.header).loading === true;
+}
+
 /** The host's status line (`SessionSelectorHeader.statusMessage`), e.g. "Cannot delete the active session". */
 function sessionStatusNotice(component: HostRecord): string | undefined {
   const message = text(asRecord(asRecord(component.header).statusMessage).message);
@@ -301,6 +309,8 @@ function actSessionList(component: HostRecord, list: HostRecord, action: DialogA
   const target = resolveRowKey(labels, action.key);
   if (target === undefined) return false;
   if (pending !== undefined) {
+    // Refused while loading: keep the pick so the next tap can retry.
+    if (sessionLoading(component)) return false;
     pendingSessionAction.delete(component);
     // Move the host cursor without choosing, then press the host's key for the action.
     return moveCursor(ctx.sendKey, cursor, target) && ctx.sendKey(SESSION_ROW_KEYS[pending]);

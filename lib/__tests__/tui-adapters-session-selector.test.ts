@@ -280,6 +280,12 @@ describe("contract: real pi 1.4.0 session selector actions", () => {
   const TWO = join(dir, "two.jsonl");
 
   function fileSelector(renamed: [string, string][] = []) {
+    // `hold` makes the next host load wait until `release`, as a slow disk would.
+    let held: Promise<void> | undefined;
+    let release: () => void = () => {};
+    const hold = () => {
+      held = new Promise<void>((resolve) => { release = resolve; });
+    };
     const sessions: SessionInfo[] = [
       {
         path: ONE, id: "one", cwd: dir,
@@ -294,7 +300,10 @@ describe("contract: real pi 1.4.0 session selector actions", () => {
     ];
     for (const path of [ONE, TWO]) writeFileSync(path, "");
     // Each load reads what is still on disk, like pi's loader does.
-    const load = async () => sessions.filter((session) => existsSync(session.path)).map((session) => ({ ...session }));
+    const load = async () => {
+      if (held) await held;
+      return sessions.filter((session) => existsSync(session.path)).map((session) => ({ ...session }));
+    };
     const selector = new RealSessionSelectorComponent(
       load, load, () => {}, () => {}, () => {}, () => {}, {
         renameSession: async (path: string, name: string | undefined) => {
@@ -304,7 +313,7 @@ describe("contract: real pi 1.4.0 session selector actions", () => {
         },
       }, TWO,
     );
-    return { selector, settle };
+    return { selector, settle, hold, release: () => release() };
   }
 
   function rowKeyOf(model: DialogModel, prefix: string): string {
@@ -395,6 +404,30 @@ describe("contract: real pi 1.4.0 session selector actions", () => {
     expect(existsSync(ONE)).toBe(false);
     const after = expectSelect(piSessionAdapter.read(selector, ctx));
     expect(after.items.map((item) => item.label)).toEqual(["Named session · 9 msgs"]);
+  });
+
+  it("rename and delete are refused while the host is loading, and the pick survives", async () => {
+    const renamed: [string, string][] = [];
+    const { selector, settle, hold, release } = fileSelector(renamed);
+    await settle();
+    const ctx = realCtx(selector);
+    piSessionAdapter.act(selector, { type: "key", name: "rename" }, ctx);
+    // A reload keeps the rows on screen while the host shows "Loading".
+    hold();
+    (selector as unknown as { loadScope: (scope: "current") => Promise<void> }).loadScope("current");
+    await settle();
+    const key = rowKeyOf(expectSelect(piSessionAdapter.read(selector, ctx)), "alpha first line");
+    expect(piSessionAdapter.act(selector, { type: "choose", key }, ctx)).toBe(false);
+    expect(piSessionAdapter.read(selector, ctx).kind).toBe("select");
+    expect(expectSelect(piSessionAdapter.read(selector, ctx)).subtitle).toBe("Rename: choose a session");
+
+    release();
+    await settle();
+    expect(piSessionAdapter.act(selector, { type: "choose", key }, ctx)).toBe(true);
+    expect(piSessionAdapter.read(selector, ctx).kind).toBe("input");
+    expect(piSessionAdapter.act(selector, { type: "cancel" }, ctx)).toBe(true);
+    await settle();
+    expect(renamed).toEqual([]);
   });
 
   it("delete refuses the active session and says why", async () => {
