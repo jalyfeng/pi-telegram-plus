@@ -23,6 +23,7 @@
  */
 import type { AdapterContext, DialogAction, DialogAdapter, DialogItem, DialogModel } from "../model.ts";
 import { setInputValue } from "../keys.ts";
+import { cancelTextFormField, findTextFormField, submitTextFormField, textFormFieldModel } from "./form-field.ts";
 
 /** What a component may consult while describing itself (§4.11.3); never a clock. */
 const DESCRIBE_CONTEXT = {
@@ -564,7 +565,13 @@ export const tspPickerAdapter: DialogAdapter = {
 
   read(component, ctx): DialogModel {
     const found = findPicker(component);
-    if (!found) return { kind: "unsupported", what: "OMP picker closed or no longer a picker" };
+    if (!found) {
+      // The session picker's rename dialog replaces the picker's card with a
+      // nested text field; the same dialog owns it, so the field is its input.
+      const field = findTextFormField(component);
+      if (field) return textFormFieldModel(field);
+      return { kind: "unsupported", what: "OMP picker closed or no longer a picker" };
+    }
     const { props } = found;
     const confirm = pickerConfirm(props);
     if (confirm) {
@@ -651,7 +658,7 @@ export const tspPickerAdapter: DialogAdapter = {
   act(component, action, ctx) {
     // Never act on a stale tree: the list may have been filtered underneath us.
     const found = findPicker(component);
-    if (!found) return false;
+    if (!found) return actTextFormField(component, action, ctx);
     const { owner, keypath, props } = found;
     const confirm = pickerConfirm(props);
     if (confirm) return sendPickerEvent(owner, pickerConfirmEvent(keypath, confirm, action), ctx);
@@ -708,6 +715,26 @@ export const tspPickerAdapter: DialogAdapter = {
     return sendPickerEvent(owner, target, ctx);
   },
 };
+
+/**
+ * Submit or cancel a text field nested in the picker's dialog (the rename
+ * dialog). Only the field's own methods are used: no keys, no screen.
+ */
+function actTextFormField(component: object, action: DialogAction, ctx: AdapterContext): boolean {
+  const field = findTextFormField(component);
+  if (!field) return false;
+  let landed: boolean;
+  if (action.type === "submit") landed = submitTextFormField(field, action.text ?? "");
+  else if (action.type === "cancel") landed = cancelTextFormField(field);
+  else return false;
+  if (!landed) return false;
+  try {
+    ctx.requestRender();
+  } catch {
+    // A host without a live renderer has nothing to redraw; the change landed.
+  }
+  return true;
+}
 
 /** Ask the host to redraw after a change that lives only in this adapter. */
 function requestRedraw(ctx: AdapterContext): boolean {
@@ -1413,6 +1440,19 @@ export const tspInputAdapter: DialogAdapter = {
     if (typeof handle !== "function") return false;
     let event: unknown;
     if (action.type === "submit") {
+      // A nested TextFormField (the MCP add wizard's text steps) is answered
+      // through its own setValue/submit: typing into it and sending the root
+      // its submit event left the answer in the field, unsent.
+      const field = findTextFormField(component);
+      if (field) {
+        if (!submitTextFormField(field, action.text ?? "")) return false;
+        try {
+          ctx.requestRender();
+        } catch {
+          // A host without a live renderer has nothing to redraw; the submit landed.
+        }
+        return true;
+      }
       // The dialog routes keystrokes to its current field: clear it, then
       // type. Enter is the `submit` action below, not a raw newline.
       if (!setInputValue(component, action.text ?? "")) return false;
