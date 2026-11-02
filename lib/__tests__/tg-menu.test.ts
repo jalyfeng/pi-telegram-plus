@@ -184,8 +184,8 @@ describe("/tg multi-level menu", () => {
     expect([...commands.keys()]).toContain("tg");
   });
 
-  it("Close exits the menu immediately", async () => {
-    const { ui } = makeScriptedUi({ select: ["❌ Close"] });
+  it("cancelling the main menu exits immediately", async () => {
+    const { ui } = makeScriptedUi({ select: [] });
     await commands.get("tg")!("", makeCtx(ui));
     expect(ui.select).toHaveBeenCalledTimes(1);
   });
@@ -199,7 +199,7 @@ describe("/tg multi-level menu", () => {
   it("Bots → Bot list → shows bots as selectable options", async () => {
     const bot = makeBot({ name: "alpha", token: "t1", botUsername: "alphabot" });
     await addBot(bot);
-    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back", "⬅️ Back", "❌ Close"] });
+    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back", "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui));
     const botListCall = ui.select.mock.calls[2]; // 3rd select = Bot list (after main + Bots submenu)
     expect(botListCall[1]).toContain(botChoiceFull(bot, true));
@@ -207,7 +207,7 @@ describe("/tg multi-level menu", () => {
 
   it("Bots → Add bot → adds bot to registry", async () => {
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "➕ Add bot", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "➕ Add bot", "⬅️ Back"],
       input: ["my-menu-bot"],
       inputSecret: ["token-from-menu"],
     });
@@ -227,7 +227,7 @@ describe("/tg multi-level menu", () => {
     await addBot(bot2);
     // bot1 is the default (first added). bot2 is not default.
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "⭐ Default bot: a", botChoiceFull(bot2, false), "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "⭐ Default bot: a", botChoiceFull(bot2, false), "⬅️ Back", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     const registry = await readBotRegistry();
@@ -260,7 +260,7 @@ describe("/tg multi-level menu", () => {
     await writeProjectBinding(projectDir, { botId: bot.id, enabled: true });
     config = { botToken: bot.token };
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "⭐ Default bot: solo", "Clear default", "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "⭐ Default bot: solo", "Clear default", "⬅️ Back", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     expect((await readBotRegistry()).defaultBotId).toBeUndefined();
@@ -302,7 +302,7 @@ describe("/tg multi-level menu", () => {
 
   it("Back from the Commands list returns to the main menu without running anything", async () => {
     commandCatalog = [{ name: "fast", description: "Toggle fast mode" }];
-    const { ui } = makeScriptedUi({ select: ["⌨️ Commands", "⬅️ Back", "❌ Close"] });
+    const { ui } = makeScriptedUi({ select: ["⌨️ Commands", "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui));
     expect(menuEvents).toEqual([]);
     expect(ui.select).toHaveBeenCalledTimes(3);
@@ -311,7 +311,7 @@ describe("/tg multi-level menu", () => {
 
   it("navigates with ui.menu when available and closes the menu on exit", async () => {
     const { ui } = makeScriptedUi({});
-    const picks = ["🤖 Bots", "⬅️ Back", "⚙️ Config", "⬅️ Back", "❌ Close"];
+    const picks = ["🤖 Bots", "⬅️ Back", "⚙️ Config", "⬅️ Back"];
     let i = 0;
     const menu = vi.fn(async (_title: string, _options: string[]) => picks[i++]);
     const closeMenu = vi.fn(async () => undefined);
@@ -328,7 +328,7 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     const botChoice = botChoiceFull(bot, true);
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "Bot list", botChoice, "Remove", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoice, "Remove", "⬅️ Back"],
       confirm: [true],
     });
     await commands.get("tg")!("", makeCtx(ui));
@@ -342,7 +342,7 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     const botChoice = botChoiceFull(bot, true);
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "Bot list", botChoice, "Remove", "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoice, "Remove", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
       confirm: [false],
     });
     await commands.get("tg")!("", makeCtx(ui));
@@ -356,7 +356,7 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     const botChoice = botChoiceFull(bot, true);
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "Bot list", botChoice, "Update", "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoice, "Update", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
       input: ["allowedUserId", "99999"],
     });
     await commands.get("tg")!("", makeCtx(ui));
@@ -368,7 +368,7 @@ describe("/tg multi-level menu", () => {
     const bot = makeBot({ name: "zeta", token: "t-z" });
     await addBot(bot);
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "⬅️ Back", "⬅️ Back", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     const detailCall = ui.select.mock.calls[3]; // 4th select = bot detail (main + Bots + Bot list + detail)
@@ -378,7 +378,7 @@ describe("/tg multi-level menu", () => {
   it("Bots submenu shows Add/list/Default in order with the default bot named", async () => {
     const bot = makeBot({ name: "alpha", token: "t-a" });
     await addBot(bot); // becomes default
-    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "⬅️ Back", "❌ Close"] });
+    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui));
     expect(ui.select.mock.calls[1][1]).toEqual(["➕ Add bot", "Bot list", "⭐ Default bot: alpha", "⬅️ Back"]);
   });
@@ -386,7 +386,7 @@ describe("/tg multi-level menu", () => {
   it("Bots submenu default line shows not set when no default is set", async () => {
     await addBot(makeBot({ name: "alpha", token: "t-a" }));
     await clearDefaultBot();
-    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "⭐ Default bot: not set", "⬅️ Back", "⬅️ Back", "❌ Close"] });
+    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "⭐ Default bot: not set", "⬅️ Back", "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui));
     expect(ui.select.mock.calls[2][0]).toBe("⭐ Default bot");
     expect(ui.select.mock.calls[2][1]).not.toContain("Clear default");
@@ -395,7 +395,7 @@ describe("/tg multi-level menu", () => {
   it("Project → shows the effective bot in the Bot label", async () => {
     const bot = makeBot({ name: "proj-bot", token: "t-p" });
     await addBot(bot);
-    const { ui } = makeScriptedUi({ select: ["📁 Project", "⬅️ Back", "❌ Close"] });
+    const { ui } = makeScriptedUi({ select: ["📁 Project", "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui));
     const projectCall = ui.select.mock.calls[1]; // 2nd select = Project submenu (after main)
     expect(projectCall[1]).toContain("Bot: proj-bot (default)");
@@ -412,7 +412,7 @@ describe("/tg multi-level menu", () => {
     };
     for (const state of Object.keys(expected) as TelegramConnectionState[]) {
       connectionStateValue = state;
-      const { ui } = makeScriptedUi({ select: ["📁 Project", "⬅️ Back", "❌ Close"] });
+      const { ui } = makeScriptedUi({ select: ["📁 Project", "⬅️ Back"] });
       await commands.get("tg")!("", makeCtx(ui));
       const options = ui.select.mock.calls[1][1] as string[];
       expect(options).toContain(expected[state]);
@@ -424,7 +424,7 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     connectionStateValue = "other-instance";
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "🟡 In use by another instance", "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "🟡 In use by another instance", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     expect(notifyCalls.some((c) => c.message.includes("Another pi instance is serving this bot"))).toBe(true);
@@ -433,7 +433,7 @@ describe("/tg multi-level menu", () => {
   });
 
   it("Project → no usable bot → only the Bot item (no connection row)", async () => {
-    const { ui } = makeScriptedUi({ select: ["📁 Project", "⬅️ Back", "❌ Close"] });
+    const { ui } = makeScriptedUi({ select: ["📁 Project", "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui));
     const options = ui.select.mock.calls[1][1] as string[];
     expect(options).toEqual(["Bot: not set", "⬅️ Back"]);
@@ -444,7 +444,7 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     await writeProjectBinding(projectDir, { enabled: false });
     const { ui } = makeScriptedUi({
-      select: ["📁 Project", "Bot: default-bot (default)", "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "Bot: default-bot (default)", "⬅️ Back", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     const bindCall = ui.select.mock.calls[2]; // bot picker after clicking the binding row
@@ -457,7 +457,7 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     const botChoice = botChoiceFull(bot, true);
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "Bot: bind-bot (default)", botChoice, "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "Bot: bind-bot (default)", botChoice, "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     const binding = await readProjectBinding(projectDir);
@@ -472,7 +472,7 @@ describe("/tg multi-level menu", () => {
     await writeProjectBinding(projectDir, { botId: bot.id, enabled: false });
     connectionStateValue = "disconnected";
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "⚪ Disconnected → Connect", "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "⚪ Disconnected → Connect", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     const binding = await readProjectBinding(projectDir);
@@ -487,7 +487,7 @@ describe("/tg multi-level menu", () => {
     await writeProjectBinding(projectDir, { botId: bot.id, enabled: true });
     connectionStateValue = "connected";
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "🟢 Connected → Disconnect", "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "🟢 Connected → Disconnect", "⬅️ Back"],
       confirm: [true],
     });
     await commands.get("tg")!("", makeCtx(ui));
@@ -507,7 +507,7 @@ describe("/tg multi-level menu", () => {
     await writeProjectBinding(projectDir, { botId: bot.id, enabled: true });
     connectionStateValue = "connected";
     const { ui } = makeScriptedUi({
-      select: ["📁 Project", "🟢 Connected → Disconnect", "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "🟢 Connected → Disconnect", "⬅️ Back"],
       confirm: [false],
     });
     await commands.get("tg")!("", makeCtx(ui));
@@ -521,7 +521,7 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     await writeProjectBinding(projectDir, { botId: bot.id, enabled: true });
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["📁 Project", "Bot: unbind-bot", "Unbind", "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "Bot: unbind-bot", "Unbind", "⬅️ Back"],
       confirm: [true],
     });
     await commands.get("tg")!("", makeCtx(ui));
@@ -532,7 +532,7 @@ describe("/tg multi-level menu", () => {
 
   it("Config → Message mode → switches to queue", async () => {
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["⚙️ Config", "📨 Message mode: steer", "  queue", "⬅️ Back", "❌ Close"],
+      select: ["⚙️ Config", "📨 Message mode: steer", "  queue", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
 
@@ -544,7 +544,7 @@ describe("/tg multi-level menu", () => {
     // Config menu → select "🔧 Tool: brief" → pickRenderLevel shows ["  hidden", "● brief", "  full"]
     // We pick "  full" (non-current = two-space prefix)
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["⚙️ Config", "🔧 Tool: brief", "  full", "⬅️ Back", "❌ Close"],
+      select: ["⚙️ Config", "🔧 Tool: brief", "  full", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
 
@@ -555,7 +555,7 @@ describe("/tg multi-level menu", () => {
   it("Config → Thinking → sets thinking level", async () => {
     // pickRenderLevel shows ["  hidden", "● brief", "  full"] — we pick "  hidden"
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["⚙️ Config", "💭 Thinking: brief", "  hidden", "⬅️ Back", "❌ Close"],
+      select: ["⚙️ Config", "💭 Thinking: brief", "  hidden", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
 
@@ -565,7 +565,7 @@ describe("/tg multi-level menu", () => {
 
   it("Config → Retry → sets retry count", async () => {
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["⚙️ Config", "🔄 Retry: 3", "⬅️ Back", "❌ Close"],
+      select: ["⚙️ Config", "🔄 Retry: 3", "⬅️ Back"],
       input: ["7"],
     });
     await commands.get("tg")!("", makeCtx(ui));
@@ -576,7 +576,7 @@ describe("/tg multi-level menu", () => {
 
   it("Back navigation: Bots → Back → main menu → Close", async () => {
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     expect(ui.select).toHaveBeenCalledTimes(3);
@@ -584,7 +584,7 @@ describe("/tg multi-level menu", () => {
 
   it("Back navigation: Project → Back → main menu → Close", async () => {
     const { ui } = makeScriptedUi({
-      select: ["📁 Project", "⬅️ Back", "❌ Close"],
+      select: ["📁 Project", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     expect(ui.select).toHaveBeenCalledTimes(3);
@@ -592,21 +592,21 @@ describe("/tg multi-level menu", () => {
 
   it("Back navigation: Config → Back → main menu → Close", async () => {
     const { ui } = makeScriptedUi({
-      select: ["⚙️ Config", "⬅️ Back", "❌ Close"],
+      select: ["⚙️ Config", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     expect(ui.select).toHaveBeenCalledTimes(3);
   });
 
   it("Bots → Bot list with no bots shows info message", async () => {
-    const { ui, notifyCalls } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back", "❌ Close"] });
+    const { ui, notifyCalls } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui));
     expect(notifyCalls.some((c) => c.message.includes("No bots registered"))).toBe(true);
   });
 
   it("Bots → Bot list → no bots → info", async () => {
     // With no bots, Bot list shows the info message instead of a picker.
-    const { ui, notifyCalls } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back", "❌ Close"] });
+    const { ui, notifyCalls } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back"] });
     await commands.get("tg")!("", makeCtx(ui));
     expect(ui.select).toHaveBeenCalledTimes(4);
     expect(notifyCalls.some((c) => c.message.includes("No bots registered"))).toBe(true);
@@ -614,7 +614,7 @@ describe("/tg multi-level menu", () => {
 
   it("Switch instance with no coordinator shows error", async () => {
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🔄 Switch instance", "❌ Close"],
+      select: ["🔄 Switch instance"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     expect(notifyCalls.some((c) => c.message.includes("not the active Telegram instance"))).toBe(true);
@@ -624,7 +624,7 @@ describe("/tg multi-level menu", () => {
     const bot = makeBot({ name: "pairbot", pairingCode: "123456" });
     await addBot(bot);
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Pairing", "New pairing code", "⬅️ Back", "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Pairing", "New pairing code", "⬅️ Back", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     const pairingCall = ui.select.mock.calls[4]; // 5th select = pairing page
@@ -640,7 +640,7 @@ describe("/tg multi-level menu", () => {
     const bot = makeBot({ name: "pairbot", allowedUserId: 777 });
     await addBot(bot);
     const { ui, notifyCalls } = makeScriptedUi({
-      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Pairing", "Unpair", "⬅️ Back", "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Pairing", "Unpair", "⬅️ Back", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
       confirm: [true],
     });
     await commands.get("tg")!("", makeCtx(ui));
@@ -658,7 +658,7 @@ describe("/tg multi-level menu", () => {
     const bot = makeBot({ name: "keeppair", allowedUserId: 777, pairingCode: "111111" });
     await addBot(bot);
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Pairing", "Unpair", "⬅️ Back", "⬅️ Back", "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Pairing", "Unpair", "⬅️ Back", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
       confirm: [false],
     });
     await commands.get("tg")!("", makeCtx(ui));
@@ -673,7 +673,7 @@ describe("/tg multi-level menu", () => {
     await addBot(bot1);
     await addBot(bot2);
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "⭐ Default bot: a", "⬅️ Back", "⬅️ Back", "❌ Close"],
+      select: ["🤖 Bots", "⭐ Default bot: a", "⬅️ Back", "⬅️ Back"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     expect(ui.select.mock.calls[2][0]).toBe("⭐ Default bot");
@@ -682,12 +682,12 @@ describe("/tg multi-level menu", () => {
     ]);
   });
 
-  it("main menu lists 🛠 Debug info just before ❌ Close", async () => {
-    const { ui } = makeScriptedUi({ select: ["❌ Close"] });
+  it("main menu ends with 🛠 Debug info and has no Close option", async () => {
+    const { ui } = makeScriptedUi({ select: [] });
     await commands.get("tg")!("", makeCtx(ui));
     const options = ui.select.mock.calls[0][1] as string[];
     expect(options).toContain("🛠 Debug info");
-    expect(options.indexOf("🛠 Debug info")).toBeLessThan(options.indexOf("❌ Close"));
+    expect(options[options.length - 1]).toBe("🛠 Debug info");
   });
 
   it("Debug info reports the live session and returns to the main menu", async () => {
@@ -698,23 +698,49 @@ describe("/tg multi-level menu", () => {
       isStreaming: false,
       isCompacting: false,
     } as unknown as CapturedAgentSession;
-    const { ui, notifyCalls } = makeScriptedUi({ select: ["🛠 Debug info", "❌ Close"] });
+    const { ui, notifyCalls } = makeScriptedUi({ select: ["🛠 Debug info"] });
     await commands.get("tg")!("", makeCtx(ui, "/work/proj"));
     const report = notifyCalls.find((c) => c.message.startsWith("Plugin debug info"));
     expect(report).toBeDefined();
     expect(report?.message).toContain("model: anthropic/claude-x");
     expect(report?.message).toContain("entries: 3");
-    // After the report the menu returns to the main list, then Close exits.
+    // After the report the menu returns to the main list, then a cancel exits.
     expect(ui.select).toHaveBeenCalledTimes(2);
   });
 
   it("Debug info with no active session notifies an error and stays in the menu", async () => {
     menuSession = undefined;
-    const { ui, notifyCalls } = makeScriptedUi({ select: ["🛠 Debug info", "❌ Close"] });
+    const { ui, notifyCalls } = makeScriptedUi({ select: ["🛠 Debug info"] });
     await commands.get("tg")!("", makeCtx(ui));
     expect(notifyCalls.some((c) => c.message === "No active session" && c.level === "error")).toBe(true);
     expect(notifyCalls.some((c) => c.message.startsWith("Plugin debug info"))).toBe(false);
     expect(ui.select).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancelling the Config submenu closes the whole menu", async () => {
+    // main → Config → cancel (undefined): the main menu is not shown again.
+    const { ui } = makeScriptedUi({ select: ["⚙️ Config"] });
+    await commands.get("tg")!("", makeCtx(ui));
+    expect(ui.select).toHaveBeenCalledTimes(2);
+    expect(ui.select.mock.calls[0][0]).toBe("Telegram Management");
+    expect(ui.select.mock.calls[1][0]).toBe("⚙️ Telegram Config");
+  });
+
+  it("cancelling a nested submenu closes the whole menu", async () => {
+    // main → Bots → Bot list → cancel: neither Bots nor main re-renders.
+    await addBot(makeBot({ name: "alpha", token: "t1", botUsername: "alphabot" }));
+    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "Bot list"] });
+    await commands.get("tg")!("", makeCtx(ui));
+    expect(ui.select).toHaveBeenCalledTimes(3);
+    expect(ui.select.mock.calls[2][0]).toBe("Bot list");
+  });
+
+  it("Back in the Config submenu returns to the main menu", async () => {
+    const { ui } = makeScriptedUi({ select: ["⚙️ Config", "⬅️ Back"] });
+    await commands.get("tg")!("", makeCtx(ui));
+    // main, Config, main again (then the script ends and cancels the main menu).
+    expect(ui.select).toHaveBeenCalledTimes(3);
+    expect(ui.select.mock.calls[2][0]).toBe("Telegram Management");
   });
 });
 

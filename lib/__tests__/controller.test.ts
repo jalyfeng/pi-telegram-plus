@@ -993,7 +993,10 @@ describe("createTelegramController media message behavior", () => {
     expect(prompts).toEqual(["A"]);
     expect(firstResolved).toBe(true);
     expect(session.abort).toHaveBeenCalledTimes(1);
-    expect(sendText).toHaveBeenCalledWith(999, "⏹️ Interrupt requested.", undefined, 3);
+    // This mock never reports isStreaming (queued-prompt routing reads it), so
+    // the reply names no turn; abort() is still requested above.
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "Nothing to stop.", undefined, 3);
   });
 
   it("does not block message handling while a command handler is waiting", async () => {
@@ -1535,5 +1538,105 @@ describe("createTelegramController — callback keyboard cleanup ownership", () 
     } as any);
     expect(transport.sendText).toHaveBeenCalledWith(1, "This prompt is no longer active.", undefined, 55);
     expect(transport.removeInlineKeyboard).not.toHaveBeenCalled();
+  });
+});
+
+describe("createTelegramController /stop reply", () => {
+  const stopHarness = (session: any, resolveInput: (...args: any[]) => any) => {
+    const sendText = vi.fn(async () => [{ message_id: 1 }]);
+    const removeInlineKeyboard = vi.fn(async () => undefined);
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard,
+        sendText,
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput,
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    } as any);
+    const stop = () => controller.handleMessage({ message_id: 3, chat: { id: 999 }, text: "/stop" } as any);
+    return { sendText, removeInlineKeyboard, stop };
+  };
+
+  const idleSession = (overrides: Record<string, unknown> = {}): any => ({
+    prompt: vi.fn(async () => undefined),
+    isStreaming: false,
+    isBashRunning: false,
+    extensionRunner: {
+      getUIContext: () => undefined,
+      setUIContext: () => undefined,
+      getCommand: () => undefined,
+      createCommandContext: () => ({} as any),
+    },
+    abort: vi.fn(() => Promise.resolve()),
+    ...overrides,
+  });
+
+  it("closes a pending dialog and stops a running turn with one reply", async () => {
+    const session = idleSession({ isStreaming: true });
+    const resolveInput = vi.fn(() => ({ handled: true, promptMessageId: 77 }));
+    const { sendText, removeInlineKeyboard, stop } = stopHarness(session, resolveInput);
+
+    await stop();
+
+    expect(resolveInput).toHaveBeenCalled();
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(removeInlineKeyboard).toHaveBeenCalledWith(999, 77);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "⏹️ Stopped. Closed the open dialog.", undefined, 3);
+  });
+
+  it("stops a running bash command and a running turn in one reply", async () => {
+    const abortBash = vi.fn();
+    const session = idleSession({ isStreaming: true, isBashRunning: true, abortBash });
+    const { sendText, stop } = stopHarness(session, () => ({ handled: false }));
+
+    await stop();
+
+    expect(abortBash).toHaveBeenCalledTimes(1);
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "⏹️ Stopped.", undefined, 3);
+  });
+
+  it("says Nothing to stop when idle with no dialog", async () => {
+    const session = idleSession();
+    const { sendText, stop } = stopHarness(session, () => ({ handled: false }));
+
+    await stop();
+
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "Nothing to stop.", undefined, 3);
+  });
+
+  it("says Cancelled when only a dialog was open and the session is idle", async () => {
+    const session = idleSession();
+    const { sendText, stop } = stopHarness(session, () => ({ handled: true, promptMessageId: 5 }));
+
+    await stop();
+
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "Cancelled.", undefined, 3);
   });
 });

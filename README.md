@@ -192,7 +192,7 @@ All bot registry, project binding, config and instance-switching actions live in
 
 #### `/tg` — Telegram management menu
 
-Opens an inline-keyboard menu with four submenus (each with a **⬅️ Back** option to return to the parent level):
+Opens an inline-keyboard menu with four submenus (each with a **⬅️ Back** option to return to the parent level; cancelling a prompt with its Cancel button, `/stop` or Esc closes the whole menu):
 
 | Menu | Actions |
 |------|--------|
@@ -201,7 +201,6 @@ Opens an inline-keyboard menu with four submenus (each with a **⬅️ Back** op
 | **⚙️ Config** | **🔧 Tool** — hidden / brief / full · **💭 Thinking** — hidden / brief / full · **🧠 Thinking level** — model reasoning effort (OMP only, shown when the model supports it; on pi use `/thinking`) · **🔄 Retry** — 0–10 · **🐚 Shell confirm** — dangerous / always / never |
 | **🔄 Switch instance** | List live pi instances sharing this bot token; select one to switch. Must be run on the currently active instance. |
 | **🛠 Debug info** | The plugin's own diagnostics (model, thinking, streaming, entries, cwd). `/debug` itself runs the host's command. |
-| **❌ Close** | Exit the menu. |
 
 The menu uses the same UI abstraction that renders Telegram inline keyboards (`ctx.ui.select` / `input` / `inputSecret` / `confirm`). In Telegram, navigation edits **one message in place** — moving between levels updates that message instead of posting a new one per level. A leaf action that needs its own prompt (input, confirm, a value picker) appears below it, and the menu then continues as a fresh message under that prompt. The local TUI falls back to ordinary selects. Each leaf action shows a result notification, then returns to its submenu.
 

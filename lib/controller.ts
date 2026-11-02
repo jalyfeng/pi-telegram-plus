@@ -741,6 +741,15 @@ function isBashRunning(session: CapturedAgentSession): boolean {
   return (session as unknown as Record<string, unknown>).isBashRunning === true;
 }
 
+/** The one reply /stop sends, naming what was actually stopped. */
+function stopReply(state: { stoppedTurn: boolean; stoppedBash: boolean; closedDialog: boolean }): string {
+  const closed = state.closedDialog ? " Closed the open dialog." : "";
+  if (state.stoppedTurn) return `⏹️ Stopped.${closed}`;
+  if (state.stoppedBash) return `⏹️ Bash stopped.${closed}`;
+  if (state.closedDialog) return "Cancelled.";
+  return "Nothing to stop.";
+}
+
 function isDangerousBash(command: string): boolean {
   return DANGEROUS_BASH_PATTERNS.some((pattern) => pattern.test(command));
 }
@@ -1020,17 +1029,17 @@ export function createTelegramController(deps: {
     interruptGenerationByTarget.set(key, next);
   };
 
-  const fastInterrupt = async (chatId: number, messageThreadId?: number, sourceMessageId?: number) => {
-    const session = deps.getSession();
-    if (!session) {
-      await deps.transport.sendText(chatId, "π session is not ready yet.", messageThreadId, sourceMessageId);
-      return;
-    }
+  /** Aborts the agent turn when a session exists and returns whether a turn was
+   * running. abort() on an idle session is a no-op (pi and OMP AgentSession), so
+   * it is called unconditionally. The caller sends the /stop reply. */
+  const fastInterrupt = async (chatId: number, messageThreadId: number | undefined, session: CapturedAgentSession | undefined): Promise<boolean> => {
+    if (!session) return false;
 
+    const wasStreaming = session.isStreaming === true;
     bumpInterruptGeneration(targetKey(chatId, messageThreadId));
-    await deps.transport.sendText(chatId, "⏹️ Interrupt requested.", messageThreadId, sourceMessageId);
     const abortResult = (session as any).abort?.();
     void abortResult?.catch?.(() => undefined);
+    return wasStreaming;
   };
 
   const reportPromptFailure = async (label: string, chatId: number, messageThreadId: number | undefined, sourceMessageId: number | undefined, err: unknown): Promise<void> => {
@@ -1711,26 +1720,32 @@ export function createTelegramController(deps: {
       if (message.reply_to_message || message.quote || message.text_quote || message.external_reply) logTelegramReplyContext(message);
       if (trimmed === "/stop") {
         // §4.5 rule 6: the dialog gets the Esc first, then the normal /stop path
-        // runs (pending input, bash abort, turn interrupt).
+        // runs (pending input, bash abort, turn interrupt). Every step runs, and
+        // the reply below reports what was stopped in one message.
         dialogBroker.cancelFor(chatId, messageThreadId);
 
         // /stop cancellation priority: first try canceling a reply-targeted
-        // pending input, then any pending input, then abort the agent turn.
+        // pending input, then any pending input.
         const cancelResult = deps.ui.resolveInput(chatId, undefined, replyToInput, false, messageThreadId);
         const cancelAnyResult = !cancelResult.handled ? deps.ui.resolveInput(chatId, undefined, undefined, false, messageThreadId) : cancelResult;
-        if (cancelAnyResult.handled) {
-          if (cancelAnyResult.promptMessageId) void deps.transport.removeInlineKeyboard(chatId, cancelAnyResult.promptMessageId);
-          await deps.transport.sendText(chatId, "Cancelled.", messageThreadId, sourceMessageId);
-          return;
-        }
+        const closedDialog = cancelAnyResult.handled;
+        if (closedDialog && cancelAnyResult.promptMessageId) void deps.transport.removeInlineKeyboard(chatId, cancelAnyResult.promptMessageId);
+
         const stopSession = deps.getSession();
+        let stoppedBash = false;
         if (stopSession && isBashRunning(stopSession)) {
           const abort = readBashAbort(stopSession);
           await Promise.resolve(abort?.()).catch(ctrlLog.swallow("debug", "abortBash from /stop failed"));
-          await deps.transport.sendText(chatId, "⏹️ Bash stopped.", messageThreadId, sourceMessageId);
-          return;
+          stoppedBash = true;
         }
-        await fastInterrupt(chatId, messageThreadId, sourceMessageId);
+        const stoppedTurn = await fastInterrupt(chatId, messageThreadId, stopSession);
+
+        await deps.transport.sendText(
+          chatId,
+          stopReply({ stoppedTurn, stoppedBash, closedDialog }),
+          messageThreadId,
+          sourceMessageId,
+        );
         return;
       }
 

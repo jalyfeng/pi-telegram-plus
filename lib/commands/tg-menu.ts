@@ -44,7 +44,6 @@ const MAIN_MENU_OPTIONS = [
   "⚙️ Config",
   "🔄 Switch instance",
   "🛠 Debug info",
-  "❌ Close",
 ] as const;
 
 const BOTS_MENU_ADD = "➕ Add bot";
@@ -80,6 +79,14 @@ class MenuClosed extends Error {}
  *  and falls back to ui.select. */
 function pick(ui: MenuUi, title: string, options: string[]): Promise<string | undefined> {
   return ui.menu ? ui.menu(title, options) : ui.select(title, options);
+}
+
+/** A menu pick where only Back (a real choice) leaves the current page. A
+ *  cancel (Cancel button, /stop, terminal Esc) closes the whole /tg menu. */
+async function pickMenu(ui: MenuUi, title: string, options: string[]): Promise<string> {
+  const choice = await pick(ui, title, options);
+  if (!choice) throw new MenuClosed();
+  return choice;
 }
 
 // ── Switch instance flow deps ──────────────────────────────────────────────
@@ -158,8 +165,7 @@ async function mainMenu(
     ? [...MAIN_MENU_OPTIONS]
     : MAIN_MENU_OPTIONS.filter((option) => option !== "⌨️ Commands");
   while (true) {
-    const choice = await pick(ui, "Telegram Management", options);
-    if (!choice || choice === "❌ Close") return;
+    const choice = await pickMenu(ui, "Telegram Management", options);
 
     if (choice === "🤖 Bots") {
       if (await botsMenu(ui, deps, cwd)) continue;
@@ -201,8 +207,8 @@ async function commandsMenu(ui: MenuUi, deps: CommandMenuDeps): Promise<void> {
     return;
   }
   const labels = commands.map((command) => `/${command.name}${command.description ? ` — ${command.description}` : ""}`);
-  const selected = await pick(ui, `⌨️ Commands (${commands.length})`, [...labels, BACK_LABEL]);
-  if (!selected || selected === BACK_LABEL) return;
+  const selected = await pickMenu(ui, `⌨️ Commands (${commands.length})`, [...labels, BACK_LABEL]);
+  if (selected === BACK_LABEL) return;
   const index = labels.indexOf(selected);
   const command = commands[index];
   if (!command) return;
@@ -220,8 +226,8 @@ async function botsMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): Pro
     const registry = await readBotRegistry();
     const defaultBot = registry.bots.find((b) => b.id === registry.defaultBotId);
     const defaultChoice = `${BOTS_MENU_DEFAULT_PREFIX}${defaultBot?.name ?? "not set"}`;
-    const choice = await pick(ui, "🤖 Bots", [BOTS_MENU_ADD, BOTS_MENU_LIST, defaultChoice, BACK_LABEL]);
-    if (!choice || choice === BACK_LABEL) return true; // back to main
+    const choice = await pickMenu(ui, "🤖 Bots", [BOTS_MENU_ADD, BOTS_MENU_LIST, defaultChoice, BACK_LABEL]);
+    if (choice === BACK_LABEL) return true; // back to main
 
     if (choice === BOTS_MENU_ADD) {
       await addBotFlow(ui, deps);
@@ -246,12 +252,12 @@ async function defaultBotMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string
     // The current default is ⭐-marked via formatBotLabel; "Clear default" only exists
     // while a default actually is set.
     const choices = registry.bots.map((b) => formatBotLabel(b, registry));
-    const selected = await pick(ui, "⭐ Default bot", [
+    const selected = await pickMenu(ui, "⭐ Default bot", [
       ...choices,
       ...(registry.defaultBotId ? [CLEAR_DEFAULT_LABEL] : []),
       BACK_LABEL,
     ]);
-    if (!selected || selected === BACK_LABEL) return; // back to Bots submenu
+    if (selected === BACK_LABEL) return; // back to Bots submenu
 
     if (selected === CLEAR_DEFAULT_LABEL) {
       if (await clearBotDefaultFlow(ui, deps, cwd)) throw new MenuClosed();
@@ -273,8 +279,8 @@ async function botListMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
       return;
     }
     const choices = registry.bots.map((b) => formatBotLabel(b, registry));
-    const selected = await pick(ui, "Bot list", [...choices, BACK_LABEL]);
-    if (!selected || selected === BACK_LABEL) return; // back to Bots submenu
+    const selected = await pickMenu(ui, "Bot list", [...choices, BACK_LABEL]);
+    if (selected === BACK_LABEL) return; // back to Bots submenu
     const bot = registry.bots[choices.indexOf(selected)];
     if (bot) await botDetailMenu(ui, deps, cwd, bot);
     // loop re-renders the bot list (reflects remove/pairing changes)
@@ -299,8 +305,8 @@ async function botDetailMenu(
     }
     // The global default is set only in the ⭐ Default bot submenu; this page
     // holds the bot's own actions.
-    const choice = await pick(ui, `🤖 ${botNow.name}`, [BOT_ACTION_UPDATE, BOT_ACTION_PAIRING, BOT_ACTION_REMOVE, BACK_LABEL]);
-    if (!choice || choice === BACK_LABEL) return; // back to bot list
+    const choice = await pickMenu(ui, `🤖 ${botNow.name}`, [BOT_ACTION_UPDATE, BOT_ACTION_PAIRING, BOT_ACTION_REMOVE, BACK_LABEL]);
+    if (choice === BACK_LABEL) return; // back to bot list
 
     if (choice === BOT_ACTION_UPDATE) {
       await updateBotFlow(ui, deps, cwd, botNow.id);
@@ -333,12 +339,12 @@ async function pairingMenu(ui: MenuUi, deps: TelegramCommandDeps, bot: BotRecord
     } else {
       ui.notify(formatPairingInstructions({ ...botNow, botToken: botNow.token } as TelegramConfig), "info");
     }
-    const choice = await pick(
+    const choice = await pickMenu(
       ui,
       `🔑 Pairing · ${botNow.name}`,
       paired ? [PAIRING_ACTION_UNPAIR, BACK_LABEL] : [PAIRING_ACTION_NEW_CODE, BACK_LABEL],
     );
-    if (!choice || choice === BACK_LABEL) return; // back to bot detail
+    if (choice === BACK_LABEL) return; // back to bot detail
 
     if (choice === PAIRING_ACTION_NEW_CODE) {
       await regeneratePairingCodeFlow(ui, deps, botNow.id);
@@ -377,13 +383,13 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
     const connection = deps.connectionState();
     const connectLabel = connectionChoice(connection);
 
-    const choice = await pick(ui, "📁 Project", [
+    const choice = await pickMenu(ui, "📁 Project", [
       botLabel,
       // No usable bot means nothing to connect; hide this entry.
       ...(effectiveBot ? [connectLabel] : []),
       BACK_LABEL,
     ]);
-    if (!choice || choice === BACK_LABEL) return true; // back to main
+    if (choice === BACK_LABEL) return true; // back to main
 
     if (choice === botLabel) {
       if (registry.bots.length === 0) {
@@ -392,8 +398,8 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
       }
       const choices = registry.bots.map((b) => formatBotLabel(b, registry));
       // Unbind only makes sense for projects whose binding has a botId.
-      const selected = await pick(ui, "Bind project to bot", [...choices, ...(boundBotId ? [UNBIND_LABEL] : []), BACK_LABEL]);
-      if (!selected || selected === BACK_LABEL) continue;
+      const selected = await pickMenu(ui, "Bind project to bot", [...choices, ...(boundBotId ? [UNBIND_LABEL] : []), BACK_LABEL]);
+      if (selected === BACK_LABEL) continue;
       if (selected === UNBIND_LABEL) {
         await unbindProjectFlow(ui, deps, cwd);
       } else {
@@ -449,8 +455,8 @@ async function configMenu(ui: MenuUi, configDeps: TgConfigDeps, sessionDeps?: Se
     const session = sessionDeps?.getSession();
     const thinkingLevels = session?.getAvailableThinkingLevels() ?? [];
 
-    const choice = await pick(ui, CONFIG_MENU_PREFIX, buildConfigMenuOptions(configDeps.getConfig(), session, currentHostName()));
-    if (!choice || choice === BACK_LABEL) return true; // back to main
+    const choice = await pickMenu(ui, CONFIG_MENU_PREFIX, buildConfigMenuOptions(configDeps.getConfig(), session, currentHostName()));
+    if (choice === BACK_LABEL) return true; // back to main
 
     if (choice.startsWith("🔧 Tool:")) {
       await configToolFlow(ui, configDeps);
@@ -459,8 +465,7 @@ async function configMenu(ui: MenuUi, configDeps: TgConfigDeps, sessionDeps?: Se
     } else if (choice.startsWith("🧠 Thinking level:")) {
       if (!session || thinkingLevels.length === 0) continue;
       const labels = thinkingLevels.map((l) => (l === session.thinkingLevel ? "● " : "  ") + String(l));
-      const selected = await pick(ui, "Thinking level", labels);
-      if (!selected) continue;
+      const selected = await pickMenu(ui, "Thinking level", labels);
       const level = thinkingLevels[labels.indexOf(selected)];
       if (level !== undefined) {
         session.setThinkingLevel(level);
@@ -492,8 +497,8 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
   }
 
   const choices = instances.map((instance) => formatInstanceChoice(instance, active.instanceId));
-  const selected = await pick(ui, "Switch Telegram pi instance", [...choices, BACK_LABEL]);
-  if (!selected || selected === BACK_LABEL) return true; // back to main
+  const selected = await pickMenu(ui, "Switch Telegram pi instance", [...choices, BACK_LABEL]);
+  if (selected === BACK_LABEL) return true; // back to main
 
   const target = instances[choices.indexOf(selected)];
   if (!target) return true;
