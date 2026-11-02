@@ -50,7 +50,10 @@ function fakeFocus() {
  * A command's confirm dialog, opened and drawn with its real model. `act` decides what the host
  * does with each Telegram action: it may close the dialog, change the model, or keep both.
  */
-async function open(act: (action: { type: string }, ctx: { close(): void; setModel(m: DialogModel): void }) => boolean) {
+async function open(
+  act: (action: { type: string }, ctx: { close(): void; setModel(m: DialogModel): void }) => boolean,
+  initial: DialogModel = { kind: "confirm", title: "Log out API key #1?" },
+) {
   vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   const edits: Edit[] = [];
   const transport = {
@@ -79,7 +82,7 @@ async function open(act: (action: { type: string }, ctx: { close(): void; setMod
   });
   broker.start();
 
-  let model: DialogModel = { kind: "confirm", title: "Log out API key #1?" };
+  let model: DialogModel = initial;
   const replace = (next: DialogModel) => { model = next; };
   const adapter: DialogAdapter = {
     id: "scripted",
@@ -94,7 +97,7 @@ async function open(act: (action: { type: string }, ctx: { close(): void; setMod
   session.model = model;
   // The refresh draws the dialog with its real model, which is what the user is tapping.
   await vi.advanceTimersByTimeAsync(1100);
-  const tap = (op: string) => broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op });
+  const tap = (op: string, arg?: string) => broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op, arg });
   return { broker, focus, edits, session, tap, last: () => edits.filter((edit) => edit.kind === "editButtons" || edit.kind === "editText").at(-1)?.text ?? "" };
 }
 
@@ -139,7 +142,33 @@ describe("a Telegram tap's own close is a normal answer", () => {
   });
 });
 
-describe("a Telegram tap stays the cause of the close until the dialog moves on", () => {
+describe("a Telegram tap stays the cause of the close until the dialog says something new", () => {
+  it("keeps a pick's close as Telegram's when the act only moves the terminal cursor and redraws", async () => {
+    const picker = (focused: number): DialogModel => ({
+      kind: "select",
+      title: "Pick a model",
+      items: [
+        { key: "a", label: "mock/mock", focused: focused === 0 },
+        { key: "b", label: "mock/mock-fast", focused: focused === 1 },
+      ],
+      total: 2,
+    });
+    const ctx = await open((_action, host) => {
+      // Setting the default: the host moves the cursor (a redraw), then saves and closes.
+      host.setModel(picker(1));
+      return true;
+    }, picker(0));
+
+    expect(ctx.tap("c", "0.0")).toEqual({ handled: true });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(ctx.session.telegramAction).toBeDefined();
+    ctx.focus.closeToEditor();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(ctx.last()).toContain("✅");
+    expect(ctx.last()).not.toContain("Answered in the terminal");
+  });
+
   it("counts the terminal's close as the terminal's after a tap moved the dialog to another model", async () => {
     const ctx = await open((action, host) => {
       // Cancel returns to a list the terminal user is still looking at.

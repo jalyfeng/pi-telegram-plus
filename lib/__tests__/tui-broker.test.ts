@@ -999,14 +999,24 @@ describe("who closed a dialog and what they tapped", () => {
     expect(lastText(transport)).not.toContain("Answered in the terminal");
   });
 
-  it("says the terminal closed the dialog when the Telegram tap was a button that kept it open", async () => {
+  it("says the terminal closed the dialog when the Telegram tap moved it to another list", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
       const { broker, transport, focus, session } = await scripted(
         { kind: "confirm", title: "Delete session?" },
         () => false,
       );
-      // Cancel on a confirm returns to the list the terminal user is still looking at.
+      // The tap returns the host to a list the terminal user is still looking at: the dialog changed.
+      let current: DialogModel = { kind: "confirm", title: "Delete session?" };
+      session.adapter = {
+        id: "scripted",
+        detect: () => true,
+        read: () => current,
+        act: () => {
+          current = { kind: "select", title: "Sessions", items: [], total: 0 };
+          return true;
+        },
+      };
       broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
       await settle();
       vi.setSystemTime(Date.now() + 2_000);

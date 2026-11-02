@@ -697,7 +697,9 @@ export class DialogBroker {
     // typed answer. It is taken back if the host refuses the tap.
     const previousAction = session.telegramAction;
     const cancelled = resolved.action.type === "cancel";
-    session.telegramAction = { cancelled, drawn: session.published };
+    // Taken before the act: a redraw the act causes must not become the baseline the tap is judged by.
+    const drawn = this.contentOf(session);
+    session.telegramAction = { cancelled, drawn };
     const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
       session.telegramAction = previousAction;
@@ -760,7 +762,7 @@ export class DialogBroker {
     const answered = purpose === "input" || purpose === "editor";
     const before = { telegramAction: session.telegramAction, lastAction: session.lastAction, answeredSecret: session.answeredSecret };
     if (answered) {
-      session.telegramAction = { cancelled: false, drawn: session.published };
+      session.telegramAction = { cancelled: false, drawn: this.contentOf(session) };
       // Decided here, while the input is still the secret field: by the time the dialog closes,
       // the model may already show the progress that the submit started.
       session.answeredSecret = secret;
@@ -808,7 +810,7 @@ export class DialogBroker {
     }
     session.telegramAction = undefined;
     this.redraw(session);
-    if (session.state !== "closed") session.telegramAction = { ...action, drawn: session.published };
+    if (session.state !== "closed") session.telegramAction = { ...action, drawn: this.contentOf(session) };
   }
 
   /** `/stop` (§4.5 rule 6): cancel the dialog this chat owns, if any. */
@@ -1118,6 +1120,16 @@ export class DialogBroker {
     };
   }
 
+  /**
+   * What the dialog says, for "did the dialog change after this tap" (telegramAction). The terminal
+   * cursor (`focused`) is left out: it moves on keys the host handles, and a cursor move is not a new
+   * state. Everything else (kind, title, items, labels, checked/current/value, buttons) counts.
+   * Not the same as the de-duplication signature in show(), which must see the cursor.
+   */
+  private contentOf(session: DialogSession): string {
+    return `${session.page}|${JSON.stringify(session.model, (key, value: unknown) => (key === "focused" ? undefined : value))}`;
+  }
+
   /** Draw the session's current model onto its message. */
   private show(session: DialogSession): void {
     const telegram = session.telegram;
@@ -1131,9 +1143,11 @@ export class DialogBroker {
     session.surface = this.surfaceOf(rendered);
     this.rememberKeys(session, rendered.keyMap);
     const signature = `${session.page}|${rendered.text}|${JSON.stringify(rendered.rows)}`;
-    // A tap whose dialog was drawn differently from the one now on screen has been answered by the
-    // host: the dialog moved on, so a later close is the terminal's, not that tap's.
-    if (session.telegramAction !== undefined && session.telegramAction.drawn !== signature) session.telegramAction = undefined;
+    // A tap whose dialog says something different from what it said when the tap was made has been
+    // answered by the host: the dialog moved on, so a later close is the terminal's, not that tap's.
+    if (session.telegramAction !== undefined && session.telegramAction.drawn !== this.contentOf(session)) {
+      session.telegramAction = undefined;
+    }
     const fresh = telegram.messageId <= 0;
     // While the first send is pending the message id is still 0; the send's own completion
     // redraws the live model, so nothing else is needed here.
