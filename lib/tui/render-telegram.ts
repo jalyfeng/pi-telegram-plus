@@ -13,6 +13,7 @@
 import { encodeDialogCallback } from "../callback-protocol.ts";
 import { splitTelegramHtml } from "../text-split.ts";
 import type { TelegramButton } from "../types.ts";
+import { confirmDeclineLabel } from "./model.ts";
 import type { DialogItem, DialogModel, SearchModel } from "./model.ts";
 
 /** §4.7.2: ten items per page, one button per row. */
@@ -361,7 +362,7 @@ function renderConfirm(model: Extract<DialogModel, { kind: "confirm" }>, ctx: Re
     // The host named its own buttons (e.g. Delete / Cancel): use them, not Yes / No.
     const answers = keep([
       button(shorten(model.confirmLabel, MAX_LABEL), ctx, "y"),
-      button(shorten(model.cancelLabel ?? "Cancel", MAX_LABEL), ctx, "n"),
+      button(shorten(confirmDeclineLabel(model), MAX_LABEL), ctx, "n"),
     ]);
     return { text: header(model.title, undefined, [body]), rows: [answers], keyMap: new Map(), page: 0, pages: 1 };
   }

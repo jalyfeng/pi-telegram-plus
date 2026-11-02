@@ -261,3 +261,12 @@ export type DialogSession = {
    */
   telegramAction?: { cancelled: boolean; drawn?: string };
 };
+
+/**
+ * The host's name for the answer that declines a confirm: its own `cancelLabel`, else "No". Shared by
+ * the Telegram buttons and the closing summary, so the two always name the same answer. "Cancel" is
+ * reserved for a real cancel (the dialog's own Cancel button, /stop).
+ */
+export function confirmDeclineLabel(model: { cancelLabel?: string }): string {
+  return model.cancelLabel ?? "No";
+}

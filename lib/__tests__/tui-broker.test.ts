@@ -1155,4 +1155,16 @@ describe("who closed a dialog and what they tapped", () => {
     expect(lastText(transport)).toContain("✅ No");
     expect(lastText(transport)).not.toContain("Cancelled");
   });
+
+  it("declines a confirm that names only its confirm button with No, not Cancel", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "confirm", title: "Delete session?", confirmLabel: "Delete" },
+      (action) => action.type === "confirm",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ No");
+    expect(lastText(transport)).not.toContain("Cancel");
+  });
 });

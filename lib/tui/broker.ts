@@ -29,6 +29,7 @@ import { describeTree } from "./adapters/tsp.ts";
 import { currentHostState } from "./host.ts";
 import { sendKeyTo } from "./keys.ts";
 import type { FocusInfo, FocusTracker } from "./focus.ts";
+import { confirmDeclineLabel } from "./model.ts";
 import type {
   AdapterContext,
   DialogAction,
@@ -155,7 +156,7 @@ function isDialogKind(kind: FocusInfo["kind"]): boolean {
 /** The label the Telegram button for a yes/no answer shows (mirrors render-telegram's confirm rows). */
 function confirmButtonLabel(model: DialogModel, yes: boolean): string {
   if (model.kind === "confirm" && model.confirmLabel) {
-    return yes ? model.confirmLabel : model.cancelLabel ?? "Cancel";
+    return yes ? model.confirmLabel : confirmDeclineLabel(model);
   }
   return yes ? "Yes" : "No";
 }

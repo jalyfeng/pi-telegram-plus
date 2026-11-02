@@ -203,6 +203,11 @@ describe("host detail shown as message text (Y-2)", () => {
     const { rows } = renderDialog({ kind: "confirm", title: "Sure?" }, CTX);
     expect(texts(rows)).toEqual([["✅ Yes", "❌ No"], ["Cancel"]]);
   });
+
+  it("declines with No when the host names only its confirm button", () => {
+    const { rows } = renderDialog({ kind: "confirm", title: "Delete session?", confirmLabel: "Delete" }, CTX);
+    expect(texts(rows)).toEqual([["Delete", "No"]]);
+  });
 });
 
 describe("a long page keeps its items inside the message limit (Y-2)", () => {
