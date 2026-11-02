@@ -600,6 +600,9 @@ export const tspPickerAdapter: DialogAdapter = {
       // nested text field; the same dialog owns it, so the field is its input.
       const field = findTextFormField(component);
       if (field) return textFormFieldModel(field);
+      // The agents hub's "pick model…" embeds OMP's model browser: its list is the choice.
+      const browser = findModelBrowserList(component);
+      if (browser) return modelBrowserModel(component, browser);
       return { kind: "unsupported", what: "OMP picker closed or no longer a picker" };
     }
     const { props } = found;
@@ -688,7 +691,11 @@ export const tspPickerAdapter: DialogAdapter = {
   act(component, action, ctx) {
     // Never act on a stale tree: the list may have been filtered underneath us.
     const found = findPicker(component);
-    if (!found) return actTextFormField(component, action, ctx);
+    if (!found) {
+      if (findTextFormField(component)) return actTextFormField(component, action, ctx);
+      const browser = findModelBrowserList(component);
+      return browser ? actModelBrowser(component, action, ctx) : false;
+    }
     const { owner, keypath, props } = found;
     const confirm = pickerConfirm(props);
     if (confirm) return sendPickerEvent(owner, pickerConfirmEvent(keypath, confirm, action), ctx);
@@ -745,6 +752,80 @@ export const tspPickerAdapter: DialogAdapter = {
     return sendPickerEvent(owner, target, ctx);
   },
 };
+
+/** The members of OMP's model browser (oh-my-pi@v18.14.1 packages/tui/src/overlays/model-browser.ts) this adapter reads and drives. */
+type ModelBrowserLike = { query?: unknown; setQuery?: unknown; onCancel?: unknown };
+
+/** The model browser's list role (`ModelBrowser.describe`): its item children are the models. */
+const MODEL_BROWSER_LIST_ROLE = "omp.model-browser.list";
+
+/** The browser's list node, found in the component itself or in the browser it embeds. The `owner` takes its events. */
+function findModelBrowserList(component: object): DescribedNode | undefined {
+  return findDescribedNode(component, (node) => node.k === "list" && isObject(node.p) && node.p.role === MODEL_BROWSER_LIST_ROLE);
+}
+
+/** The model rows of a browser list: its `item` children (the separator rule is skipped), keyed by selector. */
+function modelBrowserItems(list: NativeNodeLike): NativeNodeLike[] {
+  const children = Array.isArray(list.c) ? (list.c as unknown[]) : [];
+  return children.filter((child): child is NativeNodeLike => isObject(child) && child.k === "item" && typeof child.key === "string");
+}
+
+/**
+ * The select an open model browser shows: its list's models, the status line
+ * above it as the title, and the browser's query as the search box. The
+ * browser's own `muted` rows (over the context window) are listed as they are.
+ */
+function modelBrowserModel(component: object, found: DescribedNode): DialogModel {
+  const status = findDescribedNode(component, (node) => node.k === "text" && node.key === "status");
+  const title = (status && nodeText(status.node)) || "Choose a model";
+  const selected = isObject(found.node.p) ? found.node.p.selected : undefined;
+  const items: DialogItem[] = modelBrowserItems(found.node).map((item) => {
+    const props = isObject(item.p) ? item.p : {};
+    const description = tspText(props.value);
+    return {
+      key: item.key as string,
+      label: tspText(props.label),
+      ...(description ? { description } : {}),
+      focused: selected === item.key,
+    };
+  });
+  const query = (found.owner as ModelBrowserLike).query;
+  return { kind: "select", title, items, total: items.length, search: { query: typeof query === "string" ? query : "" } };
+}
+
+/**
+ * Answer an open model browser: choose a model (an `activate` on its own list,
+ * the way its Enter does), cancel the assignment, or type into its search box.
+ * The browser is looked up again on every act; nothing is cached.
+ */
+function actModelBrowser(component: object, action: DialogAction, ctx: AdapterContext): boolean {
+  const found = findModelBrowserList(component);
+  if (!found) return false;
+  const browser = found.owner as ModelBrowserLike & Partial<Describable>;
+  if (action.type === "choose") {
+    if (!modelBrowserItems(found.node).some((item) => item.key === action.key)) return false;
+    return sendPickerEvent(browser, { type: "activate", key: "list", item: action.key }, ctx);
+  }
+  if (action.type === "cancel") {
+    if (typeof browser.onCancel !== "function") return false;
+    try {
+      browser.onCancel();
+    } catch {
+      return false;
+    }
+    return requestRedraw(ctx);
+  }
+  if (action.type === "search") {
+    if (typeof browser.setQuery !== "function") return false;
+    try {
+      browser.setQuery(action.query);
+    } catch {
+      return false;
+    }
+    return requestRedraw(ctx);
+  }
+  return false;
+}
 
 /**
  * Submit or cancel a text field nested in the picker's dialog (the rename

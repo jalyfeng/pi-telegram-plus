@@ -2026,3 +2026,101 @@ describe("tsp input wizard optional step", () => {
     expect(component.events).toEqual([{ type: "action", key: "", act: "next", mods: [] }]);
   });
 });
+
+describe("tsp picker model browser (agents hub model override)", () => {
+  /** OMP's ModelBrowser embedded in the agents hub: its list holds two models and a separator rule. */
+  function modelBrowser() {
+    return {
+      query: "",
+      describe: () => ({
+        k: "col",
+        c: [
+          { k: "text", key: "search", p: { text: "" } },
+          {
+            k: "list",
+            key: "list",
+            p: { role: "omp.model-browser.list", selected: "mock/mock-model", filter: "", empty: "", virtual: true },
+            c: [
+              { k: "item", key: "mock/other-model", p: { label: [{ t: "mock/" }, { t: "other-model" }], value: [{ t: "32k" }] } },
+              { k: "rule", key: "separator" },
+              { k: "item", key: "mock/mock-model", p: { label: [{ t: "mock/" }, { t: "mock-model" }], value: [{ t: "128k" }] } },
+            ],
+          },
+        ],
+      }),
+      handleNativeEvent: vi.fn(),
+      onCancel: vi.fn(),
+      setQuery: vi.fn(),
+    };
+  }
+
+  /** The agents hub: a scope list beside a body that shows the status line and embeds the model browser. */
+  function agentsHub(browser: object) {
+    return {
+      events: [] as unknown[],
+      describe: () => ({
+        k: "card",
+        p: { role: "omp.hub.agents", head: "Agents" },
+        c: [
+          {
+            k: "row",
+            key: "split",
+            c: [
+              { k: "list", key: "scopes", p: {}, c: [] },
+              {
+                k: "col",
+                key: "body",
+                c: [{ k: "text", key: "status", p: { spans: [{ t: "Picking model override for " }, { t: "reviewer" }] } }, browser],
+              },
+            ],
+          },
+          { k: "rule" },
+          { k: "col", key: "footer", c: [] },
+        ],
+      }),
+      handleNativeEvent(event: unknown) {
+        this.events.push(event);
+      },
+    };
+  }
+
+  it("reads the embedded model list as a select with the picked model focused", () => {
+    const hub = agentsHub(modelBrowser());
+    const model = asSelect(tspPickerAdapter.read(hub, ctxFor()));
+    expect(model.title).toBe("Picking model override for reviewer");
+    expect(model.items).toEqual([
+      { key: "mock/other-model", label: "mock/other-model", description: "32k", focused: false },
+      { key: "mock/mock-model", label: "mock/mock-model", description: "128k", focused: true },
+    ]);
+    expect(model.total).toBe(2);
+    expect(model.search).toEqual({ query: "" });
+  });
+
+  it("activates the chosen model on the browser itself, not on the hub", () => {
+    const browser = modelBrowser();
+    const hub = agentsHub(browser);
+    expect(tspPickerAdapter.act(hub, { type: "choose", key: "mock/other-model" }, ctxFor())).toBe(true);
+    expect(browser.handleNativeEvent).toHaveBeenCalledWith({ type: "activate", key: "list", item: "mock/other-model" });
+    expect(hub.events).toEqual([]);
+  });
+
+  it("refuses a choice that is not in the browser's list", () => {
+    const browser = modelBrowser();
+    expect(tspPickerAdapter.act(agentsHub(browser), { type: "choose", key: "mock/unknown" }, ctxFor())).toBe(false);
+    expect(browser.handleNativeEvent).not.toHaveBeenCalled();
+  });
+
+  it("cancels the browser's assignment and asks for a redraw", () => {
+    const browser = modelBrowser();
+    const { ctx, renders } = countingCtx();
+    expect(tspPickerAdapter.act(agentsHub(browser), { type: "cancel" }, ctx)).toBe(true);
+    expect(browser.onCancel).toHaveBeenCalledTimes(1);
+    expect(renders()).toBe(1);
+  });
+
+  it("types a search into the browser's query", () => {
+    const browser = modelBrowser();
+    expect(tspPickerAdapter.act(agentsHub(browser), { type: "search", query: "mock" }, ctxFor())).toBe(true);
+    expect(browser.setQuery).toHaveBeenCalledWith("mock");
+  });
+});
