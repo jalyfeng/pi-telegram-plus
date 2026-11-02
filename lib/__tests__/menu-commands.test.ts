@@ -337,3 +337,39 @@ describe("/more overflow keyboard", () => {
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
   });
 });
+
+describe("terminal-only commands in BotMenu", () => {
+  const terminalOnly = ["local", "dump", "open", "stats", "trace", "record", "live", "git"];
+  const hostCatalog = (names: string[]) => names.map((name) => ({ name, description: `host ${name}`, source: "builtin" as const }));
+
+  it("keeps terminal-only commands and OMP /cd out of the menu on OMP, but keeps /move", () => {
+    const { commands, overflow } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [] },
+      { host: "omp", tuiCommands: hostCatalog([...terminalOnly, "move", "cd", "tools"]) },
+    );
+    const names = new Set([...commands, ...overflow].map((c) => c.command));
+    for (const name of [...terminalOnly, "cd"]) expect(names.has(name)).toBe(false);
+    expect(names.has("move")).toBe(true);
+    expect(names.has("tools")).toBe(true);
+  });
+
+  it("keeps /cd in the menu on pi, but still hides terminal-only commands", () => {
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [] },
+      { host: "pi", tuiCommands: hostCatalog([...terminalOnly, "tools"]) },
+    );
+    const names = new Set(commands.map((c) => c.command));
+    expect(names.has("cd")).toBe(true);
+    for (const name of terminalOnly) expect(names.has(name)).toBe(false);
+  });
+
+  it("hides terminal-only entries from recent usage too", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      { host: "pi", recent: ["open", "tools"] },
+    );
+    const names = new Set(commands.map((c) => c.command));
+    expect(names.has("open")).toBe(false);
+    expect(names.has("tools")).toBe(true);
+  });
+});

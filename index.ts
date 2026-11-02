@@ -29,6 +29,7 @@ import { registerTgMenuCommand } from "./lib/commands/tg-menu.ts";
 import type { TelegramConnectionState } from "./lib/commands/telegram-commands.ts";
 import { syncTelegramCommands, scheduleTelegramCommandRefresh, cancelTelegramCommandRefreshes } from "./lib/menu-commands.ts";
 import { installTuiBridge, tuiBridge, getTuiCommands } from "./lib/tui-bridge.ts";
+import { isTerminalOnlyCommand } from "./lib/terminal-only-commands.ts";
 import { SecretStore } from "./lib/tui/secrets.ts";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramTurn } from "./lib/types.ts";
 
@@ -287,7 +288,9 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
       // Hosts that do not surface extension commands through getCommands()
       // (OMP) would otherwise hide /status, /tg, and friends from this menu.
       for (const name of telegramCommands.keys()) add(name);
-      return commands;
+      // Terminal-only commands are not offered in Telegram (see terminal-only-commands.ts).
+      const host = tuiBridge.getHost();
+      return commands.filter((command) => !isTerminalOnlyCommand(command.name, host));
     },
     runCommand: async (name, args) => {
       if (!runCommandFromMenu) return;

@@ -2,7 +2,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { setTelegramMyCommands } from "./telegram-api.ts";
 import { log } from "./logger.ts";
 import { loadRecentCommands } from "./command-usage.ts";
-import { getTuiCommands, type TuiCommand } from "./tui-bridge.ts";
+import { getTuiCommands, tuiBridge, type TuiCommand, type TuiHost } from "./tui-bridge.ts";
+import { isTerminalOnlyCommand } from "./terminal-only-commands.ts";
 
 const menuLog = log.child("menu-commands");
 
@@ -70,6 +71,8 @@ export type MenuCommandOptions = {
   recent?: readonly string[];
   /** Host builtin/autocomplete catalog captured by the TUI bridge. */
   tuiCommands?: readonly TuiCommand[];
+  /** Host kind; decides which terminal-only commands are left out. Defaults to "unknown". */
+  host?: TuiHost;
 };
 
 export type TelegramMenuBuildResult = {
@@ -84,9 +87,12 @@ export function buildTelegramMenuCommandsFull(
   options: MenuCommandOptions = {},
 ): TelegramMenuBuildResult {
   const commands = new Map<string, string>();
+  const host = options.host ?? "unknown";
   const addCommand = (name: string, description?: string) => {
     const telegramName = toTelegramCommandName(name);
     if (!telegramName || commands.has(telegramName)) return;
+    // Terminal-only commands (and /cd on OMP) are never offered in Telegram.
+    if (isTerminalOnlyCommand(name, host)) return;
     commands.set(telegramName, (description?.trim() || `Run /${telegramName}`).slice(0, 256));
   };
 
@@ -205,7 +211,7 @@ async function doSyncTelegramCommands(botToken: string, pi: ExtensionAPI, apiBas
     loadRecentCommands().catch(() => []),
     getTuiCommands().catch(() => []),
   ]);
-  const { commands, overflow } = buildTelegramMenuCommandsFull(pi, { recent, tuiCommands });
+  const { commands, overflow } = buildTelegramMenuCommandsFull(pi, { recent, tuiCommands, host: tuiBridge.getHost() });
   await setTelegramMyCommands(botToken, commands, apiBase);
   menuOverflowByBot.set(syncKey(botToken, apiBase), overflow);
 }

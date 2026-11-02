@@ -287,3 +287,57 @@ describe("Local TUI submits stay in the terminal", () => {
     }
   });
 });
+
+describe("Terminal-only commands from Telegram", () => {
+  it("answers /open and /dump with the terminal hint and never reaches the host", async () => {
+    const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
+    const submit = vi.fn(() => true);
+    const harness = createHarness({
+      bridge: createBridge({
+        submit,
+        getCommands: async () => [
+          { name: "open", description: "Open a file", source: "builtin" as const },
+          { name: "dump", description: "Dump output", source: "builtin" as const },
+        ],
+      }),
+    });
+
+    await send(harness.controller, "/open");
+    await send(harness.controller, "/dump");
+
+    expect(harness.calls.filter((call) => call.text === "/open only works in the terminal.")).toHaveLength(1);
+    expect(harness.calls.filter((call) => call.text === "/dump only works in the terminal.")).toHaveLength(1);
+    expect(run).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    run.mockRestore();
+  });
+
+  it("answers /cd on OMP with the /move hint and does not dispatch it", async () => {
+    const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
+    const submit = vi.fn(() => true);
+    const nativeCd = vi.fn(async () => undefined);
+    const harness = createHarness({
+      bridge: createBridge({ getHost: () => "omp", submit }),
+      telegramCommands: new Map([["cd", nativeCd]]),
+    });
+
+    await send(harness.controller, "/cd /tmp");
+
+    // HTML parse mode: the angle brackets in <path> arrive escaped.
+    expect(harness.calls.some((call) => call.text?.includes("On OMP, use /move &lt;path&gt; to change the working directory."))).toBe(true);
+    expect(nativeCd).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    run.mockRestore();
+  });
+
+  it("still routes /cd on pi to its own handler", async () => {
+    const nativeCd = vi.fn(async () => undefined);
+    const harness = createHarness({ telegramCommands: new Map([["cd", nativeCd]]) });
+
+    await send(harness.controller, "/cd /tmp");
+
+    expect(nativeCd).toHaveBeenCalledTimes(1);
+    expect(harness.calls.some((call) => call.text?.includes("only works in the terminal"))).toBe(false);
+  });
+});

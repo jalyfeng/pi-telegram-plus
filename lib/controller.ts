@@ -16,6 +16,7 @@ import type {
 import type { TelegramUiRuntime } from "./telegram-ui.ts";
 import type { TuiBridgeAdapter } from "./tui-bridge.ts";
 import { tuiBridge as defaultTuiBridge, hostOwnsPrompts } from "./tui-bridge.ts";
+import { isTerminalOnlyCommand, terminalOnlyReply } from "./terminal-only-commands.ts";
 import { escapeHtml } from "./html.ts";
 import { richMessageToPlainText } from "./rich-text-plain.ts";
 import { recordCommandUsage } from "./command-usage.ts";
@@ -1473,6 +1474,13 @@ export function createTelegramController(deps: {
     const session = deps.getSession();
     if (!session) {
       await deps.transport.sendText(chatId, "π session is not ready yet.", messageThreadId, sourceMessageId);
+      return true;
+    }
+    // Terminal-only commands are answered here and never reach the host.
+    const host = bridge.getHost();
+    if (isTerminalOnlyCommand(parsed.name, host)) {
+      await deps.transport.sendText(chatId, escapeHtml(terminalOnlyReply(parsed.name, host)), messageThreadId, sourceMessageId)
+        .catch(ctrlLog.swallow("debug", "sendText terminal-only notice failed", { chatId }));
       return true;
     }
     return await dispatchNamedCommand(parsed.name.toLowerCase(), parsed.args, session, chatId, messageThreadId, sourceMessageId);
