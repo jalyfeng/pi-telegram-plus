@@ -160,6 +160,9 @@ function confirmButtonLabel(model: DialogModel, yes: boolean): string {
   return yes ? "Yes" : "No";
 }
 
+/** An item's label as one line of plain text: no edge whitespace, no runs of spaces. */
+const plainLabel = (label: string): string => label.replace(/\s+/g, " ").trim();
+
 /** The text of the key button the tap came from; the internal key is only the fallback. */
 function keyButtonLabel(model: DialogModel, key: string): string {
   if (model.kind === "select" || model.kind === "input") {
@@ -485,7 +488,8 @@ export class DialogBroker {
   /** The one-line result of a dialog that Telegram answered (rule 4.2). */
   private telegramSummary(session: DialogSession): string {
     if (session.telegramAction?.cancelled) return "✖ Cancelled";
-    return `✅ ${isSecretSession(session) ? "Submitted (hidden)" : session.lastAction ?? "Done"}`;
+    if (session.answeredSecret || isSecretSession(session)) return "✅ Submitted (hidden)";
+    return `✅ ${session.lastAction ?? "Done"}`;
   }
 
   /**
@@ -687,8 +691,15 @@ export class DialogBroker {
     session.model = model;
     session.state = "resolving";
     session.lastAction = resolved.label;
+    // The host may close the dialog inside the act below, before it returns (a selector's Esc or
+    // Enter closes synchronously), so the marker is set before the act, as handleText does for a
+    // typed answer. It is taken back if the host refuses the tap.
+    const previousAction = session.telegramAction;
+    const cancelled = resolved.action.type === "cancel";
+    session.telegramAction = { cancelled, drawn: session.published };
     const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
+      session.telegramAction = previousAction;
       session.state = "open";
       this.redraw(session);
       return refuse("act-refused", "This button does nothing here", false);
@@ -698,8 +709,6 @@ export class DialogBroker {
     this.deps.focus.validate();
     // The host may close the dialog after this tap returns (the Esc it received is handled
     // asynchronously), so the close is attributed to Telegram by this marker, not by state.
-    const cancelled = resolved.action.type === "cancel";
-    session.telegramAction = { cancelled, drawn: session.published };
     // Rule 3.5: the component may already be gone (selectors resolve inline),
     // or it may stay open (multi-select, settings rows).
     if (this.session === session && session.state === "resolving") {
@@ -748,10 +757,13 @@ export class DialogBroker {
     // submit below, before this function returns, so the marker is set before the write; it is
     // put back if the write is refused.
     const answered = purpose === "input" || purpose === "editor";
-    const before = { telegramAction: session.telegramAction, lastAction: session.lastAction };
+    const before = { telegramAction: session.telegramAction, lastAction: session.lastAction, answeredSecret: session.answeredSecret };
     if (answered) {
       session.telegramAction = { cancelled: false, drawn: session.published };
-      session.lastAction = "Sent an answer";
+      // Decided here, while the input is still the secret field: by the time the dialog closes,
+      // the model may already show the progress that the submit started.
+      session.answeredSecret = secret;
+      session.lastAction = secret ? "Submitted (hidden)" : "Sent an answer";
     }
     const driven = this.inOwnerScope(session, () => purpose === "input" || purpose === "editor"
       ? this.act(subject, { type: "submit", text }, ctx)
@@ -772,6 +784,7 @@ export class DialogBroker {
       if (answered) {
         session.telegramAction = before.telegramAction;
         session.lastAction = before.lastAction;
+        session.answeredSecret = before.answeredSecret;
       }
       return { handled: true, toast: "The host did not accept this input" };
     }
@@ -1308,14 +1321,16 @@ export class DialogBroker {
       case "t": {
         const item = items.find((entry) => entry.key === key);
         if (!item) return { kind: "none" };
-        return callback.op === "c"
-          ? { kind: "action", action: { type: "choose", key }, label: `Choose ${item.label}` }
-          : { kind: "action", action: { type: "toggle", key }, label: `Toggle ${item.label}` };
+        // The closing summary names what was picked, as the row reads; a toggle also names the
+        // state the tap set (`checked` is the state before the tap).
+        if (callback.op === "c") return { kind: "action", action: { type: "choose", key }, label: plainLabel(item.label) };
+        const state = item.checked === undefined ? "" : `: ${item.checked ? "off" : "on"}`;
+        return { kind: "action", action: { type: "toggle", key }, label: `${plainLabel(item.label)}${state}` };
       }
       case "m": {
         const item = items.find((entry) => entry.key === key);
         if (!item) return { kind: "none" };
-        return { kind: "action", action: { type: "submenu", key }, label: `Open ${item.label}` };
+        return { kind: "action", action: { type: "submenu", key }, label: plainLabel(item.label) };
       }
       case "a": {
         const option = model.kind === "approval" ? model.options.find((entry) => entry.key === key) : undefined;

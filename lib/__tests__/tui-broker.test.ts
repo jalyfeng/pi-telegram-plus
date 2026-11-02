@@ -1060,4 +1060,99 @@ describe("who closed a dialog and what they tapped", () => {
 
     expect(lastText(transport)).toContain("✅ Delete");
   });
+
+  it("closes a choice with the picked label alone, trimmed and without a Choose prefix", async () => {
+    const { broker, transport, session } = await scripted(
+      {
+        kind: "select",
+        title: "Model",
+        items: [{ key: "full", label: "  full   access " }],
+        total: 1,
+      },
+      (action) => action.type === "choose",
+    );
+    // The scripted model was never drawn, so its row buttons are not in the key map yet.
+    session.keyMap.set(0, new Map([["0.0", "full"]]));
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "c", arg: "0.0" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ full access");
+    expect(lastText(transport)).not.toContain("Choose");
+  });
+
+  it("closes a toggle with the row and the state the tap set", async () => {
+    const { broker, transport, session } = await scripted(
+      {
+        kind: "select",
+        title: "Tools",
+        multi: true,
+        items: [{ key: "bash", label: "bash", checked: false }],
+        total: 1,
+      },
+      (action) => action.type === "toggle",
+    );
+    session.keyMap.set(0, new Map([["0.0", "bash"]]));
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "t", arg: "0.0" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ bash: on");
+    expect(lastText(transport)).not.toContain("Toggle");
+  });
+
+  it("closes a hidden answer as Submitted (hidden) even after the dialog turned into progress", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+      focus.openDialog({});
+      await settle();
+      const session = broker.current()!;
+      let current: DialogModel = { kind: "input", title: "Paste your API key", secret: true };
+      session.adapter = {
+        id: "scripted",
+        detect: () => true,
+        read: () => current,
+        act: (_component, action) => {
+          // The host starts signing in: the same dialog now shows progress, not a secret field.
+          if (action.type === "submit") current = { kind: "progress", text: "Signing in", cancellable: false };
+          return true;
+        },
+      };
+      session.model = current;
+
+      expect(broker.handleText(session, "sk-secret", 57)).toEqual({ handled: true });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+
+      expect(lastText(transport)).toContain("✅ Submitted (hidden)");
+      expect(lastText(transport)).not.toContain("Sent an answer");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a Cancel tap as Cancelled even when the host closes the dialog during the tap", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "select", title: "Tool", items: [{ key: "a", label: "A" }], total: 1 },
+      (action) => action.type === "cancel",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "x" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✖ Cancelled");
+    expect(lastText(transport)).not.toContain("✅");
+  });
+
+  it("closes a confirm's No as an answer, not as a cancel", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "confirm", title: "Delete session?" },
+      (action) => action.type === "confirm",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ No");
+    expect(lastText(transport)).not.toContain("Cancelled");
+  });
 });

@@ -248,6 +248,11 @@ export type DialogSession = {
   closedBy?: "telegram" | "terminal" | "replaced";
   lastAction?: string;
   /**
+   * Set before a hidden answer is written: the host may close the dialog inside that write, and
+   * the closing summary must then say "Submitted (hidden)" even though the model has moved on.
+   */
+  answeredSecret?: boolean;
+  /**
    * Set when the broker itself sent a Telegram tap to the host. The close that follows belongs to
    * Telegram, however long after the tap it is observed, as long as the dialog still shows what was
    * drawn when the tap was made (`drawn`, the broker's signature of that draw). Once the dialog
