@@ -20,7 +20,7 @@ vi.mock("../pairing.ts", async (importOriginal) => {
 });
 
 import { buildConfigMenuOptions, registerTgMenuCommand, type SwitchInstanceDeps } from "../commands/tg-menu.ts";
-import { configModeFlow } from "../commands/tg-config.ts";
+import { configModeFlow, configToolFlow } from "../commands/tg-config.ts";
 import type { TelegramCommandDeps, TelegramConnectionState } from "../commands/telegram-commands.ts";
 import type { TgConfigDeps } from "../commands/register.ts";
 import { readBotRegistry, readProjectBinding, addBot, writeProjectBinding, clearDefaultBot } from "../config.ts";
@@ -742,6 +742,32 @@ describe("/tg multi-level menu", () => {
     expect(ui.select).toHaveBeenCalledTimes(3);
     expect(ui.select.mock.calls[2][0]).toBe("Telegram Management");
   });
+
+  it("cancelling the Tool value picker closes the whole menu", async () => {
+    // main → Config → Tool → picker cancelled: Config does not re-render.
+    const { ui } = makeScriptedUi({ select: ["⚙️ Config", "🔧 Tool: brief"] });
+    await commands.get("tg")!("", makeCtx(ui));
+    expect(ui.select).toHaveBeenCalledTimes(3);
+    expect(ui.select.mock.calls[2][0]).toBe("🔧 Tool rendering");
+  });
+
+  it("cancelling an input inside Add bot closes the whole menu", async () => {
+    // main → Bots → Add bot → name input cancelled: Bots does not re-render.
+    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "➕ Add bot"], input: [] });
+    await commands.get("tg")!("", makeCtx(ui));
+    expect(ui.select).toHaveBeenCalledTimes(2);
+  });
+
+  it("answering No in the Remove confirm returns to the bot detail, not the menu root", async () => {
+    const bot = makeBot({ name: "keep", token: "t-k" });
+    await addBot(bot);
+    const { ui } = makeScriptedUi({
+      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Remove", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
+      confirm: [false],
+    });
+    await commands.get("tg")!("", makeCtx(ui));
+    expect(ui.select.mock.calls[4][0]).toBe("🤖 keep");
+  });
 });
 
 describe("configModeFlow", () => {
@@ -798,5 +824,15 @@ describe("buildConfigMenuOptions", () => {
   it("keeps the 🧠 thinking-level entry on omp", () => {
     const options = buildConfigMenuOptions({}, thinkingSession, "omp");
     expect(options).toContain("🧠 Thinking level: low");
+  });
+});
+
+describe("leaf flows called outside /tg", () => {
+  it("a cancelled tool picker returns without throwing and changes nothing", async () => {
+    const persistConfig = vi.fn(async () => undefined);
+    const deps = { getConfig: () => ({}) as TelegramConfig, setConfig: vi.fn(), persistConfig } as unknown as TgConfigDeps;
+    const ui = { notify: vi.fn(), select: vi.fn(async () => undefined), input: vi.fn(), confirm: vi.fn() };
+    await expect(configToolFlow(ui, deps)).resolves.toBeUndefined();
+    expect(persistConfig).not.toHaveBeenCalled();
   });
 });

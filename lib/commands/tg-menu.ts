@@ -81,12 +81,30 @@ function pick(ui: MenuUi, title: string, options: string[]): Promise<string | un
   return ui.menu ? ui.menu(title, options) : ui.select(title, options);
 }
 
-/** A menu pick where only Back (a real choice) leaves the current page. A
- *  cancel (Cancel button, /stop, terminal Esc) closes the whole /tg menu. */
+/** The one place a cancel is decided: an undefined answer (Cancel button, /stop,
+ *  terminal Esc, input timeout) closes the whole /tg menu. */
+function answered<T>(value: T | undefined): T {
+  if (value === undefined) throw new MenuClosed();
+  return value;
+}
+
+/** A menu pick where only Back (a real choice) leaves the current page. */
 async function pickMenu(ui: MenuUi, title: string, options: string[]): Promise<string> {
-  const choice = await pick(ui, title, options);
-  if (!choice) throw new MenuClosed();
-  return choice;
+  return answered(await pick(ui, title, options));
+}
+
+/** The UI the /tg menu and the leaf flows it calls receive. Cancelling any
+ *  select / input here closes the menu at any depth, instead of returning to
+ *  the parent level. confirm is left as is: its boolean cannot tell "No" from
+ *  a cancel. Terminal calls of the flows never receive this wrapper. */
+function closeOnCancel(ui: MenuUi): MenuUi {
+  return {
+    ...ui,
+    select: async (title, options) => answered(await ui.select(title, options)),
+    input: async (title, placeholder) => answered(await ui.input(title, placeholder)),
+    ...(ui.inputSecret ? { inputSecret: async (title: string, placeholder?: string) => answered(await ui.inputSecret!(title, placeholder)) } : {}),
+    ...(ui.menu ? { menu: async (title: string, options: string[]) => answered(await ui.menu!(title, options)) } : {}),
+  };
 }
 
 // ── Switch instance flow deps ──────────────────────────────────────────────
@@ -144,7 +162,7 @@ async function runTgMenu(
   cwd: string,
 ): Promise<void> {
   try {
-    await mainMenu(ui, deps, configDeps, switchDeps, commandDeps, sessionDeps, cwd);
+    await mainMenu(closeOnCancel(ui), deps, configDeps, switchDeps, commandDeps, sessionDeps, cwd);
   } catch (error) {
     if (!(error instanceof MenuClosed)) throw error;
   } finally {
