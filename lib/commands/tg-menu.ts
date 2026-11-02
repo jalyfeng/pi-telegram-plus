@@ -191,6 +191,9 @@ async function mainMenu(
 
 // ── Full command catalog ───────────────────────────────────────────────────
 
+/** Running a command from the list closes the whole /tg menu: its output lands
+ *  in its own message, and reopening /tg is the way back to the menu. Nesting
+ *  the command's own dialogs inside the menu's scope would replace that scope. */
 async function commandsMenu(ui: MenuUi, deps: CommandMenuDeps): Promise<void> {
   const commands = (await deps.getCommands()).filter((command) => command.name !== "tg");
   if (commands.length === 0) {
@@ -203,7 +206,9 @@ async function commandsMenu(ui: MenuUi, deps: CommandMenuDeps): Promise<void> {
   const index = labels.indexOf(selected);
   const command = commands[index];
   if (!command) return;
+  await ui.closeMenu?.();
   await deps.runCommand(command.name, "");
+  throw new MenuClosed();
 }
 
 // ── Bots submenu ───────────────────────────────────────────────────────────

@@ -89,6 +89,8 @@ describe("/tg multi-level menu", () => {
   let connectionStateValue: TelegramConnectionState;
   let awaitReconcileCalls: number;
   let menuSession: CapturedAgentSession | undefined;
+  let commandCatalog: { name: string; description?: string }[];
+  let menuEvents: string[];
 
   beforeEach(async () => {
     originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -107,6 +109,8 @@ describe("/tg multi-level menu", () => {
     connectionStateValue = "disconnected";
     awaitReconcileCalls = 0;
     menuSession = undefined;
+    commandCatalog = [];
+    menuEvents = [];
 
     const deps: TelegramCommandDeps = {
       getConfig: () => config,
@@ -158,7 +162,10 @@ describe("/tg multi-level menu", () => {
       deps,
       configDeps,
       switchDeps,
-      undefined,
+      {
+        getCommands: async () => commandCatalog,
+        runCommand: async (name) => { menuEvents.push(`run:${name}`); },
+      },
       { getSession: () => menuSession },
     );
   });
@@ -279,6 +286,27 @@ describe("/tg multi-level menu", () => {
     expect(closeMenu).toHaveBeenCalled();
     expect(notifyCalls.some((c) => c.message.includes("switches to @b_bot"))).toBe(true);
     expect(config.botToken).toBe("tok-b"); // runtime switched immediately
+  });
+
+  it("running a command from the Commands list closes the /tg menu before running it", async () => {
+    commandCatalog = [{ name: "fast", description: "Toggle fast mode" }];
+    const { ui } = makeScriptedUi({ select: ["⌨️ Commands", "/fast — Toggle fast mode"] });
+    const closeMenu = vi.fn(async () => { menuEvents.push("closeMenu"); });
+    await commands.get("tg")!("", makeCtx({ ...ui, closeMenu }));
+    expect(menuEvents.filter((e) => e === "run:fast")).toHaveLength(1);
+    expect(menuEvents.indexOf("closeMenu")).toBeGreaterThanOrEqual(0);
+    expect(menuEvents.indexOf("closeMenu")).toBeLessThan(menuEvents.indexOf("run:fast"));
+    expect(ui.select).toHaveBeenCalledTimes(2); // main menu + Commands list; no return to main menu
+    expect(closeMenu).toHaveBeenCalled();
+  });
+
+  it("Back from the Commands list returns to the main menu without running anything", async () => {
+    commandCatalog = [{ name: "fast", description: "Toggle fast mode" }];
+    const { ui } = makeScriptedUi({ select: ["⌨️ Commands", "⬅️ Back", "❌ Close"] });
+    await commands.get("tg")!("", makeCtx(ui));
+    expect(menuEvents).toEqual([]);
+    expect(ui.select).toHaveBeenCalledTimes(3);
+    expect(ui.select.mock.calls[2][0]).toBe("Telegram Management");
   });
 
   it("navigates with ui.menu when available and closes the menu on exit", async () => {

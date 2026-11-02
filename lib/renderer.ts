@@ -217,7 +217,7 @@ function summarizeTodo(a: ToolArgs): string {
     const phases = Array.isArray(a.list) ? (a.list as Array<{ items?: unknown }>) : [];
     const itemCount = phases.reduce((sum, phase) => sum + (Array.isArray(phase?.items) ? phase.items.length : 0), 0)
       + (Array.isArray(a.items) ? a.items.length : 0);
-    return `init (${phases.length} phases, ${itemCount} items)`;
+    return `init (${phases.length} ${phases.length === 1 ? "phase" : "phases"}, ${itemCount} ${itemCount === 1 ? "item" : "items"})`;
   }
   if (op === "append") {
     const count = Array.isArray(a.items) ? a.items.length : 0;

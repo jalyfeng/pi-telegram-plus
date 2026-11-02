@@ -294,6 +294,8 @@ describe("Telegram tool-call lines are readable, one per call", () => {
     ["grep", { i: "Searching", pattern: "summarizeToolArgs", path: "lib" }, "🔧 grep: \"summarizeToolArgs\" in lib"],
     ["grep", { i: "Searching", pattern: "TODO" }, "🔧 grep: \"TODO\""],
     ["todo", { i: "Planning", op: "init", list: [{ phase: "A", items: ["one", "two"] }, { phase: "B", items: ["three"] }] }, "🔧 todo: init (2 phases, 3 items)"],
+    ["todo", { i: "Planning", op: "init", list: [{ phase: "A", items: ["one", "two"] }] }, "🔧 todo: init (1 phase, 2 items)"],
+    ["todo", { i: "Planning", op: "init", list: [{ phase: "A", items: ["one"] }] }, "🔧 todo: init (1 phase, 1 item)"],
     ["todo", { i: "Done", op: "done", task: "write tests" }, "🔧 todo: done: write tests"],
     ["todo", { i: "Adding", op: "append", items: ["x", "y"] }, "🔧 todo: append 2 items"],
     ["wait", {}, "🔧 wait"],
