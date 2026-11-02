@@ -85,7 +85,12 @@ async function fixture(options: { onAct?: (chat: { addChild(child: unknown): voi
     editText,
     sendDocument: async () => undefined,
   };
-  const origin = new OriginTracker({ isEditorFocused: () => true, readDraft: () => "", writeDraft: () => true });
+  const focus = fakeFocus();
+  const origin = new OriginTracker({
+    isEditorFocused: () => focus.current().kind === "editor",
+    readDraft: () => "",
+    writeDraft: () => true,
+  });
   const output = new OutputCapture(outputTransport, origin, new SecretStore());
   const scope = origin.begin({ chatId: 42, messageThreadId: 7, sourceMessageId: 99 }, "logout", "/logout", "");
   scope.telegramMessageId = 5;
@@ -94,12 +99,11 @@ async function fixture(options: { onAct?: (chat: { addChild(child: unknown): voi
   const chat = { children: [] as unknown[], addChild(child: unknown): void { this.children.push(child); } };
   (output as unknown as { attach(state: unknown): void }).attach({ mode: undefined, ui: {}, chat, session: undefined });
 
-  const focus = fakeFocus();
   const transport = brokerTransport();
   const broker = new DialogBroker({
     transport: transport as unknown as BrokerDeps["transport"],
     focus,
-    origin: { active: () => scope } as unknown as BrokerDeps["origin"],
+    origin,
     activeChatId: () => 42,
     activeTurns: () => [],
     writeText: () => true,
@@ -127,7 +131,7 @@ async function fixture(options: { onAct?: (chat: { addChild(child: unknown): voi
   const session = broker.current() as DialogSession;
   session.adapter = adapter;
   session.model = model;
-  return { broker, scope, output, chat, editText, session, acts, origin };
+  return { broker, scope, output, chat, editText, session, acts, origin, focus };
 }
 
 async function settleOutput(): Promise<void> {
@@ -200,5 +204,36 @@ describe("Telegram dialog answer output", () => {
 
     expect(syncSeen).toEqual([scope]);
     expect(asyncSeen).toEqual([scope]);
+  });
+
+  it("keeps the command open long enough for a result reported after its dialog closed", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    const { broker, editText, session, scope, origin, focus, chat } = await fixture({
+      onAct: (chat) => {
+        // The host result arrives 400 ms after the dialog closed: after the tick that would
+        // end an idle scope, but well inside the idle window the close restarts. A real timer
+        // keeps the act's command context; fake timers do not, so the callback re-enters it.
+        const inScope = currentCommandScope();
+        setTimeout(() => {
+          if (inScope) runInCommand(inScope, () => chat.addChild({ children: [{ markdown: RESULT }] }));
+        }, 400);
+      },
+    });
+    origin.markSubmitDone(scope);
+    // The dialog stays open for longer than IDLE_MS: the scope is not idle while it waits.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(scope.ended).toBe(false);
+
+    // Tap the button as it is drawn now: the periodic redraw may have moved the generation on.
+    expect(broker.handleCallback(42, 7, { sessionId: session.id, generation: session.generation, op: "y" })).toMatchObject({ handled: true });
+    await flushBroker();
+    expect(focus.current().kind).toBe("editor");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(scope.ended).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(scope.ended).toBe(true);
+    await settleOutput();
+
+    expect(lastEdit(editText)).toContain(RESULT);
   });
 });

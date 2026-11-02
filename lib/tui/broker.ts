@@ -432,6 +432,10 @@ export class DialogBroker {
       || (telegramAction !== undefined && Date.now() - telegramAction.at <= TELEGRAM_ACTION_WINDOW_MS);
     session.state = "closed";
     this.forgetPending(session);
+    // The host reports a dialog's result after the dialog closes. The owning command's scope
+    // may have been idle for its whole dialog, so restart its idle window here, or it ends on
+    // the next tick and that result lands after the scope is gone.
+    if (session.ownerScope) this.deps.origin.touch(session.ownerScope);
     const telegram = session.telegram;
     if (!telegram) return undefined;
     if (this.detached.has(session)) {
