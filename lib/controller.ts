@@ -1351,6 +1351,8 @@ export function createTelegramController(deps: {
     const commandTurn = deps.getActiveTurn(chatId, messageThreadId) ?? { chatId, messageThreadId, sourceMessageId, queuedAttachments: [] };
     // An extension command with a scope gets one message of its own, its ack, as the gateway
     // gives host commands: its notices and dialogs land there (one command, one message).
+    // A command without an ack (/tg) still runs inside its scope below, so the dialogs it opens
+    // are owned by its own scope and never by an earlier command's message.
     const ackSent = ackMessage && scope ? bindCommandAck(scope, `/${label}${args ? ` ${args}` : ""}`, chatId, messageThreadId, sourceMessageId) : undefined;
     void runWithTelegramTurn(commandTurn, () => runWithTelegramUi({
       session,
@@ -1366,7 +1368,7 @@ export function createTelegramController(deps: {
       run: async () => {
         try {
           await ackSent;
-          await (ackSent && scope ? runInCommand(scope, () => handler(args, commandCtx)) : handler(args, commandCtx));
+          await (scope ? runInCommand(scope, () => handler(args, commandCtx)) : handler(args, commandCtx));
           await holdThroughEnqueuedTurns(ctx, wasIdle);
         } finally {
           // The scope deliberately outlives the handler: a dialog answered a

@@ -4,6 +4,7 @@ import { CommandGateway } from "../tui/gateway.ts";
 import { DialogBroker } from "../tui/broker.ts";
 import type { CapturedAgentSession, TelegramTransport } from "../types.ts";
 import { tuiBridge, type TuiBridgeAdapter } from "../tui-bridge.ts";
+import { currentCommandScope } from "../tui/command-context.ts";
 
 type Call = { method: string; text?: string; messageId?: number; toast?: string };
 
@@ -409,5 +410,20 @@ describe("Colon-suffixed host commands (/force:read)", () => {
     } finally {
       Object.assign(state, saved);
     }
+  });
+});
+
+describe("Plugin command scope without an ack (P3)", () => {
+  it("runs a plugin command that has no ack inside its own command scope", async () => {
+    const seen: Array<{ chatId?: number } | undefined> = [];
+    const tg = vi.fn(async () => {
+      seen.push(currentCommandScope()?.origin);
+    });
+    const harness = createHarness({ telegramCommands: new Map([["tg", tg]]) });
+
+    await send(harness.controller, "/tg");
+
+    await vi.waitFor(() => expect(tg).toHaveBeenCalledTimes(1));
+    expect(seen).toEqual([expect.objectContaining({ chatId: 42 })]);
   });
 });

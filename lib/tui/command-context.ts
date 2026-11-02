@@ -40,6 +40,17 @@ export function runInCommand<T>(scope: CommandScope, fn: () => T): T {
   return storage().run({ kind: "command", scope }, fn);
 }
 
+/**
+ * Run `fn` with no command context at all. Long-running background work (the
+ * Telegram polling loop, timers, startup work of a session_start handler) must not
+ * inherit the context of the command that happened to start it: a `/resume` that
+ * re-runs session_start would otherwise tag every later Telegram message with the
+ * `/resume` scope, and the dialogs those messages open would reuse its message.
+ */
+export function runDetached<T>(fn: () => T): T {
+  return storage().exit(fn);
+}
+
 /** Run `fn` as an agent turn that the command started: nothing it adds is command output. */
 export function runOutsideCommand<T>(fn: () => T): T {
   return storage().run({ kind: "outside" }, fn);

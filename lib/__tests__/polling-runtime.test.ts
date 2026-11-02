@@ -15,6 +15,8 @@ vi.mock("../telegram-api.ts", () => ({
 }));
 
 import { createTelegramPollingRuntime } from "../polling.ts";
+import { currentCommandScope, runInCommand } from "../tui/command-context.ts";
+import type { CommandScope } from "../tui/origin.ts";
 import type { TelegramConfig, TelegramUpdate } from "../types.ts";
 
 const update: TelegramUpdate = {
@@ -338,5 +340,30 @@ describe("TelegramPollingRuntime", () => {
 
         expect(runtime.isActive()).toBe(false);
         expect(mocks.getTelegramUpdates).not.toHaveBeenCalled();
+    });
+
+    it("runs the polling loop outside the command that started it", async () => {
+        let config: TelegramConfig = { botToken: `scope-token-${Date.now()}`, lastUpdateId: 9 };
+        const resumeScope = { id: "resume", label: "resume" } as unknown as CommandScope;
+        const seenScopes: Array<CommandScope | undefined> = [];
+        mocks.getTelegramUpdates.mockResolvedValueOnce([update]);
+        mocks.getTelegramUpdates.mockImplementation(async (_config, signal: AbortSignal) => {
+            await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+            return [];
+        });
+
+        const runtime = createTelegramPollingRuntime({
+            getConfig: () => config,
+            setConfig: (next) => { config = next; },
+            persistConfig: async () => undefined,
+            persistUpdate: async (next) => { config = next; },
+            handleUpdate: async () => { seenScopes.push(currentCommandScope()); },
+            onError: (error) => { throw error; },
+            shouldPoll: () => true,
+        });
+
+        runInCommand(resumeScope, () => runtime.start());
+        await vi.waitFor(() => expect(seenScopes).toEqual([undefined]));
+        await runtime.stop();
     });
 });

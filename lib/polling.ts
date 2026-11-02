@@ -6,6 +6,7 @@ import { getAgentDir } from "./config.ts";
 import { getPendingTelegramUpdates, getTelegramUpdates } from "./telegram-api.ts";
 import type { TelegramConfig, TelegramUpdate } from "./types.ts";
 import { log } from "./logger.ts";
+import { runDetached } from "./tui/command-context.ts";
 
 const pollLog = log.child("polling");
 
@@ -492,7 +493,9 @@ export function createTelegramPollingRuntime(deps: TelegramUpdateBatchDeps & {
       if (abort || (deps.shouldPoll && !deps.shouldPoll())) return;
       const controller = new AbortController();
       abort = controller;
-      loopPromise = loop(controller.signal)
+      // The loop outlives whatever started it (a /resume re-running session_start, a
+      // /tg menu toggle): it must not carry that command's scope onto later updates.
+      loopPromise = runDetached(() => loop(controller.signal))
         .catch((error) => {
           deps.onError(error);
         })

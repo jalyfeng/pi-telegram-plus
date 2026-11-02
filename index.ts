@@ -23,6 +23,7 @@ import { deliverPendingNotices } from "./lib/pending-notices.ts";
 import { initLogger, log, type LogLevel } from "./lib/logger.ts";
 import { authorizeTelegramUser, ensureTelegramPairingCode, formatPairingInstructions } from "./lib/pairing.ts";
 import { getCurrentTelegramTurn } from "./lib/turn-context.ts";
+import { runDetached } from "./lib/tui/command-context.ts";
 
 import { registerAllCommands } from "./lib/commands/register.ts";
 import { registerTgMenuCommand } from "./lib/commands/tg-menu.ts";
@@ -731,7 +732,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     return reconcileTail;
   }
 
-  coordinatorTimer = setInterval(requestCoordinatorReconcile, 2_000);
+  coordinatorTimer = runDetached(() => setInterval(requestCoordinatorReconcile, 2_000));
 
   function buildStatusState(error?: string): Parameters<typeof formatTelegramStatusLine>[1] {
     const enabled = !!config.botToken && isTelegramEnabled();
@@ -820,7 +821,10 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     clearStatus();
   }
 
-  pi.on("session_start", async () => {
+  // The whole startup (polling, heartbeat, coordinator and menu sync) runs detached from
+  // whatever command re-ran it: a /resume or /new must not stamp its scope onto the
+  // long-running work it starts (see runDetached in lib/tui/command-context.ts).
+  pi.on("session_start", () => runDetached(async () => {
     // sub-agent sessions re-run this factory; starting the TUI runtime only from the main session keeps a sub-agent's trackers from replacing the main session's host hooks (#32)
     controller.startTui();
     // Only the main session reaches this handler (sub-agents are filtered by
@@ -886,7 +890,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     lastStatusError = tuiBridge.isAvailable() ? undefined : `TUI bridge unavailable: ${tuiBridge.getHost()}`;
     heartbeat.startStatusHeartbeat(refreshStatus);
     refreshStatus();
-  });
+  }));
 
   pi.on("session_shutdown", () => {
     disposeRuntime();
