@@ -78,6 +78,25 @@ function makeScriptedUi(script: {
   return { ui, notifyCalls };
 }
 
+/** Telegram-style UI: menu() pages are scripted; every page's title, options and body are recorded. */
+function makeMenuUi(menu: string[]) {
+  let menuIdx = 0;
+  const pages: { title: string; options: string[]; body?: string }[] = [];
+  const notify = vi.fn((_message: string, _level?: string) => undefined);
+  const ui = {
+    notify,
+    select: vi.fn(async () => undefined),
+    input: vi.fn(async () => undefined),
+    confirm: vi.fn(async () => false),
+    menu: vi.fn(async (title: string, options: string[], body?: string) => {
+      pages.push({ title, options, body });
+      return menu[menuIdx++] ?? undefined;
+    }),
+    closeMenu: vi.fn(async () => undefined),
+  };
+  return { ui, notify, pages };
+}
+
 describe("/tg multi-level menu", () => {
   let agentDir: string;
   let projectDir: string;
@@ -634,6 +653,34 @@ describe("/tg multi-level menu", () => {
     const after = (await readBotRegistry()).bots[0];
     expect(after.pairingCode).toBe("654321");
     expect(notifyCalls.some((c) => c.message.includes("/pair 654321"))).toBe(true);
+  });
+
+  it("Pairing page: the paired state is the page body, not a separate notice (one menu edit)", async () => {
+    const bot = makeBot({ name: "pairbot", allowedUserId: 42 });
+    await addBot(bot);
+    const { ui, notify, pages } = makeMenuUi(["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Pairing", "⬅️ Back", "⬅️ Back", "⬅️ Back", "⬅️ Back"]);
+    await commands.get("tg")!("", makeCtx(ui));
+    const page = pages.find((p) => p.title === "🔑 Pairing · pairbot");
+    expect(page?.options).toEqual(["Unpair", "⬅️ Back"]);
+    expect(page?.body).toBe("Paired user: 42");
+    expect(notify.mock.calls.some((c) => String(c[0]).includes("Paired user"))).toBe(false);
+  });
+
+  it("bot detail page: body lists name, username, API base, pairing and default, never the token", async () => {
+    const bot = makeBot({ name: "detailbot", token: "123456:SECRET-TOKEN-XYZ", botUsername: "detail_bot" });
+    await addBot(bot);
+    const { ui, notify, pages } = makeMenuUi(["🤖 Bots", "Bot list", botChoiceFull(bot, true), "⬅️ Back", "⬅️ Back", "⬅️ Back"]);
+    await commands.get("tg")!("", makeCtx(ui));
+    const page = pages.find((p) => p.title === "🤖 detailbot");
+    expect(page?.body).toBe([
+      "Name: detailbot",
+      "Username: @detail_bot",
+      "API base: default",
+      "Pairing: not paired",
+      "Default bot: yes",
+    ].join("\n"));
+    expect(page?.body).not.toContain("SECRET-TOKEN-XYZ");
+    expect(notify.mock.calls.some((c) => String(c[0]).includes("SECRET-TOKEN-XYZ"))).toBe(false);
   });
 
   it("Pairing page (paired): shows Paired user, Unpair confirms then clears allowedUserId with a new code", async () => {

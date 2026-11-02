@@ -18,14 +18,16 @@ export type TelegramUiContext = ExtensionUIContext & {
   chatId: number;
   messageThreadId?: number;
   inputSecret?: (title: string, placeholder?: string) => Promise<string | undefined>;
-  /** Like select, but successive menu() calls edit one message in place (nested menus). */
-  menu: (title: string, options: string[]) => Promise<string | undefined>;
+  /** Like select, but successive menu() calls edit one message in place (nested menus).
+   *  The optional body is text shown under the title on that same message. */
+  menu: (title: string, options: string[], body?: string) => Promise<string | undefined>;
   /** Remove the keyboard from the live menu message (call when the menu exits). */
   closeMenu: () => Promise<void>;
 };
 
 export type TelegramUiRuntime = {
-  create(chatId: number, messageThreadId?: number, sourceMessageId?: number): TelegramUiContext;
+  /** onMenuMessage is told the id of the menu message each time menu() sends or edits it. */
+  create(chatId: number, messageThreadId?: number, sourceMessageId?: number, onMenuMessage?: (messageId: number) => void): TelegramUiContext;
   resolveInput(chatId: number, value: string | boolean | undefined, replyToMessageId?: number, fromCallback?: boolean, messageThreadId?: number): { handled: boolean; promptMessageId?: number };
   isSensitiveInput(chatId: number, replyToMessageId?: number, messageThreadId?: number): boolean;
   hasPendingInput(chatId: number, messageThreadId?: number): boolean;
@@ -100,7 +102,8 @@ export function createTelegramUiRuntime(deps: {
   /** Track the currently active flow for each chat/thread (for sendOrReplace lookups). */
   const activeFlowByTarget = new Map<string, string>();
 
-  const buildSelectPage = (flowId: string, title: string, options: string[], page: number) => {
+  /** `body` is plain text (already redacted by the caller); it sits under the title. */
+  const buildSelectPage = (flowId: string, title: string, options: string[], page: number, body?: string) => {
     const pageCount = Math.ceil(options.length / PAGE_SIZE);
     const start = page * PAGE_SIZE; const pageOptions = options.slice(start, start + PAGE_SIZE);
     const rows = pageOptions.map((label, i) => [{ text: truncateLabel(label), value: cb(flowId, `s:${start + i}`) }]);
@@ -109,11 +112,12 @@ export function createTelegramUiRuntime(deps: {
     if (page < pageCount - 1) nav.push({ text: "Next ▶", value: cb(flowId, `p:${page + 1}`) });
     nav.push({ text: "Cancel", value: cb(flowId, "cancel") }); rows.push(nav);
     const suffix = pageCount > 1 ? ` (${page + 1}/${pageCount})` : "";
-    return { text: `<b>${escapeHtml(title + suffix)}</b>`, rows, pageCount };
+    const head = `<b>${escapeHtml(title + suffix)}</b>`;
+    return { text: body ? `${head}\n\n${escapeHtml(body)}` : head, rows, pageCount };
   };
 
   return {
-    create(chatId, messageThreadId, sourceMessageId) {
+    create(chatId, messageThreadId, sourceMessageId, onMenuMessage) {
       // base is the real TUI UI context (create() is called BEFORE runWithTelegramUi
       // swaps the UI context, so this is the genuine TUI context). We forward persistent
       // /stateful methods to base so the TUI stays accurate even when the trigger came
@@ -217,17 +221,18 @@ export function createTelegramUiRuntime(deps: {
             return undefined;
           }
         },
-        menu: async (title: string, options: string[]) => {
+        menu: async (title: string, options: string[], body?: string) => {
           if (options.length === 0) { releaseMenu(); return undefined; }
           let page = 0; const flowId = beginFlow();
           activeFlowByTarget.set(target, flowId);
           while (true) {
-            const { text, rows, pageCount } = buildSelectPage(flowId, redact(title), options.map(redact), page);
+            const { text, rows, pageCount } = buildSelectPage(flowId, redact(title), options.map(redact), page, body === undefined ? undefined : redact(body));
             if (menuMessageId !== undefined) {
               await deps.transport.editButtons(chatId, menuMessageId, text, rows);
             } else {
               menuMessageId = (await deps.transport.sendButtons(chatId, text, rows, messageThreadId, sourceMessageId)).message_id;
             }
+            onMenuMessage?.(menuMessageId);
             const value = await waitInput(chatId, messageThreadId, flowId, false, false, menuMessageId);
             // Pages and the next level edit menuMessageId directly, not via the
             // per-flow replace target that resolveInput records.

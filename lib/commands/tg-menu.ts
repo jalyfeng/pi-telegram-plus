@@ -77,10 +77,12 @@ function formatBotLabel(bot: BotRecord, registry: BotRegistry): string {
 class MenuClosed extends Error {}
 
 /** Navigation select. On Telegram, ui.menu edits one message in place so the
- *  whole /tg navigation stays on a single message; the TUI has no edit concept
- *  and falls back to ui.select. */
-function pick(ui: MenuUi, title: string, options: string[]): Promise<string | undefined> {
-  return ui.menu ? ui.menu(title, options) : ui.select(title, options);
+ *  whole /tg page (title, body, buttons) stays on a single message; the TUI has
+ *  no edit concept and falls back to ui.select, with the body as a notice first. */
+function pick(ui: MenuUi, title: string, options: string[], body?: string): Promise<string | undefined> {
+  if (ui.menu) return ui.menu(title, options, body);
+  if (body) ui.notify(body, "info");
+  return ui.select(title, options);
 }
 
 /** The one place a cancel is decided: an undefined answer (Cancel button, /stop,
@@ -91,8 +93,8 @@ function answered<T>(value: T | undefined): T {
 }
 
 /** A menu pick where only Back (a real choice) leaves the current page. */
-async function pickMenu(ui: MenuUi, title: string, options: string[]): Promise<string> {
-  return answered(await pick(ui, title, options));
+async function pickMenu(ui: MenuUi, title: string, options: string[], body?: string): Promise<string> {
+  return answered(await pick(ui, title, options, body));
 }
 
 /** The UI the /tg menu and the leaf flows it calls receive. Cancelling any
@@ -105,7 +107,7 @@ function closeOnCancel(ui: MenuUi): MenuUi {
     select: async (title, options) => answered(await ui.select(title, options)),
     input: async (title, placeholder) => answered(await ui.input(title, placeholder)),
     ...(ui.inputSecret ? { inputSecret: async (title: string, placeholder?: string) => answered(await ui.inputSecret!(title, placeholder)) } : {}),
-    ...(ui.menu ? { menu: async (title: string, options: string[]) => answered(await ui.menu!(title, options)) } : {}),
+    ...(ui.menu ? { menu: async (title: string, options: string[], body?: string) => answered(await ui.menu!(title, options, body)) } : {}),
   };
 }
 
@@ -206,7 +208,8 @@ async function mainMenu(
     } else if (choice === "🛠 Debug info") {
       const session = sessionDeps?.getSession();
       if (session) {
-        ui.notify(formatDebugReport(session, cwd), "info");
+        // A page of its own: the report is the body, Back is the only button.
+        await pickMenu(ui, "🛠 Debug info", [BACK_LABEL], formatDebugReport(session, cwd));
       } else {
         ui.notify("No active session", "error");
       }
@@ -326,7 +329,19 @@ async function botDetailMenu(
     }
     // The global default is set only in the ⭐ Default bot submenu; this page
     // holds the bot's own actions.
-    const choice = await pickMenu(ui, `🤖 ${botNow.name}`, [BOT_ACTION_UPDATE, BOT_ACTION_PAIRING, BOT_ACTION_REMOVE, BACK_LABEL]);
+    const paired = botNow.allowedUserId !== undefined;
+    const choice = await pickMenu(
+      ui,
+      `🤖 ${botNow.name}`,
+      [BOT_ACTION_UPDATE, BOT_ACTION_PAIRING, BOT_ACTION_REMOVE, BACK_LABEL],
+      [
+        `Name: ${botNow.name}`,
+        `Username: ${botNow.botUsername ? `@${botNow.botUsername}` : "unknown"}`,
+        `API base: ${botNow.apiBase ?? "default"}`,
+        `Pairing: ${paired ? `paired (user ${botNow.allowedUserId})` : "not paired"}`,
+        `Default bot: ${registry.defaultBotId === botNow.id ? "yes" : "no"}`,
+      ].join("\n"),
+    );
     if (choice === BACK_LABEL) return; // back to bot list
 
     if (choice === BOT_ACTION_UPDATE) {
@@ -353,17 +368,16 @@ async function pairingMenu(ui: MenuUi, deps: TelegramCommandDeps, bot: BotRecord
       return;
     }
     const paired = botNow.allowedUserId !== undefined;
-    // The menu UI only offers select/notify: the state/instructions go out as
-    // a notify right before the choices render.
-    if (paired) {
-      ui.notify(`Paired user: ${botNow.allowedUserId}`, "info");
-    } else {
-      ui.notify(formatPairingInstructions({ ...botNow, botToken: botNow.token } as TelegramConfig), "info");
-    }
+    // The state or the pairing instructions are the page's body, not a notice
+    // sent before it, so they stay on the same message as the buttons.
+    const body = paired
+      ? `Paired user: ${botNow.allowedUserId}`
+      : formatPairingInstructions({ ...botNow, botToken: botNow.token } as TelegramConfig);
     const choice = await pickMenu(
       ui,
       `🔑 Pairing · ${botNow.name}`,
       paired ? [PAIRING_ACTION_UNPAIR, BACK_LABEL] : [PAIRING_ACTION_NEW_CODE, BACK_LABEL],
+      body,
     );
     if (choice === BACK_LABEL) return; // back to bot detail
 

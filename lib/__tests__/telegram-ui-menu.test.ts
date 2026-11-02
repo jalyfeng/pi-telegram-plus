@@ -5,7 +5,7 @@ import type { TelegramButton, TelegramTransport } from "../types.ts";
 
 const CHAT = 42;
 
-function setup() {
+function setup(onMenuMessage?: (messageId: number) => void) {
   let nextId = 100;
   const renders: TelegramButton[][][] = [];
   const transport = {
@@ -16,7 +16,7 @@ function setup() {
     removeInlineKeyboard: vi.fn(async () => undefined),
   };
   const runtime = createTelegramUiRuntime({ getSession: () => undefined, transport: transport as unknown as TelegramTransport });
-  const ui = runtime.create(CHAT);
+  const ui = runtime.create(CHAT, undefined, undefined, onMenuMessage);
   return { transport, runtime, ui, renders };
 }
 
@@ -97,6 +97,19 @@ describe("telegram ui menu() edit-in-place", () => {
     await press(env, 100, "opt 11");
     expect(await result).toBe("opt 11");
     expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+  });
+
+  it("a body sits under the title on the same message, and onMenuMessage reports that message", async () => {
+    const reported: number[] = [];
+    const env = setup((id) => reported.push(id));
+    const { transport, ui } = env;
+    const result = ui.menu("Pairing", ["Unpair", "Back"], "Paired user: <42>");
+    await press(env, 100, "Back");
+    expect(await result).toBe("Back");
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    expect(transport.sendButtons.mock.calls[0][1]).toBe("<b>Pairing</b>\n\nPaired user: &lt;42&gt;");
+    expect(transport.sendText).not.toHaveBeenCalled();
+    expect(reported).toEqual([100]);
   });
 
   it("Cancel resolves undefined and removes the keyboard", async () => {

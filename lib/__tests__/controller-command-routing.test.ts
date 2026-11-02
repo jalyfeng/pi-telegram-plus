@@ -55,6 +55,8 @@ function createBridge(overrides: Partial<TuiBridgeAdapter> = {}): TuiBridgeAdapt
 function createHarness(options: {
   bridge?: TuiBridgeAdapter;
   telegramCommands?: Map<string, (args: string, ctx: unknown) => Promise<void>>;
+  /** When set, the chat UI's menu() reports this message id to the controller, as telegram-ui does. */
+  menuMessageId?: number;
 } = {}) {
   const calls: Call[] = [];
   const transport = createTransport(calls);
@@ -64,7 +66,9 @@ function createHarness(options: {
     getSession: () => session,
     transport,
     ui: {
-      create: () => ({ notify: async () => undefined }) as never,
+      create: (_chatId: number, _threadId?: number, _sourceId?: number, onMenuMessage?: (messageId: number) => void) => (options.menuMessageId === undefined
+        ? { notify: async () => undefined }
+        : { notify: async () => undefined, menu: async () => { onMenuMessage?.(options.menuMessageId!); return undefined; } }) as never,
       resolveInput: () => ({ handled: false }),
       isSensitiveInput: () => false,
       hasPendingInput: () => false,
@@ -425,5 +429,23 @@ describe("Plugin command scope without an ack (P3)", () => {
 
     await vi.waitFor(() => expect(tg).toHaveBeenCalledTimes(1));
     expect(seen).toEqual([expect.objectContaining({ chatId: 42 })]);
+  });
+});
+
+describe("/tg menu message is the command scope's message (P18)", () => {
+  it("a menu page /tg sends becomes the scope's message, so the dialogs it opens draw on it", async () => {
+    let scopeSeen: { telegramMessageId?: number } | undefined;
+    const tg = vi.fn(async (_args: string, ctx: unknown) => {
+      scopeSeen = currentCommandScope();
+      await (ctx as { ui: { menu: (title: string, options: string[], body?: string) => Promise<unknown> } }).ui.menu("🤖 Bots", ["Back"], "body");
+    });
+    const harness = createHarness({ telegramCommands: new Map([["tg", tg]]), menuMessageId: 77 });
+    // A host UI context is present, so the /tg scope exists (host prompts mode).
+    (harness.session.extensionRunner as unknown as { createCommandContext: () => unknown }).createCommandContext = () => ({ ui: {} });
+
+    await send(harness.controller, "/tg");
+
+    await vi.waitFor(() => expect(tg).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(scopeSeen?.telegramMessageId).toBe(77));
   });
 });

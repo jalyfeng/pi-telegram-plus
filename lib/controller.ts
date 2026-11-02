@@ -1325,7 +1325,11 @@ export function createTelegramController(deps: {
     // Do not await command handlers here: some commands open interactive
     // prompts (e.g. /new confirmation), and awaiting them would stall the
     // polling loop and block callback processing for that update.
-    const telegramUi = deps.ui.create(chatId, messageThreadId, sourceMessageId);
+    // A command without an ack (/tg) has its menu message as its own message: the host
+    // dialogs its pages open are drawn on that message, not in a new one.
+    const telegramUi = deps.ui.create(chatId, messageThreadId, sourceMessageId, (menuMessageId) => {
+      if (scope && !ackMessage) scope.telegramMessageId = menuMessageId;
+    });
     const ctx = session.extensionRunner.createCommandContext();
     // Whether the host - rather than the plugin - answers prompts raised by this
     // command's own work (§4.2.6 item 2).
