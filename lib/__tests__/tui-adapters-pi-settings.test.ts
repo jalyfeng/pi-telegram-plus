@@ -330,7 +330,7 @@ describe("submenu subtitle: pi's own step description", () => {
               key: "model",
               title: "Per-Model Thinking Level",
               description: "Select a model to configure",
-              options: () => [{ value: "a", label: "Model A" }],
+              options: () => [{ value: "a", label: "Model A", description: "off" }],
               preselect: () => "a",
             },
             {
@@ -359,6 +359,8 @@ describe("submenu subtitle: pi's own step description", () => {
     // The title is the row that opened the submenu; the step title is pi's own.
     expect(first.model.title).toBe("Default thinking level per model");
     expect(first.model.subtitle).toBe("Step 1/2 · Select a model to configure");
+    // Each row carries its current value: pi's option description (the override) is the row's value.
+    expect(first.model.items).toEqual([expect.objectContaining({ label: "Model A", value: "off" })]);
     // Choosing the model advances pi to step 2, which carries its own line.
     expect(piSettingsAdapter.act(list, { type: "choose", key: "0:Model A" }, ctx)).toBe(true);
     const second = expectSubmenu(piSettingsAdapter.read(list, ctx));

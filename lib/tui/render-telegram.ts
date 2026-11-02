@@ -263,17 +263,16 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
       keyMap.set(arg, item.key);
       return;
     }
+    const arg = `${page}.${index}`;
     if (values.length === 2) {
-      values.forEach((value, position) => {
-        const arg = `${page}.${index}.${position}`;
-        const built = button(`${item.value === value ? "◉" : "○"} ${item.label}: ${shorten(value, MAX_LABEL - 12)}`, ctx, "v", arg);
-        if (!built) return;
-        rows.push([built]);
-        keyMap.set(arg, `${item.key}=${value}`);
-      });
+      // One button shows the current value; a press moves to the other one.
+      const other = values[0] === item.value ? values[1] : values[0];
+      const built = button(itemLabel(item), ctx, "v", arg);
+      if (!built) return;
+      rows.push([built]);
+      keyMap.set(arg, `${item.key}=${other}`);
       return;
     }
-    const arg = `${page}.${index}`;
     const built = button(itemLabel(item), ctx, values.length > 2 ? "v" : "t", arg);
     if (!built) return;
     rows.push([built]);

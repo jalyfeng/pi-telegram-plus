@@ -116,6 +116,9 @@ function readSubmenu(component: HostRecord, rows: SettingRow[]): { itemKey: stri
       items: subRows.map((row, index) => ({
         key: row.key,
         label: row.label,
+        // pi draws a row's `description` beside its label (e.g. the model's thinking override);
+        // the Telegram button shows it as the row's value.
+        value: text(row.raw.description),
         focused: index === cursor,
         current: opener !== undefined && text(row.raw.value) === currentValue,
       })),

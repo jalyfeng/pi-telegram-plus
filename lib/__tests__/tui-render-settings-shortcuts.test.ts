@@ -33,7 +33,7 @@ describe("settings page switches as a compact block", () => {
     const rendered = renderDialog(settingsWithPages(), { ...CTX, page: 0 });
     expect(rendered.pages).toBe(2);
     expect(rendered.text).toContain("Page 1/2 · 12 items");
-    expect(labels(rendered.rows)[0]).toEqual(["◉ Row 0: On"]);
+    expect(labels(rendered.rows)[0]).toEqual(["Row 0: On"]);
   });
 
   it("keeps the page switches below the nav row and above Cancel, three per row", () => {
@@ -58,7 +58,7 @@ describe("settings page switches as a compact block", () => {
   it("shows the same page-switch block on page 2", () => {
     const rendered = renderDialog(settingsWithPages(), { ...CTX, page: 1 });
     expect(rendered.text).toContain("Page 2/2 · 12 items");
-    expect(labels(rendered.rows)[0]).toEqual(["◉ Row 10: On"]);
+    expect(labels(rendered.rows)[0]).toEqual(["Row 10: On"]);
     const flat = labels(rendered.rows).flat();
     for (let index = 0; index < 10; index++) expect(flat).toContain(`📄 Page ${index}`);
   });
@@ -67,7 +67,57 @@ describe("settings page switches as a compact block", () => {
     const rendered = renderDialog(settingsWithPages(), { ...CTX, page: 0 });
     expect(rendered.keyMap.get("g0")).toBe("page:p0");
     expect(rendered.keyMap.get("g9")).toBe("page:p9");
-    expect(rendered.keyMap.get("0.0.0")).toBe("row0=On");
+    // A two-valued row is one button; its press asks for the other value.
+    expect(rendered.keyMap.get("0.0")).toBe("row0=Off");
+    expect(rendered.keyMap.get("0.0.0")).toBeUndefined();
+  });
+});
+
+describe("two-valued settings rows", () => {
+  const row = (value: string): SettingsModel => ({
+    kind: "settings",
+    title: "Settings",
+    items: [{ key: "auto-compact", label: "Auto-compact", value, values: ["true", "false"] }],
+  });
+
+  it("draws one button with the current value, not one per value", () => {
+    const rendered = renderDialog(row("true"), { ...CTX, page: 0 });
+    // One row button, then the Cancel row.
+    expect(labels(rendered.rows)).toEqual([["Auto-compact: true"], ["Cancel"]]);
+  });
+
+  it("presses toward the other value from either side", () => {
+    expect(renderDialog(row("true"), { ...CTX, page: 0 }).keyMap.get("0.0")).toBe("auto-compact=false");
+    expect(renderDialog(row("false"), { ...CTX, page: 0 }).keyMap.get("0.0")).toBe("auto-compact=true");
+  });
+
+  it("shows the current value on the button for a two-valued row", () => {
+    expect(labels(renderDialog(row("false"), { ...CTX, page: 0 }).rows)[0]).toEqual(["Auto-compact: false"]);
+  });
+});
+
+describe("settings submenu rows", () => {
+  it("draws each row with its current value after the label", () => {
+    const model: SettingsModel = {
+      kind: "settings",
+      title: "Settings",
+      items: [{ key: "model-thinking", label: "Default thinking level per model", value: "", hasSubmenu: true }],
+      submenu: {
+        itemKey: "model-thinking",
+        model: {
+          kind: "select",
+          title: "Per-Model Thinking Level",
+          total: 2,
+          items: [
+            { key: "0:mock-model", label: "mock-model [mock]", value: "off", focused: true, current: false },
+            { key: "1:other", label: "other [mock]", current: false },
+          ],
+        },
+      },
+    };
+    const rendered = renderDialog(model, { ...CTX, page: 0 });
+    expect(labels(rendered.rows)[0]).toEqual(["▸ mock-model [mock]: off"]);
+    expect(labels(rendered.rows)[1]).toEqual(["other [mock]"]);
   });
 });
 
