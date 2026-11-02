@@ -8,10 +8,10 @@
  * the message once somebody has answered.
  */
 import { describe, expect, it, vi } from "vitest";
-import { DialogBroker, REFRESH_MS, textPurpose } from "../tui/broker.ts";
+import { DialogBroker, EDIT_THROTTLE_MS, REFRESH_MS, textPurpose } from "../tui/broker.ts";
 import type { BrokerDeps } from "../tui/broker.ts";
 import type { FocusInfo } from "../tui/focus.ts";
-import type { DialogModel, EntryInfo } from "../tui/model.ts";
+import type { DialogAction, DialogAdapter, DialogModel, EntryInfo } from "../tui/model.ts";
 import type { TelegramTurn } from "../types.ts";
 import type { CommandScope } from "../tui/origin.ts";
 import { SecretStore } from "../tui/secrets.ts";
@@ -922,5 +922,117 @@ describe("textPurpose for settings submenus", () => {
   it("keeps search the purpose while no submenu is open, and plain settings take no text", () => {
     expect(textPurpose(settings({ search: { query: "" } }))).toBe("search");
     expect(textPurpose(settings())).toBeUndefined();
+  });
+});
+
+describe("who closed a dialog and what they tapped", () => {
+  /**
+   * A dialog whose model and actions the test scripts: the adapter is swapped in after the
+   * session opens, and `closesOn` decides which action the host answers by closing the dialog.
+   */
+  async function scripted(model: DialogModel, closesOn: (action: DialogAction) => boolean) {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    const acts: string[] = [];
+    const adapter: DialogAdapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: (_component, action) => {
+        acts.push(action.type);
+        if (closesOn(action)) focus.closeToEditor();
+        return true;
+      },
+    };
+    session.adapter = adapter;
+    session.model = model;
+    return { broker, transport, focus, session, acts };
+  }
+
+  const lastText = (transport: { edits: Array<{ text: string }> }) => transport.edits.at(-1)?.text ?? "";
+
+  it("counts a typed answer sent from Telegram as Telegram's, not the terminal's", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, focus, session } = await scripted(
+        { kind: "input", title: "Paste your API key", secret: false },
+        () => false,
+      );
+      expect(broker.handleText(session, "sk-test-123", 57)).toEqual({ handled: true });
+      await settle();
+      // The redraw after the typed answer uses the edit throttle; let it pass before the host closes.
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+
+      expect(lastText(transport)).toContain("✅ Sent an answer");
+      expect(lastText(transport)).not.toContain("Answered in the terminal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says the terminal closed the dialog when the Telegram tap was a button that kept it open", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const { broker, transport, focus, session } = await scripted(
+        { kind: "confirm", title: "Delete session?" },
+        () => false,
+      );
+      // Cancel on a confirm returns to the list the terminal user is still looking at.
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
+      await settle();
+      vi.setSystemTime(Date.now() + 2_000);
+      focus.closeToEditor();
+      await settle();
+
+      expect(lastText(transport)).toContain("Answered in the terminal");
+      expect(lastText(transport)).not.toContain("✅");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the button a key tap pressed, not its internal id", async () => {
+    const { broker, transport, session } = await scripted(
+      {
+        kind: "select",
+        title: "Login",
+        items: [{ key: "a", label: "A" }],
+        total: 1,
+        extraActions: [{ label: "Sign in", key: "act:0" }],
+      },
+      (action) => action.type === "key",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "k", arg: "act:0" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ Sign in");
+    expect(lastText(transport)).not.toContain("act:0");
+  });
+
+  it("names a confirm's Yes button as the button the user pressed", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "confirm", title: "Delete session?" },
+      (action) => action.type === "confirm",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "y" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ Yes");
+    expect(lastText(transport)).not.toContain("Confirm");
+  });
+
+  it("uses the host's own confirm label when the confirm names one", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "confirm", title: "Delete session?", confirmLabel: "Delete", cancelLabel: "Keep" },
+      (action) => action.type === "confirm",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "y" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ Delete");
   });
 });

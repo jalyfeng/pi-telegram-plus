@@ -80,6 +80,14 @@ export const REFRESH_MS = 1_000;
 /** §4.7.1: only the last few generations of button identity are kept. */
 const KEEP_GENERATIONS = 3;
 
+/**
+ * How long after a Telegram tap a close still counts as that tap's. The host may close the dialog
+ * a moment after the tap returns (its Esc is handled asynchronously), so the close is attributed
+ * to Telegram inside this window. Anything later was done in the terminal, and must not be
+ * reported as the button the user pressed earlier.
+ */
+const TELEGRAM_ACTION_WINDOW_MS = 1_500;
+
 export type TextPurpose = "input" | "editor" | "search";
 
 /**
@@ -135,6 +143,24 @@ const sameTarget = (a: { chatId: number; messageThreadId?: number }, b: { chatId
 
 function isDialogKind(kind: FocusInfo["kind"]): boolean {
   return kind === "dialog" || kind === "progress";
+}
+
+/** The label the Telegram button for a yes/no answer shows (mirrors render-telegram's confirm rows). */
+function confirmButtonLabel(model: DialogModel, yes: boolean): string {
+  if (model.kind === "confirm" && model.confirmLabel) {
+    return yes ? model.confirmLabel : model.cancelLabel ?? "Cancel";
+  }
+  return yes ? "Yes" : "No";
+}
+
+/** The text of the key button the tap came from; the internal key is only the fallback. */
+function keyButtonLabel(model: DialogModel, key: string): string {
+  if (model.kind === "select") {
+    const label = model.extraActions?.find((extra) => extra.key === key)?.label;
+    if (label) return label;
+  }
+  if (model.kind === "settings" && model.submenu) return keyButtonLabel(model.submenu.model, key);
+  return "Done";
 }
 
 function activeQuestion(model: Extract<DialogModel, { kind: "questionnaire" }>) {
@@ -401,7 +427,8 @@ export class DialogBroker {
   private retire(session: DialogSession | undefined, next: FocusInfo): DialogSession["closedBy"] | undefined {
     if (!session || session.state === "closed") return undefined;
     const telegramAction = session.telegramAction;
-    const byTelegram = session.state === "resolving" || telegramAction !== undefined;
+    const byTelegram = session.state === "resolving"
+      || (telegramAction !== undefined && Date.now() - telegramAction.at <= TELEGRAM_ACTION_WINDOW_MS);
     session.state = "closed";
     this.forgetPending(session);
     const telegram = session.telegram;
@@ -600,7 +627,7 @@ export class DialogBroker {
     // The host may close the dialog after this tap returns (the Esc it received is handled
     // asynchronously), so the close is attributed to Telegram by this marker, not by state.
     const cancelled = resolved.action.type === "cancel";
-    session.telegramAction = { cancelled };
+    session.telegramAction = { cancelled, at: Date.now() };
     // Rule 3.5: the component may already be gone (selectors resolve inline),
     // or it may stay open (multi-select, settings rows).
     if (this.session === session && session.state === "resolving") {
@@ -661,6 +688,11 @@ export class DialogBroker {
     }
     if (!written) {
       return { handled: true, toast: "The host did not accept this input" };
+    }
+    // A typed answer closes the dialog just like a tap does, so the close belongs to Telegram.
+    if (purpose === "input" || purpose === "editor") {
+      session.telegramAction = { cancelled: false, at: Date.now() };
+      session.lastAction = "Sent an answer";
     }
     if (this.session === session && session.state !== "closed") {
       if (this.canDrive(session)) this.redraw(session);
@@ -1135,7 +1167,7 @@ export class DialogBroker {
         return {
           kind: "action",
           action: { type: "confirm", yes: callback.op === "y" },
-          label: callback.op === "y" ? "Confirm" : "Cancel",
+          label: confirmButtonLabel(model, callback.op === "y"),
         };
       case "x":
         return { kind: "action", action: { type: "cancel" }, label: "Cancel" };
@@ -1144,7 +1176,7 @@ export class DialogBroker {
         // adapters act on `submit`, the mirror on the raw key.
         return arg === "enter"
           ? { kind: "action", action: { type: "submit" }, label: "Submit" }
-          : { kind: "action", action: { type: "key", name: arg }, label: `Key ${arg}` };
+          : { kind: "action", action: { type: "key", name: arg }, label: keyButtonLabel(model, arg) };
       case "q": {
         const index = Number.parseInt(arg, 10);
         if (!Number.isFinite(index)) return { kind: "none" };
