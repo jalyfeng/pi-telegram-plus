@@ -16,7 +16,7 @@ import { OriginTracker, type CommandScope } from "../tui/origin.ts";
 import type { DialogAdapter, DialogModel, DialogSession } from "../tui/model.ts";
 import { SecretStore } from "../tui/secrets.ts";
 import { deliverPendingNotices, takePendingNotices } from "../pending-notices.ts";
-import type { TelegramTransport } from "../types.ts";
+import type { TelegramTransport, TelegramTurn } from "../types.ts";
 
 const HEADER = "<b>▶️ /logout</b>";
 
@@ -86,6 +86,7 @@ const flush = async () => {
  * that leaves at once) or only later (a host that keeps the dialog up until the switch).
  */
 async function fixture(closeOnAct: boolean) {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   const sent: Sent[] = [];
   const state = { active: true };
   const transport = gatedTransport(state, sent);
@@ -129,7 +130,9 @@ async function fixture(closeOnAct: boolean) {
   const session = broker.current() as DialogSession;
   session.adapter = adapter;
   session.model = model;
-  broker.handleCallback(42, 7, { sessionId: session.id, generation: 0, op: "y" });
+  // The refresh redraws the dialog with its real model, as the host would have shown it.
+  await vi.advanceTimersByTimeAsync(1100);
+  broker.handleCallback(42, 7, { sessionId: session.id, generation: session.generation, op: "y" });
   await flush();
   return { broker, output, origin, scope, sent, state };
 }
@@ -167,9 +170,8 @@ describe("runtime teardown after a Telegram answer", () => {
   });
 
   it("writes the summary of a Telegram answer whose dialog is still open at teardown, past the 1.5 s window", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
     const ctx = await fixture(false);
-    vi.setSystemTime(Date.now() + 3000);
+    await vi.advanceTimersByTimeAsync(3000);
     teardown(ctx);
 
     const notices = takePendingNotices();
@@ -188,5 +190,81 @@ describe("runtime teardown after a Telegram answer", () => {
     await flush();
     expect(next).toEqual([expect.objectContaining({ kind: "editText" })]);
     expect(next[0].text).toMatch(/^<b>▶️ \/logout<\/b>[\s\S]*✅ \S/);
+  });
+});
+
+/**
+ * A dialog drawn on its own message, with no command scope behind it (a host-opened dialog). Its
+ * keyboard has to be dropped by the replacement runtime too, not left as a dead menu.
+ */
+async function standaloneDialog(closeOnAct: boolean) {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+  const sent: Sent[] = [];
+  const state = { active: true };
+  const transport = gatedTransport(state, sent);
+  const focus = fakeFocus();
+  const turn: TelegramTurn = { chatId: 42, sourceMessageId: 7, queuedAttachments: [] };
+  const broker = new DialogBroker({
+    transport,
+    focus,
+    origin: { active: () => undefined } as unknown as BrokerDeps["origin"],
+    activeChatId: () => 42,
+    activeTurns: () => [turn],
+    writeText: () => true,
+    enabled: () => true,
+  } as unknown as BrokerDeps);
+  broker.start();
+
+  const model: DialogModel = { kind: "confirm", title: "Log out API key #1?" };
+  const adapter: DialogAdapter = {
+    id: "scripted",
+    detect: () => true,
+    read: () => model,
+    act: () => {
+      if (closeOnAct) focus.closeToEditor();
+      return true;
+    },
+  };
+  focus.openDialog({});
+  await vi.advanceTimersByTimeAsync(10);
+  const session = broker.current() as DialogSession;
+  session.adapter = adapter;
+  session.model = model;
+  await vi.advanceTimersByTimeAsync(1100);
+  return { broker, session, sent, state };
+}
+
+describe("runtime teardown of a dialog without a command scope", () => {
+  it("hands the Telegram answer over as the message's text, without the keyboard", async () => {
+    takePendingNotices(Date.now() + 10 * 60 * 1000);
+    // The host has not closed the dialog yet when the runtime goes away.
+    const ctx = await standaloneDialog(false);
+    ctx.broker.handleCallback(42, undefined, { sessionId: ctx.session.id, generation: ctx.session.generation, op: "y" });
+    await vi.advanceTimersByTimeAsync(1500);
+    ctx.sent.length = 0;
+
+    ctx.state.active = false;
+    ctx.broker.stop({ handOver: true });
+
+    const notices = takePendingNotices();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ chatId: 42, editMessageId: 101 });
+    expect(notices[0].html).toMatch(/✅ \S/);
+    expect(ctx.sent).toEqual([]);
+  });
+
+  it("hands an unanswered dialog over as its text without the keyboard", async () => {
+    takePendingNotices(Date.now() + 10 * 60 * 1000);
+    const ctx = await standaloneDialog(false);
+    ctx.sent.length = 0;
+
+    ctx.state.active = false;
+    ctx.broker.stop({ handOver: true });
+
+    const notices = takePendingNotices();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ chatId: 42, editMessageId: 101 });
+    expect(notices[0].html).toContain("Log out API key #1?");
+    expect(ctx.sent).toEqual([]);
   });
 });

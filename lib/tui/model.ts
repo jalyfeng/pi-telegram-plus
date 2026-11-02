@@ -248,10 +248,13 @@ export type DialogSession = {
   closedBy?: "telegram" | "terminal" | "replaced";
   lastAction?: string;
   /**
-   * Set when the broker itself sent a Telegram tap to the host and the host has not closed the
-   * dialog yet. The close that follows belongs to Telegram, even when it is observed after the
-   * session already left `resolving`. `cancelled` tells a Cancel button from an answer; `at` is
-   * when it happened, so a close much later than the tap is not attributed to it.
+   * Set when the broker itself sent a Telegram tap to the host. The close that follows belongs to
+   * Telegram, however long after the tap it is observed, as long as the dialog still shows what was
+   * drawn when the tap was made (`drawn`, the broker's signature of that draw). Once the dialog
+   * changes, the tap has been consumed and it is forgotten. `cancelled` tells a Cancel button from
+   * an answer.
    */
-  telegramAction?: { cancelled: boolean; at: number };
+  telegramAction?: { cancelled: boolean; drawn?: string };
+  /** The callback that last reached the host through this dialog; a repeat of it is not a terminal answer. */
+  lastTapKey?: string;
 };
