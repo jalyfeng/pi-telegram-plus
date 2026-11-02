@@ -78,6 +78,8 @@ export type NoticeTarget = {
   sourceMessageId?: number;
   /** Live: the final auto-retry error the turn already shows (see TelegramTurn.finalErrorShown). */
   readonly finalErrorShown?: string;
+  /** Live: the last failed attempt's error in the turn (see TelegramTurn.failedAttemptError). */
+  readonly failedAttemptError?: string;
 };
 
 /** Host notices (`showStatus` / `showError` / `showWarning`) raised while a Telegram turn

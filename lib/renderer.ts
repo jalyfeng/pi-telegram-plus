@@ -354,6 +354,11 @@ export function registerTelegramRenderer(
     transport: TelegramTransport;
     getActiveTurn: (chatId?: number, messageThreadId?: number) => TelegramTurn | undefined;
     hasActiveTurns?: () => boolean;
+    /**
+     * True on OMP. OMP delivers auto_retry_* and the settled agent_end to extension handlers;
+     * pi 1.4.0 does not, so there the events come from `getSession().subscribe` (P2-5).
+     */
+    isOmp?: boolean;
     /** `subscribe` carries the host's session events, including auto-retry start/end (P2-5). */
     getSession?: () => {
       isStreaming: boolean;
@@ -498,6 +503,8 @@ export function registerTelegramRenderer(
   // The host orders its events so that the failed assistant message_end comes
   // first; auto_retry_start follows only if the attempt is retried; agent_end
   // then settles the run, with willRetry set when a retry follows.
+  const hostIsOmp = deps.isOmp === true;
+  const hostName = hostIsOmp ? "omp" : "pi";
   type RetryStatus = { messageId?: number; lastError?: string; queue: Promise<void> };
   const retryStatuses = new WeakMap<TelegramTurn, RetryStatus>();
   const noTurnRetryStatus: RetryStatus = { queue: Promise.resolve() };
@@ -530,14 +537,16 @@ export function registerTelegramRenderer(
       if (status.messageId !== undefined) {
         try {
           await deps.transport.editText(turn.chatId, status.messageId, html);
+          renderLog.debug("retry status edited", { host: hostName, messageId: status.messageId });
           return;
         } catch (err) {
-          renderLog.debug("retry status edit failed; sending a new message", { err });
+          renderLog.debug("retry status edit failed; sending a new message", { host: hostName, err });
           status.messageId = undefined;
         }
       }
       const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId);
       status.messageId = sent[0]?.message_id;
+      renderLog.debug("retry status sent", { host: hostName, messageId: status.messageId });
     }).catch(renderLog.swallow("warn", "retry status write failed"));
     return status.queue;
   };
@@ -579,34 +588,73 @@ export function registerTelegramRenderer(
     showFinalError(turn, event.finalError || "Unknown error", true);
   };
 
-  /** agent_end without a retry after a failed attempt: that error is final. */
-  const onRunSettled = (event: { willRetry?: boolean }): void => {
+  /**
+   * The run settled. Without a retry (auto_retry_start has already cleared pendingError when
+   * one follows), the held error is final; an aborted run says it was stopped.
+   */
+  const onRunSettled = (event: { willRetry?: boolean; messages?: unknown[] }): void => {
     if (pendingError === undefined || event.willRetry === true) return;
     const error = pendingError;
     pendingError = undefined;
-    showFinalError(deps.getActiveTurn(), error, false);
+    const turn = deps.getActiveTurn();
+    let lastAssistant: AnyMessage | undefined;
+    for (const message of event.messages ?? []) {
+      if ((message as AnyMessage)?.role === "assistant") lastAssistant = message as AnyMessage;
+    }
+    if (lastAssistant?.stopReason === "aborted") {
+      renderLog.debug("run stopped after a failed attempt", { host: hostName });
+      void writeRetryStatus(turn, `⏹️ Stopped after an error: ${retryHtml(turn, headline(error, 1000))}`);
+      return;
+    }
+    renderLog.debug("run settled with no retry; failed attempt is final", { host: hostName });
+    showFinalError(turn, error, false);
   };
 
   const onSessionEvent = (event: any): void => {
     try {
       switch (event?.type) {
-        case "auto_retry_start": onRetryStart(event); break;
-        case "auto_retry_end": onRetryEnd(event); break;
+        case "auto_retry_start":
+          renderLog.debug("auto_retry_start", { host: hostName, attempt: event.attempt, maxAttempts: event.maxAttempts });
+          onRetryStart(event);
+          break;
+        case "auto_retry_end":
+          renderLog.debug("auto_retry_end", { host: hostName, success: event.success, attempt: event.attempt });
+          onRetryEnd(event);
+          break;
         case "agent_end": onRunSettled(event); break;
         default: break;
       }
     } catch (err) { renderLog.warn("render retry event failed", { err }); }
   };
 
-  /** Follows the active main session. A replaced session is unsubscribed when the next run starts. */
+  /**
+   * pi 1.4.0 only: follows the active main session. A replaced session is unsubscribed
+   * when the next run starts. OMP never reaches this (its events arrive through pi.on).
+   */
   const attachRetryEvents = (): void => {
+    if (hostIsOmp) return;
     const session = deps.getSession?.();
     if (retrySession?.session === session) return;
     retrySession?.unsubscribe();
     retrySession = undefined;
-    if (!session || typeof session.subscribe !== "function") return;
+    if (!session || typeof session.subscribe !== "function") {
+      renderLog.debug("retry events not subscribed: no session with subscribe", { host: hostName, hasSession: session !== undefined });
+      return;
+    }
     retrySession = { session, unsubscribe: session.subscribe(onSessionEvent) };
+    renderLog.debug("retry events subscribed to the session", { host: hostName });
   };
+
+  // OMP: the retry events and the settled agent_end come through extension handlers.
+  // pi 1.4.0 has no such extension events (its agent_end precedes the retry decision),
+  // so there they come from the session subscription above.
+  if (hostIsOmp) {
+    // OMP's extension API declares these events; pi's typed API does not, so they are named untyped here.
+    const onHostEvent = (pi as unknown as { on(event: string, handler: (event: any) => Promise<void>): unknown }).on;
+    onHostEvent.call(pi, "auto_retry_start", async (event: any) => { onSessionEvent(event); });
+    onHostEvent.call(pi, "auto_retry_end", async (event: any) => { onSessionEvent(event); });
+    onHostEvent.call(pi, "agent_end", async (event: any) => { onSessionEvent(event); });
+  }
 
   pi.on("agent_start", async () => {
     try {
@@ -748,7 +796,13 @@ ${stringifyShort(text, 700)}`);
     // A failed attempt with no text is not sent as a message of its own: the
     // retry events decide what it becomes (see onRetryStart / onRunSettled).
     if (message.stopReason === "error" && rendered.body.trim() === "" && contentImages(message.content).length === 0) {
-      pendingError = message.errorMessage || "Unknown error";
+      const error = message.errorMessage || "Unknown error";
+      pendingError = error;
+      const failedTurn = deps.getActiveTurn();
+      // Recorded on the turn before any retry event: TurnNotice judges the host's
+      // "Retry failed" notice against it, and that notice always comes after this.
+      if (failedTurn) failedTurn.failedAttemptError = redactFor(failedTurn, error);
+      renderLog.debug("failed attempt held back", { host: hostName });
       return;
     }
     // Redact the whole reply (prose *and* the oversized code blocks pulled out

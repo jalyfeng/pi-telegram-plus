@@ -196,6 +196,11 @@ export type TelegramTurn = {
    * it. The host's own "Retry failed" notice for the same error is then not sent again.
    */
   finalErrorShown?: string;
+  /**
+   * Redacted error of the last failed attempt in this turn, set as soon as that attempt
+   * is seen (before any retry event). A host "Retry failed" notice after it is ours to hide.
+   */
+  failedAttemptError?: string;
   queuedAttachments: Array<{ path: string; fileName: string }>;
   attachmentsSent?: boolean;
 };

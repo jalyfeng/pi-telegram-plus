@@ -40,9 +40,10 @@ const ctrlLog = log.child("controller");
 /** The same host notice is sent to one turn at most once per this window (#33). */
 const TURN_NOTICE_DEDUPE_MS = 5000;
 
-/** The host's "Retry failed" notice for a final error the turn already shows (P2-5). */
+/** The host's "Retry failed" notice for a provider error the turn already shows (P2-5).
+ * The renderer records the failed attempt on the turn before the host emits that notice. */
 function suppressedByShownError(target: NoticeTarget, html: string): boolean {
-  if (html.startsWith("❌ Retry failed")) return target.finalErrorShown !== undefined;
+  if (html.startsWith("❌ Retry failed") && (target.failedAttemptError !== undefined || target.finalErrorShown !== undefined)) return true;
   const shown = target.finalErrorShown;
   return shown !== undefined && shown.length > 0 && html.includes(escapeHtml(shown));
 }
@@ -64,6 +65,7 @@ export function createTurnNotice(
         messageThreadId: turn.messageThreadId,
         sourceMessageId: turn.sourceMessageId,
         get finalErrorShown() { return turn.finalErrorShown; },
+        get failedAttemptError() { return turn.failedAttemptError; },
       };
     },
     send(target, html) {
@@ -74,12 +76,11 @@ export function createTurnNotice(
       }
       if (lastSent.has(key)) return;
       lastSent.set(key, current);
+      if (suppressedByShownError(target, html)) {
+        ctrlLog.debug("host notice suppressed: its provider error is already shown in the turn");
+        return;
+      }
       const deliver = async () => {
-        // The host emits auto_retry_end and calls showError inside one synchronous emit. The
-        // renderer marks the final error on the turn in its own listener, which may run after
-        // this notice. One microtask later the whole emit has finished, so the mark is visible.
-        await Promise.resolve();
-        if (suppressedByShownError(target, html)) return;
         await transport.sendText(target.chatId, html, target.messageThreadId, target.sourceMessageId);
       };
       deliver().catch((err: unknown) => {

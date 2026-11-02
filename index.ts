@@ -12,7 +12,7 @@ import { replayTelegramHistory, type TelegramHistoryEntry } from "./lib/history-
 import { TelegramInstanceCoordinator, failoverHasOtherLiveInstances, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
 import { mainOnlyEvents } from "./lib/main-only-pi.ts";
 import { registerTelegramRenderer } from "./lib/renderer.ts";
-import { getActiveSession, installAgentSessionCapture } from "./lib/session-capture.ts";
+import { getActiveSession, installAgentSessionCapture, isOmpHost } from "./lib/session-capture.ts";
 import { createTelegramTransport, downloadTelegramFile, getTelegramBotUsername, getTelegramFile } from "./lib/telegram-api.ts";
 import { createTelegramUiRuntime } from "./lib/telegram-ui.ts";
 import { formatTelegramStatusLine, clearTelegramStatus, TELEGRAM_STATUS_KEY } from "./lib/status.ts";
@@ -307,6 +307,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
   });
 
   registerTelegramRenderer(pi, {
+    isOmp: isOmpHost(),
     getConfig: () => config,
     transport,
     getActiveTurn: (chatId?: number, messageThreadId?: number) => {
