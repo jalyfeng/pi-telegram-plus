@@ -88,6 +88,8 @@ export type TelegramController = {
    * session's host hooks (#32).
    */
   startTui(): void;
+  /** Shows a paged body on a message (the replacement runtime's pager, P2-21). */
+  showPaged(target: { chatId: number; messageThreadId?: number; messageId: number }, title: string, html: string): void;
   /** `handOver`: the runtime is being replaced or shut down; see OutputCapture.handOver (P2-21). */
   dispose(options?: { handOver?: boolean }): void;
 };
@@ -1869,6 +1871,7 @@ export function createTelegramController(deps: {
     },
 
     startTui,
+    showPaged: (target, title, html) => dialogBroker.showPaged(target, title, html),
     dispose(options) {
       // The output hands its final render over before the broker settles a dialog into it,
       // so a settled dialog's summary is written by the replacement runtime (P2-21).

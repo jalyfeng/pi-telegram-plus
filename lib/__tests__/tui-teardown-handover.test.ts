@@ -134,7 +134,7 @@ async function fixture(closeOnAct: boolean) {
   await vi.advanceTimersByTimeAsync(1100);
   broker.handleCallback(42, 7, { sessionId: session.id, generation: session.generation, op: "y" });
   await flush();
-  return { broker, output, origin, scope, sent, state };
+  return { broker, output, origin, scope, sent, state, chat };
 }
 
 /**
@@ -266,5 +266,27 @@ describe("runtime teardown of a dialog without a command scope", () => {
     expect(notices[0]).toMatchObject({ chatId: 42, editMessageId: 101 });
     expect(notices[0].html).toContain("Log out API key #1?");
     expect(ctx.sent).toEqual([]);
+  });
+});
+
+describe("runtime teardown with a paged final body", () => {
+  it("hands the full body to the replacement runtime, which shows it with its own pager", async () => {
+    takePendingNotices(Date.now() + 10 * 60 * 1000);
+    const ctx = await fixture(true);
+    const body = Array.from({ length: 300 }, (_, index) => `line ${index} of a long command output`).join("\n\n");
+    runInCommand(ctx.scope, () => ctx.chat.addChild({ children: [{ markdown: body }] }));
+    teardown(ctx);
+
+    // The replacement runtime's reconcile delivers the queue: the body goes to its pager, not as text.
+    const pager = vi.fn();
+    const next: Sent[] = [];
+    deliverPendingNotices(gatedTransport({ active: true }, next), pager);
+    expect(pager).toHaveBeenCalledTimes(1);
+    const [target, title, html] = pager.mock.calls[0] as [unknown, string, string];
+    expect(target).toEqual({ chatId: 42, messageThreadId: 7, messageId: 5 });
+    expect(title).toBe("▶️ /logout");
+    expect(html).toContain("line 299 of a long command output");
+    expect(html.length).toBeGreaterThan(3400);
+    expect(next).toEqual([]);
   });
 });

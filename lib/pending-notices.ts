@@ -23,9 +23,21 @@ export type PendingNotice = {
   replyTo?: number;
   /** When set the notice edits this existing message instead of sending. */
   editMessageId?: number;
+  /**
+   * A paged command output: `html` is the full body, and the replacement runtime shows it through
+   * its own pager on `editMessageId` (with its own page buttons). Needs a PagedDelivery to deliver.
+   */
+  paged?: { title: string };
   html: string;
   createdAt: number;
 };
+
+/** Shows a paged body on a message through the runtime's pager (DialogBroker.showPaged). */
+export type PagedDelivery = (
+  target: { chatId: number; messageThreadId?: number; messageId: number },
+  title: string,
+  html: string,
+) => void;
 
 const PENDING_NOTICES = Symbol.for("pi-telegram-plus.pending-notices");
 const MAX_PENDING_NOTICES = 20;
@@ -57,9 +69,18 @@ export function takePendingNotices(now = Date.now()): PendingNotice[] {
  */
 export function deliverPendingNotices(
   transport: Pick<TelegramTransport, "sendText" | "editText">,
+  showPaged?: PagedDelivery,
   now = Date.now(),
 ): void {
   for (const notice of takePendingNotices(now)) {
+    if (notice.paged) {
+      if (showPaged && notice.editMessageId !== undefined) {
+        showPaged({ chatId: notice.chatId, messageThreadId: notice.messageThreadId, messageId: notice.editMessageId }, notice.paged.title, notice.html);
+      } else {
+        noticeLog.warn("paged notice dropped: no pager in this runtime", { chatId: notice.chatId });
+      }
+      continue;
+    }
     const delivery: Promise<unknown> = notice.editMessageId !== undefined
       ? transport.editText(notice.chatId, notice.editMessageId, notice.html)
       : transport.sendText(notice.chatId, notice.html, notice.messageThreadId, notice.replyTo);

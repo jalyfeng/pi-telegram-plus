@@ -701,7 +701,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     // own transport drops them once the lease changes, so this active runtime
     // sends them with its own transport. The take inside drains the queue, so a
     // later reconcile never repeats a delivery.
-    deliverPendingNotices(transport);
+    deliverPendingNotices(transport, controller.showPaged);
     refreshStatus();
   };
 

@@ -659,6 +659,19 @@ export class OutputCapture {
       // Interim renders wait for the final one.
       if (!final || binding.paged) return;
       binding.paged = true;
+      if (this.handingOver) {
+        // The pager's buttons belong to this runtime's broker, which is going away: the replacement
+        // runtime shows the full body with its own pager.
+        queuePendingNotice({
+          chatId: binding.telegram.chatId,
+          messageThreadId: binding.telegram.messageThreadId,
+          editMessageId: binding.telegram.messageId,
+          html: body,
+          paged: { title: `▶️ ${binding.scope.commandText}` },
+          createdAt: Date.now(),
+        });
+        return;
+      }
       if (this.pager) {
         this.pager(binding.telegram, `▶️ ${binding.scope.commandText}`, body);
       } else {
