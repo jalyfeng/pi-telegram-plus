@@ -29,7 +29,7 @@ import { registerAllCommands } from "./lib/commands/register.ts";
 import { registerTgMenuCommand } from "./lib/commands/tg-menu.ts";
 import type { TelegramConnectionState } from "./lib/commands/telegram-commands.ts";
 import { syncTelegramCommands, scheduleTelegramCommandRefresh, cancelTelegramCommandRefreshes } from "./lib/menu-commands.ts";
-import { installTuiBridge, tuiBridge, getTuiCommands } from "./lib/tui-bridge.ts";
+import { installTuiBridge, tuiBridge, getTuiCommands, getTuiHostState } from "./lib/tui-bridge.ts";
 import { isTerminalOnlyCommand } from "./lib/terminal-only-commands.ts";
 import { SecretStore } from "./lib/tui/secrets.ts";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramTurn } from "./lib/types.ts";
@@ -308,6 +308,11 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
 
   registerTelegramRenderer(pi, {
     isOmp: isOmpHost(),
+    // OMP: the session the TUI runs (InteractiveMode.session, captured by the TUI bridge).
+    // The registry's "Main" entry is not used for the retry events there. pi: unchanged.
+    getRetrySession: isOmpHost()
+      ? () => getTuiHostState().session as ReturnType<typeof getActiveSession>
+      : getActiveSession,
     getConfig: () => config,
     transport,
     getActiveTurn: (chatId?: number, messageThreadId?: number) => {

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createTurnNotice } from "../controller.ts";
 import { escapeHtml } from "../html.ts";
-import { mainOnlyEvents } from "../main-only-pi.ts";
 import { registerTelegramRenderer } from "../renderer.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "../turn-context.ts";
 import type { TelegramTransport, TelegramTurn } from "../types.ts";
@@ -29,12 +28,13 @@ function fakeSession(): FakeSession {
 const ERROR = "500: {\"message\":\"mock provider exploded (ERROR_PROBE)\"}";
 
 /**
- * `omp: true` is the OMP shape: auto_retry_* and the settled agent_end arrive through pi.on
- * (no session subscription). `omp: false` is the pi 1.4.0 shape: retry events come from the
- * session subscription, and agent_end from the subscription too (it carries willRetry).
+ * The renderer's two inputs, as the host gives them:
+ * - `pi.on` handlers (agent_start, the replies' message_end): kept per event name here;
+ * - the main session's subscription (`getRetrySession`): every failed attempt, retry event
+ *   and settled agent_end. This is the only source of retry events on both hosts.
+ * `omp` only names the host in the renderer's logs.
  */
-function createRetryHarness(options: { omp?: boolean; session?: FakeSession | undefined } = {}) {
-  const omp = options.omp === true;
+function createRetryHarness(options: { omp?: boolean; retrySession?: FakeSession | undefined; runningSession?: FakeSession | undefined } = {}) {
   const handlers = new Map<string, Array<(event: any) => Promise<void>>>();
   const sent: Array<{ chatId: number; text: string; messageId: number }> = [];
   const edits: Array<{ chatId: number; messageId: number; text: string }> = [];
@@ -64,33 +64,32 @@ function createRetryHarness(options: { omp?: boolean; session?: FakeSession | un
       handlers.set(event, list);
     },
   };
-  let session: FakeSession | undefined = "session" in options ? options.session : fakeSession();
+  let retrySession: FakeSession | undefined = "retrySession" in options ? options.retrySession : fakeSession();
+  const runningSession = "runningSession" in options ? options.runningSession : retrySession;
   registerTelegramRenderer(pi as any, {
-    isOmp: omp,
+    isOmp: options.omp === true,
     getConfig: () => ({ botToken: "token", activeChatId: 111, tool: "brief", thinking: "brief" }),
     transport,
     getActiveTurn: () => getCurrentTelegramTurn(),
     hasActiveTurns: () => true,
-    // The fake only carries what the renderer reads: subscribe.
-    getSession: () => session as any,
+    getSession: () => runningSession as any,
+    getRetrySession: () => retrySession as any,
   });
   const emit = async (event: string, payload: any = {}) => {
     await Promise.all((handlers.get(event) ?? []).map((handler) => handler(payload)));
   };
-  /** A host retry or settle event, delivered the way this host delivers it. */
-  const host = async (event: Record<string, unknown>) => {
-    if (omp) await emit(event.type as string, event);
-    else session?.emit(event);
+  /** A session event: delivered only through the subscription. */
+  const host = (event: Record<string, unknown>) => {
+    retrySession?.emit(event);
   };
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
   const failedAssistant = (text = ERROR) =>
     ({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: text } });
-  const settle = async (opts: { willRetry?: boolean; stopReason?: string } = {}) => {
+  const settle = (opts: { willRetry?: boolean; stopReason?: string } = {}) => {
     const messages = opts.stopReason ? [{ role: "assistant", content: [], stopReason: opts.stopReason }] : [];
-    await host({ type: "agent_end", messages, willRetry: opts.willRetry ?? false });
+    host({ type: "agent_end", messages, willRetry: opts.willRetry ?? false });
   };
   return {
-    omp,
     emit,
     host,
     flush,
@@ -98,149 +97,154 @@ function createRetryHarness(options: { omp?: boolean; session?: FakeSession | un
     sent,
     edits,
     failedAssistant,
-    setSession: (next: FakeSession | undefined) => { session = next; },
-    currentSession: () => session,
+    registeredPiOn: () => [...handlers.keys()].sort(),
+    setRetrySession: (next: FakeSession | undefined) => { retrySession = next; },
+    currentSession: () => retrySession,
     transport,
   };
 }
 
 describe("Telegram renderer: provider error and auto-retry status (P2-5)", () => {
-  describe("pi 1.4.0 shape (events by session subscription)", () => {
-    it("one status message for a failed attempt and three failed retries, then one final error", async () => {
-      const h = createRetryHarness();
-      const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
-      await runWithTelegramTurn(turn, async () => {
-        await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
-        await h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: ERROR });
-        await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
-        await h.host({ type: "auto_retry_start", attempt: 2, maxAttempts: 3, delayMs: 4000, errorMessage: ERROR });
-        await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
-        await h.host({ type: "auto_retry_start", attempt: 3, maxAttempts: 3, delayMs: 8000, errorMessage: ERROR });
-        await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
-        await h.host({ type: "auto_retry_end", success: false, attempt: 3, finalError: ERROR });
-        await h.settle();
-        await h.flush();
-      });
-
-      // Only the status message is sent; every later update is an edit of it.
-      expect(h.sent).toHaveLength(1);
-      expect(h.sent[0].text).toContain("Retrying (1/3) in 2s");
-      expect(h.edits.length).toBeGreaterThanOrEqual(3);
-      const last = h.edits.at(-1)!;
-      expect(last.messageId).toBe(h.sent[0].messageId);
-      expect(last.text.startsWith("❌")).toBe(true);
-      expect(h.sent.filter((item) => item.text.includes("ERROR_PROBE"))).toHaveLength(1);
+  it("one status message for a failed attempt and three failed retries, then one final error", async () => {
+    const h = createRetryHarness();
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      h.host(h.failedAssistant());
+      h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: ERROR });
+      await h.emit("agent_start");
+      h.host(h.failedAssistant());
+      h.host({ type: "auto_retry_start", attempt: 2, maxAttempts: 3, delayMs: 4000, errorMessage: ERROR });
+      await h.emit("agent_start");
+      h.host(h.failedAssistant());
+      h.host({ type: "auto_retry_start", attempt: 3, maxAttempts: 3, delayMs: 8000, errorMessage: ERROR });
+      await h.emit("agent_start");
+      h.host(h.failedAssistant());
+      h.host({ type: "auto_retry_end", success: false, attempt: 3, finalError: ERROR });
+      h.settle();
+      await h.flush();
     });
 
-    it("a failed attempt followed by a successful retry ends as 'Recovered' and the reply is sent separately", async () => {
-      const h = createRetryHarness();
-      const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
-      await runWithTelegramTurn(turn, async () => {
-        await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
-        await h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: ERROR });
-        await h.emit("agent_start");
-        await h.emit("message_end", { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fixed answer" }], stopReason: "stop" } });
-        await h.host({ type: "auto_retry_end", success: true, attempt: 1 });
-        await h.settle();
-        await h.flush();
-      });
-
-      const status = h.sent[0];
-      expect(status.text).toContain("Retrying (1/3)");
-      const finalStatus = h.edits.filter((edit) => edit.messageId === status.messageId).at(-1)!;
-      expect(finalStatus.text).toContain("Recovered after 1 retry.");
-      expect(finalStatus.text).not.toContain("❌");
-      const reply = h.sent.find((item) => item.text.includes("fixed answer"));
-      expect(reply).toBeDefined();
-      expect(reply!.messageId).not.toBe(status.messageId);
-    });
-
-    it("an error that is not retried is shown once as ❌ <error>", async () => {
-      const h = createRetryHarness();
-      const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
-      await runWithTelegramTurn(turn, async () => {
-        await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant("401: invalid api key"));
-        await h.settle();
-        await h.flush();
-      });
-
-      expect(h.sent).toHaveLength(1);
-      expect(h.sent[0].text).toBe("❌ 401: invalid api key");
-    });
-
-    it("a cancelled retry ends as '⏹️ Retry cancelled.'", async () => {
-      const h = createRetryHarness();
-      const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
-      await runWithTelegramTurn(turn, async () => {
-        await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
-        await h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: ERROR });
-        await h.host({ type: "auto_retry_end", success: false, attempt: 1, finalError: "Retry cancelled" });
-        await h.settle();
-        await h.flush();
-      });
-
-      expect(h.sent).toHaveLength(1);
-      expect(h.edits.at(-1)!.text).toBe("⏹️ Retry cancelled.");
-    });
-
-    it("follows the active session: the new session's retry events arrive, the old session's do not", async () => {
-      const h = createRetryHarness();
-      const oldSession = h.currentSession()!;
-      const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
-      await runWithTelegramTurn(turn, async () => {
-        await h.emit("agent_start");
-        oldSession.emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 1000, errorMessage: "old" });
-        await h.flush();
-      });
-      expect(h.sent).toHaveLength(1);
-
-      const newSession = fakeSession();
-      h.setSession(newSession);
-      await runWithTelegramTurn(turn, async () => {
-        await h.emit("agent_start");
-        expect(oldSession.listenerCount()).toBe(0);
-        expect(newSession.listenerCount()).toBe(1);
-        oldSession.emit({ type: "auto_retry_end", success: true, attempt: 1 });
-        newSession.emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 1000, errorMessage: "new" });
-        await h.flush();
-      });
-
-      expect(h.edits.some((edit) => edit.text.includes("Recovered"))).toBe(false);
-      expect(h.edits.at(-1)!.text).toContain("new");
-    });
-
-    it("a session without subscribe does not break the run", async () => {
-      const h = createRetryHarness({ session: undefined });
-      const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
-      await expect(runWithTelegramTurn(turn, async () => {
-        await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
-      })).resolves.toBeUndefined();
-      expect(h.sent).toHaveLength(0);
-    });
+    // Only the status message is sent; every later update is an edit of it.
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].text).toContain("Retrying (1/3) in 2s");
+    expect(h.edits.length).toBeGreaterThanOrEqual(3);
+    const last = h.edits.at(-1)!;
+    expect(last.messageId).toBe(h.sent[0].messageId);
+    expect(last.text.startsWith("❌")).toBe(true);
+    expect(h.sent.filter((item) => item.text.includes("ERROR_PROBE"))).toHaveLength(1);
   });
 
-  describe("OMP shape (events through pi.on, settled agent_end after the retry decision)", () => {
+  it("a failed attempt followed by a successful retry ends as 'Recovered' and the reply is sent separately", async () => {
+    const h = createRetryHarness();
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      h.host(h.failedAssistant());
+      h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: ERROR });
+      await h.emit("agent_start");
+      await h.emit("message_end", { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fixed answer" }], stopReason: "stop" } });
+      h.host({ type: "auto_retry_end", success: true, attempt: 1 });
+      h.settle();
+      await h.flush();
+    });
+
+    const status = h.sent[0];
+    expect(status.text).toContain("Retrying (1/3)");
+    const finalStatus = h.edits.filter((edit) => edit.messageId === status.messageId).at(-1)!;
+    expect(finalStatus.text).toContain("Recovered after 1 retry.");
+    expect(finalStatus.text).not.toContain("❌");
+    const reply = h.sent.find((item) => item.text.includes("fixed answer"));
+    expect(reply).toBeDefined();
+    expect(reply!.messageId).not.toBe(status.messageId);
+  });
+
+  it("an error that is not retried is shown once as ❌ <error>", async () => {
+    const h = createRetryHarness();
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      h.host(h.failedAssistant("401: invalid api key"));
+      h.settle();
+      await h.flush();
+    });
+
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].text).toBe("❌ 401: invalid api key");
+  });
+
+  it("a cancelled retry ends as '⏹️ Retry cancelled.'", async () => {
+    const h = createRetryHarness();
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      h.host(h.failedAssistant());
+      h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: ERROR });
+      h.host({ type: "auto_retry_end", success: false, attempt: 1, finalError: "Retry cancelled" });
+      h.settle();
+      await h.flush();
+    });
+
+    expect(h.sent).toHaveLength(1);
+    expect(h.edits.at(-1)!.text).toBe("⏹️ Retry cancelled.");
+  });
+
+  it("follows the active session: the new session's retry events arrive, the old session's do not", async () => {
+    const h = createRetryHarness();
+    const oldSession = h.currentSession()!;
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      oldSession.emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 1000, errorMessage: "old" });
+      await h.flush();
+    });
+    expect(h.sent).toHaveLength(1);
+
+    const newSession = fakeSession();
+    h.setRetrySession(newSession);
+    await runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      expect(oldSession.listenerCount()).toBe(0);
+      expect(newSession.listenerCount()).toBe(1);
+      oldSession.emit({ type: "auto_retry_end", success: true, attempt: 1 });
+      newSession.emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 1000, errorMessage: "new" });
+      await h.flush();
+    });
+
+    expect(h.edits.some((edit) => edit.text.includes("Recovered"))).toBe(false);
+    expect(h.edits.at(-1)!.text).toContain("new");
+  });
+
+  it("a session without subscribe does not break the run", async () => {
+    const h = createRetryHarness({ retrySession: undefined });
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await expect(runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      await h.emit("message_end", h.failedAssistant());
+    })).resolves.toBeUndefined();
+    expect(h.sent).toHaveLength(0);
+  });
+
+  describe("OMP shape: retry events reach the renderer only through the session subscription", () => {
+    it("pi.on carries no retry names, so the subscription is the only source", async () => {
+      const h = createRetryHarness({ omp: true });
+      await h.emit("agent_start");
+      expect(h.registeredPiOn().filter((name) => name.startsWith("auto_retry") || name === "agent_end")).toEqual([]);
+    });
+
     it("ten retries then giving up: one message, ends as ❌, and the host's 'Retry failed' notice is not sent again", async () => {
       const h = createRetryHarness({ omp: true });
       const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
       await runWithTelegramTurn(turn, async () => {
         await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
+        h.host(h.failedAssistant());
         for (let attempt = 1; attempt <= 10; attempt++) {
-          await h.host({ type: "auto_retry_start", attempt, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR });
+          h.host({ type: "auto_retry_start", attempt, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR });
           await h.emit("agent_start");
-          await h.emit("message_end", h.failedAssistant());
+          h.host(h.failedAssistant());
         }
-        await h.host({ type: "auto_retry_end", success: false, attempt: 10, finalError: ERROR });
-        await h.settle();
+        h.host({ type: "auto_retry_end", success: false, attempt: 10, finalError: ERROR });
+        h.settle();
         await h.flush();
       });
 
@@ -263,10 +267,10 @@ describe("Telegram renderer: provider error and auto-retry status (P2-5)", () =>
       const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
       await runWithTelegramTurn(turn, async () => {
         await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
-        await h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR });
-        await h.host({ type: "auto_retry_end", success: false, attempt: 1, finalError: "Retry cancelled" });
-        await h.settle({ stopReason: "aborted" });
+        h.host(h.failedAssistant());
+        h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR });
+        h.host({ type: "auto_retry_end", success: false, attempt: 1, finalError: "Retry cancelled" });
+        h.settle({ stopReason: "aborted" });
         await h.flush();
       });
 
@@ -279,8 +283,8 @@ describe("Telegram renderer: provider error and auto-retry status (P2-5)", () =>
       const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
       await runWithTelegramTurn(turn, async () => {
         await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant("401: invalid api key"));
-        await h.settle({ stopReason: "aborted" });
+        h.host(h.failedAssistant("401: invalid api key"));
+        h.settle({ stopReason: "aborted" });
         await h.flush();
       });
 
@@ -293,8 +297,8 @@ describe("Telegram renderer: provider error and auto-retry status (P2-5)", () =>
       const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
       await runWithTelegramTurn(turn, async () => {
         await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant("401: invalid api key"));
-        await h.settle();
+        h.host(h.failedAssistant("401: invalid api key"));
+        h.settle();
         await h.flush();
       });
 
@@ -307,12 +311,12 @@ describe("Telegram renderer: provider error and auto-retry status (P2-5)", () =>
       const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
       await runWithTelegramTurn(turn, async () => {
         await h.emit("agent_start");
-        await h.emit("message_end", h.failedAssistant());
-        await h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR });
+        h.host(h.failedAssistant());
+        h.host({ type: "auto_retry_start", attempt: 1, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR });
         await h.emit("agent_start");
         await h.emit("message_end", { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fixed answer" }], stopReason: "stop" } });
-        await h.host({ type: "auto_retry_end", success: true, attempt: 1 });
-        await h.settle();
+        h.host({ type: "auto_retry_end", success: true, attempt: 1 });
+        h.settle();
         await h.flush();
       });
 
@@ -322,89 +326,13 @@ describe("Telegram renderer: provider error and auto-retry status (P2-5)", () =>
       expect(h.sent.find((item) => item.text.includes("fixed answer"))).toBeDefined();
     });
 
-    it("never subscribes to the session on OMP", async () => {
-      const session = fakeSession();
-      const h = createRetryHarness({ omp: true, session });
-      const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
-      await runWithTelegramTurn(turn, async () => {
-        await h.emit("agent_start");
-      });
-      expect(session.listenerCount()).toBe(0);
+    it("subscribes to the TUI's live session, not to the registry session", async () => {
+      const liveSession = fakeSession();
+      const registrySession = fakeSession();
+      const h = createRetryHarness({ omp: true, retrySession: liveSession, runningSession: registrySession });
+      await h.emit("agent_start");
+      expect(liveSession.listenerCount()).toBe(1);
+      expect(registrySession.listenerCount()).toBe(0);
     });
-  });
-});
-
-/**
- * OMP's extension runner in miniature: handlers are kept per event name, and each handler
- * is called with (event, ctx). The renderer gets the same `pi` that index.ts gives it, which
- * is the mainOnlyEvents wrapper, so a sub-agent ctx is filtered out there as on OMP.
- */
-describe("OMP delivery through the main-only wrapper (host-free)", () => {
-  function ompRunner() {
-    const handlers = new Map<string, Array<(event: any, ctx: any) => Promise<void>>>();
-    const rawPi = {
-      on: (event: string, handler: (event: any, ctx: any) => Promise<void>) => {
-        const list = handlers.get(event) ?? [];
-        list.push(handler);
-        handlers.set(event, list);
-        return () => undefined;
-      },
-    };
-    const dispatch = async (event: { type: string; [key: string]: unknown }, ctx: unknown = { agent: { kind: "main" } }) => {
-      for (const handler of handlers.get(event.type) ?? []) await handler(event, ctx);
-    };
-    return { pi: mainOnlyEvents(rawPi as any), dispatch, handlers };
-  }
-
-  it("auto_retry_* and the settled agent_end reach the renderer when dispatched the way OMP does", async () => {
-    const runner = ompRunner();
-    const sent: string[] = [];
-    const edits: string[] = [];
-    const transport = {
-      sendText: async (_chatId: number, text: string) => { sent.push(text); return [{ message_id: 500 }]; },
-      editText: async (_chatId: number, _messageId: number, text: string) => { edits.push(text); },
-    } as unknown as TelegramTransport;
-    registerTelegramRenderer(runner.pi, {
-      isOmp: true,
-      getConfig: () => ({ botToken: "token", activeChatId: 111, tool: "brief", thinking: "brief" }),
-      transport,
-      getActiveTurn: () => getCurrentTelegramTurn(),
-      hasActiveTurns: () => true,
-    });
-    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
-    await runWithTelegramTurn(turn, async () => {
-      await runner.dispatch({ type: "agent_start" });
-      await runner.dispatch({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: ERROR } });
-      await runner.dispatch({ type: "auto_retry_start", attempt: 1, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR });
-      await runner.dispatch({ type: "auto_retry_end", success: false, attempt: 1, finalError: ERROR });
-      await runner.dispatch({ type: "agent_end", messages: [], willContinue: undefined });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toContain("Retrying (1/10)");
-    expect(edits.at(-1)!.startsWith("❌ ")).toBe(true);
-  });
-
-  it("a sub-agent ctx is filtered by the wrapper, so its retry events do not touch the main turn", async () => {
-    const runner = ompRunner();
-    const sent: string[] = [];
-    const transport = {
-      sendText: async (_chatId: number, text: string) => { sent.push(text); return [{ message_id: 500 }]; },
-      editText: async () => undefined,
-    } as unknown as TelegramTransport;
-    registerTelegramRenderer(runner.pi, {
-      isOmp: true,
-      getConfig: () => ({ botToken: "token", activeChatId: 111, tool: "brief", thinking: "brief" }),
-      transport,
-      getActiveTurn: () => getCurrentTelegramTurn(),
-      hasActiveTurns: () => true,
-    });
-    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
-    await runWithTelegramTurn(turn, async () => {
-      await runner.dispatch({ type: "auto_retry_start", attempt: 1, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR }, { agent: { kind: "sub" } });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    expect(sent).toHaveLength(0);
   });
 });
