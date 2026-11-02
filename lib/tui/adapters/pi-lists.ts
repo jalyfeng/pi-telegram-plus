@@ -9,8 +9,9 @@
  * `packages/coding-agent/src/modes/interactive/components/`).
  */
 import { stripAnsi } from "../../ansi.ts";
-import type { DialogAdapter, DialogItem, DialogModel } from "../model.ts";
-import { constructorName, resolveRowKey, rowKey, selectRow } from "./utils.ts";
+import { setInputValue } from "../keys.ts";
+import type { AdapterContext, DialogAction, DialogAdapter, DialogItem, DialogModel } from "../model.ts";
+import { constructorName, moveCursor, resolveRowKey, rowKey, selectRow } from "./utils.ts";
 
 type HostRecord = Record<string, unknown>;
 
@@ -163,14 +164,17 @@ export const piListAdapter: DialogAdapter = {
  */
 const SESSION_LABEL_MAX = 50;
 
-const sessionLabel = (session: HostRecord): string => {
+/** The name, else the first message on one line, cut to the label width. */
+const sessionBase = (session: HostRecord): string => {
   let base = text(session.name);
   if (base === "") {
     base = text(session.firstMessage).replace(/\n/g, " ");
     if (base.length > SESSION_LABEL_MAX) base = `${base.slice(0, SESSION_LABEL_MAX)}…`;
   }
-  return `${base} · ${readNumber(session.messageCount)} msgs`;
+  return base;
 };
+
+const sessionLabel = (session: HostRecord): string => `${sessionBase(session)} · ${readNumber(session.messageCount)} msgs`;
 
 const pad2 = (value: number): string => String(value).padStart(2, "0");
 
@@ -194,22 +198,147 @@ function sessionRows(list: HostRecord): { raw: HostRecord[]; labels: string[]; c
   return { raw, labels: raw.map(sessionLabel), cursor: readNumber(list.selectedIndex) };
 }
 
+/** The host's search box text (`SessionList.searchInput`); "" when unreadable. */
+function sessionSearchText(list: HostRecord): string {
+  const input = asRecord(list.searchInput);
+  const getValue = input.getValue;
+  return typeof getValue === "function" ? text((getValue as () => unknown).call(input)) : "";
+}
+
+/** The session with `path` in the first pool that has it. */
+function findSessionByPath(path: unknown, pools: unknown[]): HostRecord | undefined {
+  for (const pool of pools) {
+    if (!Array.isArray(pool)) continue;
+    const found = pool.map(asRecord).find((session) => session.path === path);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** The host's rename field, when the selector is in rename mode. */
+function renameInputOf(component: HostRecord): HostRecord | undefined {
+  const input = component.renameInput;
+  return typeof input === "object" && input !== null ? (input as HostRecord) : undefined;
+}
+
+/**
+ * A row action waiting for its row (OMP's pick mode). Telegram has no host
+ * highlight to move, so Rename/Delete first ask which row, then move the
+ * cursor there and press the host's own key for the action.
+ */
+type SessionRowAction = "rename" | "delete";
+const pendingSessionAction = new WeakMap<object, SessionRowAction>();
+const SESSION_ROW_KEYS: Record<SessionRowAction, string> = { rename: "ctrl-r", delete: "ctrl-d" };
+
+/** The host's status line (`SessionSelectorHeader.statusMessage`), e.g. "Cannot delete the active session". */
+function sessionStatusNotice(component: HostRecord): string | undefined {
+  const message = text(asRecord(asRecord(component.header).statusMessage).message);
+  return message === "" ? undefined : message;
+}
+
+/** Rename mode: the host's own field, named after the session it renames. */
+function sessionRenameModel(component: HostRecord): DialogModel {
+  const session = findSessionByPath(component.renameTargetPath, [component.currentSessions, component.allSessions]);
+  const name = session ? text(session.name) : "";
+  return {
+    kind: "input",
+    title: "Rename session",
+    secret: false,
+    ...(name !== "" ? { placeholder: name } : {}),
+  };
+}
+
+function actSessionRename(component: HostRecord, action: DialogAction, ctx: AdapterContext): boolean {
+  // Esc is the component's own cancel while renaming: it leaves rename mode.
+  if (action.type === "cancel") return ctx.sendKey("esc");
+  if (action.type !== "submit" || action.text === undefined) return false;
+  const value = action.text.trim();
+  if (value === "") return false;
+  // Replace the field text, then Enter: the host saves the name and leaves rename mode.
+  return setInputValue(component, value) && ctx.sendKey("enter");
+}
+
+function actSessionDelete(component: HostRecord, action: DialogAction, ctx: AdapterContext): boolean {
+  // Enter deletes, Esc keeps the session (the host's own confirm keys).
+  if (action.type !== "confirm") return false;
+  return ctx.sendKey(action.yes ? "enter" : "esc");
+}
+
+function actSessionList(component: HostRecord, list: HostRecord, action: DialogAction, ctx: AdapterContext): boolean {
+  const pending = pendingSessionAction.get(component);
+  if (action.type === "search") {
+    // The host's search box re-filters on every typed key.
+    if (!setInputValue(list, action.query)) return false;
+    ctx.requestRender();
+    return true;
+  }
+  if (action.type === "key") {
+    if (pending !== undefined) {
+      if (action.name !== "back") return false;
+      pendingSessionAction.delete(component);
+      ctx.requestRender();
+      return true;
+    }
+    switch (action.name) {
+      case "tab":
+        return ctx.sendKey("tab");
+      case "sort":
+        return ctx.sendKey("ctrl-s");
+      case "named":
+        return ctx.sendKey("ctrl-n");
+      case "rename":
+      case "delete":
+        if (sessionRows(list).raw.length === 0) return false;
+        pendingSessionAction.set(component, action.name);
+        ctx.requestRender();
+        return true;
+      default:
+        return false;
+    }
+  }
+  if (action.type !== "choose") return false;
+  const { labels, cursor } = sessionRows(list);
+  const target = resolveRowKey(labels, action.key);
+  if (target === undefined) return false;
+  if (pending !== undefined) {
+    pendingSessionAction.delete(component);
+    // Move the host cursor without choosing, then press the host's key for the action.
+    return moveCursor(ctx.sendKey, cursor, target) && ctx.sendKey(SESSION_ROW_KEYS[pending]);
+  }
+  return selectRow(ctx.sendKey, cursor, target);
+}
+
+/**
+ * `/resume` (P3): `SessionSelectorComponent` delegates keys to its inner
+ * `SessionList`, whose rows are `{ session, depth }` tree nodes. The table
+ * specs above cover flat components with a top-level cursor, so this one
+ * adapter is dedicated: rows live one level down, labels concatenate two
+ * fields, and the host's own keys drive scope, sort, named filter, search,
+ * rename and delete (§4.1.4). Rename mode swaps the list for the host's field.
+ */
 export const piSessionAdapter: DialogAdapter = {
   id: "pi-session",
 
   detect(component, ctx) {
     if (ctx.host !== "pi") return false;
     if (constructorName(component) !== "SessionSelectorComponent") return false;
-    // Rename mode swaps a text input in front of the list; the select model
-    // would offer rows the user cannot pick.
-    return (component as HostRecord).mode !== "rename" && sessionListOf(component) !== undefined;
+    const record = component as HostRecord;
+    if (record.mode === "rename") return renameInputOf(record) !== undefined;
+    return sessionListOf(component) !== undefined;
   },
 
   read(component, ctx): DialogModel {
     const record = component as HostRecord;
-    const list = sessionListOf(record);
+    if (record.mode === "rename") return sessionRenameModel(record);
+    const list = sessionListOf(component);
     if (!list) {
       return { kind: "unsupported", what: "pi-session: component shape is gone" };
+    }
+    // The host asks before deleting: its confirm keys are Enter and Esc.
+    if (typeof list.confirmingDeletePath === "string") {
+      const session = findSessionByPath(list.confirmingDeletePath, [list.allSessions, record.currentSessions, record.allSessions]);
+      const name = session ? sessionBase(session) : "this session";
+      return { kind: "confirm", title: `Delete session ${name}?`, confirmLabel: "Delete", cancelLabel: "Cancel" };
     }
     const { raw, labels, cursor } = sessionRows(list);
     const currentPath = text(list.currentSessionCanonicalPath);
@@ -221,26 +350,39 @@ export const piSessionAdapter: DialogAdapter = {
       focused: index === cursor,
     }));
     const all = record.scope === "all";
+    const pending = pendingSessionAction.get(record);
+    const notice = sessionStatusNotice(record);
+    const extraActions = pending !== undefined
+      ? [{ label: "Back", key: "back" }]
+      : [
+          { label: all ? "This folder only" : "Show all", key: "tab" },
+          { label: `Sort: ${text(list.sortMode)}`, key: "sort" },
+          { label: `Named: ${list.nameFilter === "named" ? "only" : "all"}`, key: "named" },
+          { label: "Rename", key: "rename" },
+          { label: "Delete", key: "delete" },
+        ];
     return {
       kind: "select",
       title: all ? "Resume session (all)" : "Resume session (this folder)",
+      ...(pending !== undefined ? { subtitle: `${pending === "rename" ? "Rename" : "Delete"}: choose a session` } : {}),
       items,
       total: items.length,
-      extraActions: [{ label: all ? "This folder only" : "Show all", key: "tab" }],
+      search: { query: sessionSearchText(list), placeholder: "Type to search" },
+      extraActions,
+      ...(notice !== undefined ? { notice } : {}),
     };
   },
 
   act(component, action, ctx) {
+    const record = component as HostRecord;
+    if (record.mode === "rename") {
+      return renameInputOf(record) !== undefined && actSessionRename(record, action, ctx);
+    }
     const list = sessionListOf(component);
     if (!list) return false;
     if (action.type === "cancel") return ctx.sendKey("esc");
-    // Tab is the only advertised key: it flips current-folder / all scopes.
-    if (action.type === "key") return action.name === "tab" ? ctx.sendKey("tab") : false;
-    if (action.type !== "choose") return false;
-    const { labels, cursor } = sessionRows(list);
-    const target = resolveRowKey(labels, action.key);
-    if (target === undefined) return false;
-    return selectRow(ctx.sendKey, cursor, target);
+    if (typeof list.confirmingDeletePath === "string") return actSessionDelete(record, action, ctx);
+    return actSessionList(record, list, action, ctx);
   },
 };
 

@@ -6,11 +6,14 @@
  * `sessionList`, re-points Tab, or reshapes `SessionInfo` fails here.
  */
 import { beforeAll, describe, expect, it } from "vitest";
-import { realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as host from "@earendil-works/pi-coding-agent";
 import type { SessionInfo } from "@earendil-works/pi-coding-agent";
 import { SessionSelectorComponent as RealSessionSelectorComponent } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/session-selector.js";
+import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
+import { setKeybindings } from "@earendil-works/pi-tui";
 import { pickAdapter } from "../tui/adapters/index.ts";
 import { piSessionAdapter } from "../tui/adapters/pi-lists.ts";
 import { sendKeyTo } from "../tui/keys.ts";
@@ -47,13 +50,20 @@ class SessionSelectorComponent {
     ],
     selectedIndex: 1,
     currentSessionCanonicalPath: "/s/b.jsonl",
+    sortMode: "threaded",
+    nameFilter: "all",
   };
   scope: "current" | "all" = "current";
   mode = "list";
 }
 
-class RenamingSessionSelector extends SessionSelectorComponent {
-  override mode = "rename";
+/** Rename mode: the host's field replaces the list, the same class. */
+function renamingSessionSelector(): SessionSelectorComponent {
+  return Object.assign(new SessionSelectorComponent(), {
+    mode: "rename",
+    renameInput: { getValue: () => "Refactor task" },
+    renameTargetPath: "/s/a.jsonl",
+  });
 }
 
 class BrokenSessionSelector {
@@ -76,17 +86,26 @@ function harness(hostName: "pi" | "omp" = "pi") {
   return { ctx, sent };
 }
 
+/** The list-mode row actions: scope, sort, named filter, rename, delete (labels say the current state). */
+const LIST_ACTIONS = (scope: string) => [
+  { label: scope, key: "tab" },
+  { label: "Sort: threaded", key: "sort" },
+  { label: "Named: all", key: "named" },
+  { label: "Rename", key: "rename" },
+  { label: "Delete", key: "delete" },
+];
+
 function expectSelect(model: DialogModel) {
   if (model.kind !== "select") throw new Error(`expected a select model, got ${model.kind}`);
   return model;
 }
 
 describe("piSessionAdapter detect", () => {
-  it("claims the session selector on the pi host only, outside rename mode", () => {
+  it("claims the session selector on the pi host, in list and rename mode", () => {
     const { ctx } = harness();
     expect(piSessionAdapter.detect(new SessionSelectorComponent(), ctx)).toBe(true);
     expect(piSessionAdapter.detect(new SessionSelectorComponent(), harness("omp").ctx)).toBe(false);
-    expect(piSessionAdapter.detect(new RenamingSessionSelector(), ctx)).toBe(false);
+    expect(piSessionAdapter.detect(renamingSessionSelector(), ctx)).toBe(true);
     expect(piSessionAdapter.detect(new BrokenSessionSelector(), ctx)).toBe(false);
   });
 
@@ -119,7 +138,7 @@ describe("read", () => {
       `2:${"x".repeat(50)}… · 100 msgs`,
     ]);
     expect(model.total).toBe(3);
-    expect(model.extraActions).toEqual([{ label: "Show all", key: "tab" }]);
+    expect(model.extraActions).toEqual(LIST_ACTIONS("Show all"));
   });
 
   it("switches title and tab label when the scope is all", () => {
@@ -128,7 +147,7 @@ describe("read", () => {
     component.scope = "all";
     const model = expectSelect(piSessionAdapter.read(component, ctx));
     expect(model.title).toBe("Resume session (all)");
-    expect(model.extraActions).toEqual([{ label: "This folder only", key: "tab" }]);
+    expect(model.extraActions?.[0]).toEqual({ label: "This folder only", key: "tab" });
   });
 });
 
@@ -221,7 +240,7 @@ describe("contract: real pi 1.4.0 session selector", () => {
     expect(model.items.map((item) => item.label)).toEqual(["alpha first line · 4 msgs", "Named session · 9 msgs"]);
     expect(model.items[1].current).toBe(true);
     expect(model.items[0].focused).toBe(true);
-    expect(model.extraActions).toEqual([{ label: "Show all", key: "tab" }]);
+    expect(model.extraActions).toEqual(LIST_ACTIONS("Show all"));
     expect(piSessionAdapter.act(selector, { type: "choose", key: model.items[1].key }, ctx)).toBe(true);
     expect(picked).toEqual([BETA]);
   });
@@ -235,5 +254,157 @@ describe("contract: real pi 1.4.0 session selector", () => {
     expect(expectSelect(piSessionAdapter.read(selector, ctx)).title).toBe("Resume session (all)");
     expect(piSessionAdapter.act(selector, { type: "cancel" }, ctx)).toBe(true);
     expect(cancelled).toBe(1);
+  });
+});
+
+/**
+ * The real pi 1.4.0 selector over real session files, so delete and rename
+ * change what the host sees (files gone, names changed) and the list refreshes.
+ */
+describe("contract: real pi 1.4.0 session selector actions", () => {
+  beforeAll(() => {
+    host.initTheme("dark");
+  });
+
+  function realCtx(component: object): AdapterContext {
+    return { host: "pi", sendKey: (name) => sendKeyTo(component, name), requestRender: () => {} };
+  }
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  // The host installs its keybindings (app.session.* keys) at interactive start.
+  beforeAll(() => {
+    setKeybindings(KeybindingsManager.create(mkdtempSync(join(tmpdir(), "pi-keybindings-"))));
+  });
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "pi-session-actions-")));
+  const ONE = join(dir, "one.jsonl");
+  const TWO = join(dir, "two.jsonl");
+
+  function fileSelector(renamed: [string, string][] = []) {
+    const sessions: SessionInfo[] = [
+      {
+        path: ONE, id: "one", cwd: dir,
+        created: MODIFIED, modified: MODIFIED, messageCount: 4,
+        firstMessage: "alpha first\nline", allMessagesText: "alpha first line",
+      },
+      {
+        path: TWO, id: "two", cwd: dir, name: "Named session",
+        created: MODIFIED, modified: MODIFIED, messageCount: 9,
+        firstMessage: "beta", allMessagesText: "beta",
+      },
+    ];
+    for (const path of [ONE, TWO]) writeFileSync(path, "");
+    // Each load reads what is still on disk, like pi's loader does.
+    const load = async () => sessions.filter((session) => existsSync(session.path)).map((session) => ({ ...session }));
+    const selector = new RealSessionSelectorComponent(
+      load, load, () => {}, () => {}, () => {}, () => {}, {
+        renameSession: async (path: string, name: string | undefined) => {
+          renamed.push([path, name ?? ""]);
+          const target = sessions.find((session) => session.path === path);
+          if (target) target.name = name;
+        },
+      }, TWO,
+    );
+    return { selector, settle };
+  }
+
+  function rowKeyOf(model: DialogModel, prefix: string): string {
+    const item = expectSelect(model).items.find((entry) => entry.label.startsWith(prefix));
+    if (!item) throw new Error(`no row ${prefix}`);
+    return item.key;
+  }
+
+  it("filters the real list by typed search and restores it when cleared", async () => {
+    const { selector } = fileSelector();
+    await settle();
+    const ctx = realCtx(selector);
+    // The host's exact-phrase syntax: a fuzzy match would also hit the temp path.
+    expect(piSessionAdapter.act(selector, { type: "search", query: '"named session"' }, ctx)).toBe(true);
+    const narrowed = expectSelect(piSessionAdapter.read(selector, ctx));
+    expect(narrowed.search?.query).toBe('"named session"');
+    expect(narrowed.items.map((item) => item.label)).toEqual(["Named session · 9 msgs"]);
+    expect(piSessionAdapter.act(selector, { type: "search", query: "" }, ctx)).toBe(true);
+    expect(expectSelect(piSessionAdapter.read(selector, ctx)).items).toHaveLength(2);
+  });
+
+  it("the named filter and sort keys are the host's own (ctrl+n, ctrl+s)", async () => {
+    const { selector } = fileSelector();
+    await settle();
+    const ctx = realCtx(selector);
+    expect(piSessionAdapter.act(selector, { type: "key", name: "named" }, ctx)).toBe(true);
+    const named = expectSelect(piSessionAdapter.read(selector, ctx));
+    expect(named.items.map((item) => item.label)).toEqual(["Named session · 9 msgs"]);
+    expect(named.extraActions?.find((action) => action.key === "named")?.label).toBe("Named: only");
+    expect(piSessionAdapter.act(selector, { type: "key", name: "sort" }, ctx)).toBe(true);
+    expect(expectSelect(piSessionAdapter.read(selector, ctx)).extraActions?.find((action) => action.key === "sort")?.label)
+      .toBe("Sort: recent");
+  });
+
+  it("rename: Rename picks a row, the host goes to rename mode, text is saved with Enter", async () => {
+    const renamed: [string, string][] = [];
+    const { selector } = fileSelector(renamed);
+    await settle();
+    const ctx = realCtx(selector);
+    expect(piSessionAdapter.act(selector, { type: "key", name: "rename" }, ctx)).toBe(true);
+    const picking = expectSelect(piSessionAdapter.read(selector, ctx));
+    expect(picking.subtitle).toBe("Rename: choose a session");
+    expect(picking.extraActions).toEqual([{ label: "Back", key: "back" }]);
+    expect(piSessionAdapter.act(selector, { type: "choose", key: rowKeyOf(picking, "alpha first line") }, ctx)).toBe(true);
+
+    expect(piSessionAdapter.detect(selector, ctx)).toBe(true);
+    const field = piSessionAdapter.read(selector, ctx);
+    if (field.kind !== "input") throw new Error(`expected input, got ${field.kind}`);
+    expect(field.title).toBe("Rename session");
+    expect(piSessionAdapter.act(selector, { type: "submit", text: "Renamed alpha" }, ctx)).toBe(true);
+    await settle();
+    expect(renamed).toEqual([[ONE, "Renamed alpha"]]);
+    const after = expectSelect(piSessionAdapter.read(selector, ctx));
+    expect(after.items.map((item) => item.label)).toContain("Renamed alpha · 4 msgs");
+  });
+
+  it("rename: cancel returns from the field to the list without renaming", async () => {
+    const renamed: [string, string][] = [];
+    const { selector } = fileSelector(renamed);
+    await settle();
+    const ctx = realCtx(selector);
+    piSessionAdapter.act(selector, { type: "key", name: "rename" }, ctx);
+    piSessionAdapter.act(selector, { type: "choose", key: rowKeyOf(expectSelect(piSessionAdapter.read(selector, ctx)), "alpha first line") }, ctx);
+    expect(piSessionAdapter.read(selector, ctx).kind).toBe("input");
+    expect(piSessionAdapter.act(selector, { type: "cancel" }, ctx)).toBe(true);
+    expect(expectSelect(piSessionAdapter.read(selector, ctx)).title).toBe("Resume session (this folder)");
+    await settle();
+    expect(renamed).toEqual([]);
+  });
+
+  it("delete: a confirm model names the session; no keeps it, yes removes the file", async () => {
+    const { selector } = fileSelector();
+    await settle();
+    const ctx = realCtx(selector);
+    piSessionAdapter.act(selector, { type: "key", name: "delete" }, ctx);
+    piSessionAdapter.act(selector, { type: "choose", key: rowKeyOf(expectSelect(piSessionAdapter.read(selector, ctx)), "alpha first line") }, ctx);
+    const asking = piSessionAdapter.read(selector, ctx);
+    expect(asking).toEqual({ kind: "confirm", title: "Delete session alpha first line?", confirmLabel: "Delete", cancelLabel: "Cancel" });
+
+    expect(piSessionAdapter.act(selector, { type: "confirm", yes: false }, ctx)).toBe(true);
+    expect(piSessionAdapter.read(selector, ctx).kind).toBe("select");
+    expect(existsSync(ONE)).toBe(true);
+
+    piSessionAdapter.act(selector, { type: "key", name: "delete" }, ctx);
+    piSessionAdapter.act(selector, { type: "choose", key: rowKeyOf(expectSelect(piSessionAdapter.read(selector, ctx)), "alpha first line") }, ctx);
+    expect(piSessionAdapter.act(selector, { type: "confirm", yes: true }, ctx)).toBe(true);
+    await settle();
+    expect(existsSync(ONE)).toBe(false);
+    const after = expectSelect(piSessionAdapter.read(selector, ctx));
+    expect(after.items.map((item) => item.label)).toEqual(["Named session · 9 msgs"]);
+  });
+
+  it("delete refuses the active session and says why", async () => {
+    const { selector } = fileSelector();
+    await settle();
+    const ctx = realCtx(selector);
+    piSessionAdapter.act(selector, { type: "key", name: "delete" }, ctx);
+    piSessionAdapter.act(selector, { type: "choose", key: rowKeyOf(expectSelect(piSessionAdapter.read(selector, ctx)), "Named session") }, ctx);
+    const model = expectSelect(piSessionAdapter.read(selector, ctx));
+    expect(model.notice).toBe("Cannot delete the currently active session");
+    expect(existsSync(TWO)).toBe(true);
   });
 });
