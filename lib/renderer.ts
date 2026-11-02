@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { escapeHtml } from "./html.ts";
 import { markdownToTelegramHtml } from "./markdown.ts";
 import { richMarkdownForTables } from "./rich-message.ts";
+import { splitTelegramHtml } from "./text-split.ts";
 import type { TelegramConfig, TelegramRenderLevel, TelegramTransport, TelegramTurn } from "./types.ts";
 import type { SecretStore } from "./tui/secrets.ts";
 import { RENDER_LEVELS } from "./types.ts";
@@ -33,6 +34,8 @@ function userMessageText(content: unknown): string {
 
 const TOOL_UPDATE_MS = 5000;
 const EDIT_LIMIT = 3500;
+/** Longest edit diff shown under a tool result in full mode. */
+const EDIT_DIFF_LIMIT = 3000;
 
 function formatThinkingInline(part: Record<string, any>, level: TelegramRenderLevel): string {
   if (level === "hidden") return "";
@@ -112,6 +115,19 @@ export function extractToolResultParts(result: unknown): {
     body.push(result);
   }
   return { body: body.filter(Boolean).join("\n\n"), images };
+}
+
+/**
+ * The display diff a host's edit result carries in `details.diff` (pi and OMP both
+ * do), as a markdown code block. Empty when the host gives none; never computed here.
+ */
+function editDiffMarkdown(result: unknown): string {
+  const diff = (result as { details?: { diff?: unknown } } | null | undefined)?.details?.diff;
+  if (typeof diff !== "string" || !diff.trim()) return "";
+  const truncated = diff.length > EDIT_DIFF_LIMIT;
+  const shown = truncated ? diff.slice(0, EDIT_DIFF_LIMIT) : diff;
+  const fence = shown.includes("```") ? "````" : "```";
+  return `${fence}diff\n${shown}${truncated ? "\n(diff truncated)" : ""}\n${fence}`;
 }
 
 function stringifyShort(value: unknown, max = 900): string {
@@ -405,6 +421,8 @@ export function registerTelegramRenderer(
   const sentInlineEvents = new Set<string>();
   const toolUpdateAt = new Map<string, number>();
   const toolArgs = new Map<string, unknown>();
+  /** Full mode: the one message each tool call is shown in, edited as the call progresses. */
+  const fullToolCalls = new Map<string, { chatId: number; messageId: number; summaryHtml: string }>();
 
   /** §4.7.4: replace this chat's tracked secrets before any escaping happens. */
   const redactFor = (turn: TelegramTurn | undefined, text: string): string => {
@@ -485,32 +503,36 @@ export function registerTelegramRenderer(
     return sendDefault(html);
   };
 
-  const sendToTurn = async (html: string, options: { final?: boolean; richMarkdown?: string } = {}) => {
+  /** Sends to the turn's target. Returns the id of the message now holding `html`, when known. */
+  const sendToTurn = async (html: string, options: { final?: boolean; richMarkdown?: string } = {}): Promise<number | undefined> => {
     const richMarkdown = options.richMarkdown;
     const turn = deps.getActiveTurn();
     if (!turn) {
-      await sendDefault(html, richMarkdown);
-      return;
+      const sent = await sendDefault(html, richMarkdown);
+      return sent[0]?.[0]?.message_id;
     }
     if (turn.replaceMessageId === undefined) {
-      await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
-      return;
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
+      return sent[0]?.message_id;
     }
     // The placeholder cannot hold an HTML answer that large, but one Rich
     // Message can (up to ~30k), so a table answer still lands in place.
     if (options.final && !richMarkdown && Buffer.byteLength(html, "utf8") > EDIT_LIMIT) {
       await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Assistant</b>\n\nFinal answer follows in separate message(s).").catch(renderLog.swallow("warn", "editText final-answer pointer failed", { chatId: turn.chatId, messageId: turn.replaceMessageId }));
       turn.replaceMessageId = undefined;
-      await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
-      return;
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
+      return sent[0]?.message_id;
     }
+    const placeholderId = turn.replaceMessageId;
     try {
-      await deps.transport.editText(turn.chatId, turn.replaceMessageId, html, richMarkdown);
+      await deps.transport.editText(turn.chatId, placeholderId, html, richMarkdown);
+      return placeholderId;
     } catch (err) {
       // Edit failed (message deleted / too many edits). Fall back to a new message.
-      renderLog.debug("editText failed; falling back to sendText", { chatId: turn.chatId, messageId: turn.replaceMessageId, err });
+      renderLog.debug("editText failed; falling back to sendText", { chatId: turn.chatId, messageId: placeholderId, err });
       turn.replaceMessageId = undefined;
-      await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
+      return sent[0]?.message_id;
     }
   };
 
@@ -524,6 +546,42 @@ export function registerTelegramRenderer(
     if (sentInlineEvents.has(key)) return;
     sentInlineEvents.add(key);
     await sendToTurn(`<blockquote>${escapeHtml(text)}</blockquote>`);
+  };
+
+  /**
+   * Full mode: the call's start message is its one message. Sent without the inline
+   * dedupe, which is keyed on text and would hide a repeated call.
+   */
+  const sendFullToolStart = async (toolCallId: string, brief: string): Promise<void> => {
+    const turn = deps.getActiveTurn();
+    const chatId = turn?.chatId ?? defaultChats()[0];
+    const summaryHtml = escapeHtml(redactFor(turn, brief));
+    const messageId = await sendToTurn(summaryHtml);
+    if (chatId === undefined || messageId === undefined) return;
+    fullToolCalls.set(toolCallId, { chatId, messageId, summaryHtml });
+  };
+
+  /**
+   * Full mode: replaces the call's start message with its summary and result. Text past one
+   * message goes into new messages. Without a start message, the result is sent as new messages.
+   */
+  const finishFullToolCall = async (
+    call: { chatId: number; messageId: number; summaryHtml: string } | undefined,
+    resultHtml: string,
+  ): Promise<void> => {
+    if (!call) {
+      for (const chunk of splitTelegramHtml(resultHtml)) await sendNewToEventTarget(chunk);
+      return;
+    }
+    const chunks = splitTelegramHtml(`${call.summaryHtml}\n${resultHtml}`);
+    try {
+      await deps.transport.editText(call.chatId, call.messageId, chunks[0]);
+    } catch (err) {
+      renderLog.debug("tool result edit failed; sending new messages", { chatId: call.chatId, messageId: call.messageId, err });
+      for (const chunk of chunks) await sendNewToEventTarget(chunk);
+      return;
+    }
+    for (const chunk of chunks.slice(1)) await sendNewToEventTarget(chunk);
   };
 
   const sendInlineEvents = async (events: string[]) => {
@@ -708,6 +766,7 @@ export function registerTelegramRenderer(
     sentInlineEvents.clear();
     toolArgs.clear();
     toolUpdateAt.clear();
+    fullToolCalls.clear();
     workflowNoticeSent = false;
     pendingError = undefined;
     attachRetryEvents();
@@ -735,7 +794,12 @@ export function registerTelegramRenderer(
     const level = renderLevel(deps.getConfig(), "tool");
     if (level === "hidden") return;
     toolArgs.set(event.toolCallId, event.args);
-    await sendInlineEvent(formatToolBrief(event.toolName, event.args));
+    const brief = formatToolBrief(event.toolName, event.args);
+    if (level === "full") {
+      await sendFullToolStart(event.toolCallId, brief);
+      return;
+    }
+    await sendInlineEvent(brief);
     } catch (err) { renderLog.warn("render tool_execution_start handler failed", { err }); }
   });
 
@@ -744,14 +808,17 @@ export function registerTelegramRenderer(
     if (isBackgroundAgentActivity()) return;
     const level = renderLevel(deps.getConfig(), "tool");
     if (level !== "full") return;
+    const call = fullToolCalls.get(event.toolCallId);
+    if (!call) return;
     const text = extractToolResultParts(event.partialResult).body;
     if (!text.trim()) return;
     const now = Date.now();
     const last = toolUpdateAt.get(event.toolCallId) ?? 0;
     if (now - last < TOOL_UPDATE_MS) return;
     toolUpdateAt.set(event.toolCallId, now);
-    await sendInlineEvent(`🔄 ${event.toolName}
-${stringifyShort(text, 700)}`);
+    const partial = escapeHtml(redactFor(deps.getActiveTurn(), stringifyShort(text, 700)));
+    await deps.transport.editText(call.chatId, call.messageId, `${call.summaryHtml}\n<blockquote>🔄 ${partial}</blockquote>`)
+      .catch(renderLog.swallow("debug", "tool progress edit failed", { chatId: call.chatId, messageId: call.messageId }));
     } catch (err) { renderLog.warn("render tool_execution_update handler failed", { err }); }
   });
 
@@ -768,6 +835,8 @@ ${stringifyShort(text, 700)}`);
     }
     const level = renderLevel(deps.getConfig(), "tool");
     toolUpdateAt.delete(event.toolCallId);
+    const call = fullToolCalls.get(event.toolCallId);
+    fullToolCalls.delete(event.toolCallId);
     const args = toolArgs.get(event.toolCallId);
     toolArgs.delete(event.toolCallId);
     if (level === "hidden") return;
@@ -777,20 +846,23 @@ ${stringifyShort(text, 700)}`);
       await sendInlineEvent(formatToolFailureBrief(event.toolName, event.result, args));
       return;
     }
-    // full mode: render the tool's actual output (text + images) as a
-    // persistent new message, so users who opt into `full` see complete
-    // content instead of a truncated JSON blob. Tool results are excluded
+    // full mode: render the tool's actual output (text + images) in the call's
+    // start message, so one tool call is one message. Tool results are excluded
     // from the "never fold" rule, so long ones use an expandable blockquote.
     const parts = extractToolResultParts(event.result);
     const header = `${event.isError ? "❌" : "✅"} <b>${escapeHtml(event.toolName)}</b>`;
-    if (parts.body.trim()) {
-      const rendered = markdownToTelegramHtml(redactFor(deps.getActiveTurn(), parts.body));
+    const diff = event.toolName === "edit" ? editDiffMarkdown(event.result) : "";
+    const resultSource = [parts.body, diff].filter((text) => text.trim()).join("\n\n");
+    let resultHtml: string;
+    if (resultSource.trim()) {
+      const rendered = markdownToTelegramHtml(redactFor(deps.getActiveTurn(), resultSource));
       const expandable = rendered.length > 600 || rendered.split("\n").length > 8;
       const tag = expandable ? "<blockquote expandable>" : "<blockquote>";
-      await sendNewToEventTarget(`${tag}${header}\n${rendered}</blockquote>`);
+      resultHtml = `${tag}${header}\n${rendered}</blockquote>`;
     } else {
-      await sendInlineEvent(`${status}: ${event.toolName}`);
+      resultHtml = `<blockquote>${escapeHtml(redactFor(deps.getActiveTurn(), `${status}: ${event.toolName}`))}</blockquote>`;
     }
+    await finishFullToolCall(call, resultHtml);
     const eventTurn = deps.getActiveTurn();
     for (const image of parts.images) {
       for (const chatId of eventChatIds()) {
