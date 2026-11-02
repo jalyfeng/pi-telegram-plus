@@ -1215,6 +1215,12 @@ export function createTelegramController(deps: {
         }
         return;
       }
+      // The reused turn keeps its first message as sourceMessageId. Remember
+      // this message so the renderer can quote it once the host adds it.
+      if (sourceMessageId !== undefined) {
+        existingTurn.pendingReplyTargets ??= [];
+        existingTurn.pendingReplyTargets.push({ text, messageId: sourceMessageId });
+      }
       const telegramUi = deps.ui.create(chatId, messageThreadId, sourceMessageId);
       await runWithTelegramTurn(existingTurn, () => runWithTelegramUi({
         session,

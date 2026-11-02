@@ -183,6 +183,12 @@ export type TelegramTurn = {
   messageThreadId?: number;
   /** Incoming Telegram message/button message that started this turn. */
   sourceMessageId?: number;
+  /**
+   * Telegram messages steered or queued into this turn, in hand-off order. When
+   * the host adds one of them to the conversation, its reply targets that
+   * message instead of sourceMessageId.
+   */
+  pendingReplyTargets?: Array<{ text: string; messageId: number }>;
   /** Message to edit in-place for callback-button initiated turns. */
   replaceMessageId?: number;
   queuedAttachments: Array<{ path: string; fileName: string }>;

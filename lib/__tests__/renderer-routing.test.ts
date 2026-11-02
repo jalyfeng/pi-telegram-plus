@@ -192,3 +192,81 @@ describe("Telegram renderer turn routing", () => {
     expect(sent[0].richMarkdown).toBeUndefined();
   });
 });
+
+describe("Telegram reply target for steered or queued messages", () => {
+  it("replies to a steered Telegram message once the host has taken it into the conversation", async () => {
+    const { emit, sent } = createRendererHarness();
+    const turn: TelegramTurn = {
+      chatId: 111,
+      sourceMessageId: 1,
+      pendingReplyTargets: [{ text: "second", messageId: 2 }],
+      queuedAttachments: [],
+    };
+
+    await runWithTelegramTurn(turn, async () => {
+      await emit("message_end", { message: { role: "user", content: "second" } });
+      await emit("message_end", { message: { role: "assistant", content: "answer to second" } });
+    });
+
+    expect(sent).toEqual([expect.objectContaining({ chatId: 111, replyToMessageId: 2, text: expect.stringContaining("answer to second") })]);
+  });
+
+  it("matches a host-decorated user message (text inside a system-reminder block) and array content", async () => {
+    const { emit, sent } = createRendererHarness();
+    const turn: TelegramTurn = {
+      chatId: 111,
+      sourceMessageId: 1,
+      pendingReplyTargets: [{ text: "second", messageId: 2 }],
+      queuedAttachments: [],
+    };
+
+    await runWithTelegramTurn(turn, async () => {
+      await emit("message_end", {
+        message: { role: "user", content: [{ type: "text", text: "<system-reminder>x</system-reminder>\nsecond" }] },
+      });
+      await emit("message_end", { message: { role: "assistant", content: "answer" } });
+    });
+
+    expect(sent).toEqual([expect.objectContaining({ replyToMessageId: 2 })]);
+  });
+
+  it("keeps replying to the turn's first message when no pending target matches", async () => {
+    const { emit, sent } = createRendererHarness();
+    const turn: TelegramTurn = {
+      chatId: 111,
+      sourceMessageId: 1,
+      pendingReplyTargets: [{ text: "second", messageId: 2 }],
+      queuedAttachments: [],
+    };
+
+    await runWithTelegramTurn(turn, async () => {
+      await emit("message_end", { message: { role: "user", content: "something else entirely" } });
+      await emit("message_end", { message: { role: "assistant", content: "answer" } });
+    });
+
+    expect(sent).toEqual([expect.objectContaining({ replyToMessageId: 1 })]);
+    expect(turn.pendingReplyTargets).toEqual([{ text: "second", messageId: 2 }]);
+  });
+
+  it("uses the first matching pending target and drops it and the entries before it", async () => {
+    const { emit, sent } = createRendererHarness();
+    const turn: TelegramTurn = {
+      chatId: 111,
+      sourceMessageId: 1,
+      pendingReplyTargets: [
+        { text: "first queued", messageId: 2 },
+        { text: "second queued", messageId: 3 },
+        { text: "third queued", messageId: 4 },
+      ],
+      queuedAttachments: [],
+    };
+
+    await runWithTelegramTurn(turn, async () => {
+      await emit("message_end", { message: { role: "user", content: "second queued" } });
+      await emit("message_end", { message: { role: "assistant", content: "answer two" } });
+    });
+
+    expect(sent).toEqual([expect.objectContaining({ replyToMessageId: 3, text: expect.stringContaining("answer two") })]);
+    expect(turn.pendingReplyTargets).toEqual([{ text: "third queued", messageId: 4 }]);
+  });
+});

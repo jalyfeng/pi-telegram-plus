@@ -418,3 +418,64 @@ describe("OMP loop mode arms with prompts sent from Telegram", () => {
     expect(prompts[0].text).toBe("loop body");
   });
 });
+
+describe("reply target of a message steered into a Telegram-started turn", () => {
+  it("records the steered message as a pending reply target of the existing turn", async () => {
+    const streamingRef = { value: false };
+    const idleRef = { value: true };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const { session, endTurn } = createTurnSession(streamingRef, idleRef, prompts);
+    let activeTurn: any;
+    let startedTurn: any;
+    const controller = createTelegramController({
+      getSession: () => session,
+      getConfig: () => ({ messageMode: "steer" }),
+      transport: {
+        removeInlineKeyboard: vi.fn(async () => undefined),
+        sendText: vi.fn(async (_chatId: number, text: string) => {
+          sent.push({ text });
+          return [{ message_id: sent.length }];
+        }),
+        sendButtons: vi.fn(async () => ({ message_id: 1 })),
+        editText: vi.fn(async () => undefined),
+        editButtons: vi.fn(async () => undefined),
+        answerCallbackQuery: vi.fn(async () => undefined),
+        deleteMessage: vi.fn(async () => undefined),
+        sendDocument: vi.fn(async () => undefined),
+        sendPhoto: vi.fn(async () => undefined),
+        sendChatAction: vi.fn(async () => undefined),
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => activeTurn,
+      beginTelegramTurn: (chatId: number, _replaceMessageId?: number, _messageThreadId?: number, sourceMessageId?: number) => {
+        activeTurn = { chatId, sourceMessageId, queuedAttachments: [] };
+        startedTurn ??= activeTurn;
+        return activeTurn;
+      },
+      endTelegramTurn: () => { activeTurn = undefined; },
+    });
+
+    try {
+      await sendMessage(controller, "first starts turn", 1);
+      await waitFor(() => prompts.length === 1);
+      await sendMessage(controller, "second during turn", 2);
+      await waitFor(() => prompts.length === 2, 1000);
+    } finally {
+      endTurn();
+    }
+
+    expect(prompts[1].opts?.streamingBehavior).toBe("steer");
+    expect(startedTurn.pendingReplyTargets).toEqual([{ text: "second during turn", messageId: 2 }]);
+  });
+});

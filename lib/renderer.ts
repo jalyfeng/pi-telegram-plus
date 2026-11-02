@@ -21,6 +21,15 @@ type AnyMessage = {
   provider?: string;
 };
 
+function userMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part): part is { type: "text"; text: string } => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
+}
+
 const TOOL_UPDATE_MS = 5000;
 const EDIT_LIMIT = 3500;
 
@@ -495,9 +504,31 @@ ${partial}`);
     } catch (err) { renderLog.warn("tool-result image upload failed", { err }); }
   });
 
+  // A Telegram message steered or queued into a running turn keeps that turn's
+  // sourceMessageId. When the host adds it to the conversation, make the
+  // turn's next reply quote that message instead.
+  const adoptSteeredReplyTarget = (message: AnyMessage): void => {
+    const turn = deps.getActiveTurn();
+    const pending = turn?.pendingReplyTargets;
+    if (!turn || !pending?.length) return;
+    const userText = userMessageText(message.content).trim();
+    if (!userText) return;
+    const index = pending.findIndex((target) => {
+      const targetText = target.text.trim();
+      return targetText.length > 0 && userText.includes(targetText);
+    });
+    if (index < 0) return;
+    turn.sourceMessageId = pending[index].messageId;
+    pending.splice(0, index + 1);
+  };
+
   pi.on("message_end", async (event) => {
     try {
     const message = event.message as AnyMessage;
+    if (message.role === "user") {
+      adoptSteeredReplyTarget(message);
+      return;
+    }
     if (message.role !== "assistant") return;
     // Subagent turns emit assistant messages in the same session stream.
     // The TUI never shows them as conversation — suppress them while agent
