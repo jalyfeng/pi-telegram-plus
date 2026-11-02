@@ -137,3 +137,15 @@ describe("replayTelegramHistory", () => {
         expect(item.html).toContain("Project");
     });
 });
+
+describe("history replay tool-call lines", () => {
+    it("keeps one readable line per replayed tool call in brief mode", () => {
+        const replay = buildTelegramHistoryReplay(entries, { tool: "brief", thinking: "hidden" });
+        const text = textItems(replay);
+
+        expect(text).toContain("🔧 read: README.md");
+        expect(text).toContain("🔧 bash: exit 1");
+        expect(text).not.toContain('"path"');
+        expect(text).not.toContain('"command"');
+    });
+});

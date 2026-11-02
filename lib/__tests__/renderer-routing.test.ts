@@ -270,3 +270,104 @@ describe("Telegram reply target for steered or queued messages", () => {
     expect(turn.pendingReplyTargets).toEqual([{ text: "third queued", messageId: 4 }]);
   });
 });
+
+describe("Telegram tool-call lines are readable, one per call", () => {
+  const turn: TelegramTurn = { chatId: 111, queuedAttachments: [] };
+
+  async function briefLine(toolName: string, args: unknown): Promise<string | undefined> {
+    const { emit, sent } = createRendererHarness({ tool: "brief" });
+    await runWithTelegramTurn(turn, () => emit("tool_execution_start", { toolCallId: "call", toolName, args }));
+    return sent[0]?.text.replace(/^<blockquote>|<\/blockquote>$/g, "");
+  }
+
+  it.each([
+    ["read", { i: "Reading notes", path: "src/notes.md" }, "🔧 read: src/notes.md"],
+    ["write", { i: "Writing", path: "out/result.txt", content: "{\"a\": 1}" }, "🔧 write: out/result.txt"],
+    ["edit", { i: "Editing", input: "[/tmp/p/notes.md#0760]\nPUT >4:\n+- d" }, "🔧 edit: notes.md"],
+    ["edit", { i: "Editing", input: "[/tmp/p/a.ts#00AA]\nPUT >1:\n+x\n[/tmp/p/b.ts#00AB]\nPUT >2:\n+y" }, "🔧 edit: a.ts, b.ts"],
+    ["edit", { i: "Editing", input: "[a.ts#1]\n[b.ts#2]\n[c.ts#3]\n[d.ts#4]\n[e.ts#5]" }, "🔧 edit: a.ts, b.ts, c.ts (+2 more)"],
+    ["edit", { i: "Editing", input: "no header here" }, "🔧 edit: patch"],
+    ["bash", { i: "Listing", command: "ls -la\necho done" }, "🔧 bash: ls -la"],
+    ["eval", { i: "Computing", language: "js", code: "const x = 1;\nconsole.log(x)", title: "Sum check" }, "🔧 eval: Sum check"],
+    ["eval", { i: "Computing", language: "js", code: "const x = 1;\nconsole.log(x)" }, "🔧 eval: js: const x = 1;"],
+    ["glob", { i: "Finding", path: "lib/**/*.ts" }, "🔧 glob: lib/**/*.ts"],
+    ["grep", { i: "Searching", pattern: "summarizeToolArgs", path: "lib" }, "🔧 grep: \"summarizeToolArgs\" in lib"],
+    ["grep", { i: "Searching", pattern: "TODO" }, "🔧 grep: \"TODO\""],
+    ["todo", { i: "Planning", op: "init", list: [{ phase: "A", items: ["one", "two"] }, { phase: "B", items: ["three"] }] }, "🔧 todo: init (2 phases, 3 items)"],
+    ["todo", { i: "Done", op: "done", task: "write tests" }, "🔧 todo: done: write tests"],
+    ["todo", { i: "Adding", op: "append", items: ["x", "y"] }, "🔧 todo: append 2 items"],
+    ["wait", {}, "🔧 wait"],
+    ["ask", { i: "Asking", questions: [{ question: "Which branch?", options: ["a", "b"] }, { question: "Second?" }] }, "🔧 ask: Which branch? (+1 more)"],
+    ["web_search", { i: "Searching web", query: "oh-my-pi hashline" }, "🔧 web_search: oh-my-pi hashline"],
+    ["task", { i: "Delegating", context: "shared", tasks: [{ name: "Scan", agent: "task", task: "scan the repo", solutionSpace: "x" }, { agent: "task", task: "second", solutionSpace: "y" }] }, "🔧 task: 2 tasks: Scan"],
+    ["task", { i: "Delegating", context: "shared", tasks: [{ agent: "task", task: "Review the diff", solutionSpace: "x" }] }, "🔧 task: 1 task: Review the diff"],
+    ["custom_tool", { i: "Custom", target: "thing", count: 3 }, "🔧 custom_tool: thing"],
+    ["custom_tool", { i: "Custom", count: 3 }, "🔧 custom_tool"],
+  ])("%s %j -> one line", async (toolName, args, expected) => {
+    const line = await briefLine(toolName, args);
+    expect(line).toBe(expected);
+    expect(line).not.toMatch(/[{}"]\s*:|\{ /);
+  });
+
+  it("does not echo raw JSON or the intent field for a tool whose args only hold intent", async () => {
+    expect(await briefLine("custom_tool", { i: "Only intent" })).toBe("🔧 custom_tool");
+  });
+
+  it("does not render assistant toolCall blocks inline on message_end, but still sends the reply", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "full" });
+
+    await runWithTelegramTurn(turn, () => emit("message_end", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } },
+          { type: "text", text: "final words" },
+        ],
+      },
+    }));
+
+    expect(sent.some((item) => item.text.includes("🔧"))).toBe(false);
+    expect(sent.some((item) => item.text.includes("final words"))).toBe(true);
+  });
+
+  it("full mode start sends the brief line without JSON", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "full" });
+
+    await runWithTelegramTurn(turn, () => emit("tool_execution_start", {
+      toolCallId: "call-1",
+      toolName: "write",
+      args: { i: "Writing", path: "out.txt", content: "payload-body" },
+    }));
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("🔧 write: out.txt");
+    expect(sent[0].text).not.toContain("payload-body");
+    expect(sent[0].text).not.toContain("started");
+  });
+
+  it("full mode update is skipped when the partial result has no text", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "full" });
+
+    await runWithTelegramTurn(turn, () => emit("tool_execution_update", {
+      toolCallId: "call-2",
+      toolName: "bash",
+      partialResult: { details: { progress: 0.5 } },
+    }));
+
+    expect(sent).toHaveLength(0);
+  });
+
+  it("full mode update sends the partial text, not the JSON envelope", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "full" });
+
+    await runWithTelegramTurn(turn, () => emit("tool_execution_update", {
+      toolCallId: "call-3",
+      toolName: "bash",
+      partialResult: { content: [{ type: "text", text: "tick 1" }], details: {} },
+    }));
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("🔄 bash\ntick 1");
+    expect(sent[0].text).not.toContain('"content"');
+  });
+});

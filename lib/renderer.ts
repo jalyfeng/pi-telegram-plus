@@ -48,9 +48,11 @@ export function contentToRenderParts(
   content: unknown,
   thinkingLevel: TelegramRenderLevel = "brief",
   toolLevel: TelegramRenderLevel = "brief",
+  options: { includeToolCalls?: boolean } = {},
 ): { body: string; inlineEvents: string[] } {
   if (typeof content === "string") return { body: content, inlineEvents: [] };
   if (!Array.isArray(content)) return { body: "", inlineEvents: [] };
+  const includeToolCalls = options.includeToolCalls ?? true;
   const body: string[] = [];
   const inlineEvents: string[] = [];
   for (const part of content) {
@@ -61,7 +63,7 @@ export function contentToRenderParts(
       const inline = formatThinkingInline(p, thinkingLevel);
       if (inline) inlineEvents.push(inline);
     } else if (p.type === "toolCall") {
-      if (toolLevel === "hidden") continue;
+      if (!includeToolCalls || toolLevel === "hidden") continue;
       const name = String(p.name ?? "tool");
       inlineEvents.push(toolLevel === "brief"
         ? formatToolBrief(name, p.arguments ?? {})
@@ -192,30 +194,121 @@ function shortenSummary(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max - 1) + "…";
 }
 
-function summarizeToolArgs(toolName: string, args: unknown, max = 96): string {
-  if (!args || typeof args !== "object") return "";
-  const a = args as Record<string, unknown>;
-  let text = "";
+type ToolArgs = Record<string, unknown>;
 
-  if (toolName === "edit" && typeof a.path === "string") text = a.path;
-  else if (toolName === "read" && typeof a.path === "string") {
-    text = a.path;
-    const offset = typeof a.offset === "number" ? a.offset : undefined;
-    const limit = typeof a.limit === "number" ? a.limit : undefined;
-    if (offset !== undefined || limit !== undefined) {
+function basename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+/** Hashline patch headers: `[<path>#<TAG>]` at the start of a line. */
+const EDIT_FILE_HEADER = /^\[([^\]\n]+?)#[^\]\n]+\]/gm;
+
+function summarizeEditPatch(input: string): string {
+  const files = [...new Set([...input.matchAll(EDIT_FILE_HEADER)].map((match) => basename(match[1])))];
+  if (files.length === 0) return "patch";
+  const shown = files.slice(0, 3).join(", ");
+  return files.length > 3 ? `${shown} (+${files.length - 3} more)` : shown;
+}
+
+function summarizeTodo(a: ToolArgs): string {
+  const op = typeof a.op === "string" ? a.op : "";
+  if (!op) return "";
+  if (op === "init") {
+    const phases = Array.isArray(a.list) ? (a.list as Array<{ items?: unknown }>) : [];
+    const itemCount = phases.reduce((sum, phase) => sum + (Array.isArray(phase?.items) ? phase.items.length : 0), 0)
+      + (Array.isArray(a.items) ? a.items.length : 0);
+    return `init (${phases.length} phases, ${itemCount} items)`;
+  }
+  if (op === "append") {
+    const count = Array.isArray(a.items) ? a.items.length : 0;
+    return `append ${count} items`;
+  }
+  const task = typeof a.task === "string" ? firstLine(a.task) : "";
+  return task ? `${op}: ${task}` : op;
+}
+
+function summarizeAsk(a: ToolArgs): string {
+  const questions = Array.isArray(a.questions) ? (a.questions as Array<{ question?: unknown }>) : [];
+  const first = typeof questions[0]?.question === "string" ? firstLine(questions[0].question) : "";
+  if (!first) return "";
+  return questions.length > 1 ? `${first} (+${questions.length - 1} more)` : first;
+}
+
+function summarizeTask(a: ToolArgs): string {
+  const tasks = Array.isArray(a.tasks) ? (a.tasks as Array<{ name?: unknown; task?: unknown }>) : [];
+  if (tasks.length === 0) return "";
+  const first = tasks[0];
+  const label = firstLine(
+    typeof first.name === "string" && first.name.trim()
+      ? first.name
+      : typeof first.task === "string" ? first.task : "",
+  );
+  const count = `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
+  return label ? `${count}: ${label}` : count;
+}
+
+/** First string argument, skipping the intent field `i`. Used for unknown tools. */
+function firstStringArg(a: ToolArgs): string {
+  for (const [key, value] of Object.entries(a)) {
+    if (key === "i") continue;
+    if (typeof value === "string" && value.trim()) return firstLine(value);
+  }
+  return "";
+}
+
+function toolArgsText(toolName: string, a: ToolArgs): string {
+  const str = (key: string): string => (typeof a[key] === "string" ? (a[key] as string) : "");
+  switch (toolName) {
+    case "read": {
+      const path = str("path");
+      if (!path) return "";
+      const offset = typeof a.offset === "number" ? a.offset : undefined;
+      const limit = typeof a.limit === "number" ? a.limit : undefined;
+      if (offset === undefined && limit === undefined) return path;
       const start = offset ?? 1;
       const end = limit !== undefined ? start + limit - 1 : "";
-      text += `:${start}${end ? `-${end}` : ""}`;
+      return `${path}:${start}${end ? `-${end}` : ""}`;
     }
-  } else if (toolName === "bash" && typeof a.command === "string") text = firstLine(a.command);
-  else if (typeof a.path === "string") text = a.path;
-  else if (typeof a.url === "string") text = a.url;
-  else if (Array.isArray(a.paths)) text = a.paths.map(String).join(", ");
-  else if (typeof a.file === "string") text = a.file;
-  else if (typeof a.query === "string") text = a.query;
-  else text = stringifyShort(args, max);
+    case "write":
+      return str("path");
+    case "edit":
+      return summarizeEditPatch(str("input"));
+    case "bash":
+      return firstLine(str("command"));
+    case "eval": {
+      const title = firstLine(str("title"));
+      if (title) return title;
+      const code = firstLine(str("code"));
+      const language = str("language").trim();
+      if (language && code) return `${language}: ${code}`;
+      return language || code;
+    }
+    case "glob":
+      return str("path") || str("pattern");
+    case "grep": {
+      const pattern = firstLine(str("pattern"));
+      const path = str("path");
+      if (!pattern) return path;
+      return path ? `"${pattern}" in ${path}` : `"${pattern}"`;
+    }
+    case "todo":
+      return summarizeTodo(a);
+    case "wait":
+      return "";
+    case "ask":
+      return summarizeAsk(a);
+    case "web_search":
+      return firstLine(str("query"));
+    case "task":
+      return summarizeTask(a);
+    default:
+      return firstStringArg(a);
+  }
+}
 
-  return shortenSummary(text, max);
+function summarizeToolArgs(toolName: string, args: unknown, max = 96): string {
+  if (!args || typeof args !== "object") return "";
+  return shortenSummary(toolArgsText(toolName, args as ToolArgs), max);
 }
 
 function formatToolBrief(toolName: string, args: unknown): string {
@@ -434,11 +527,7 @@ export function registerTelegramRenderer(
     const level = renderLevel(deps.getConfig(), "tool");
     if (level === "hidden") return;
     toolArgs.set(event.toolCallId, event.args);
-    const inline = level === "brief"
-      ? formatToolBrief(event.toolName, event.args)
-      : `🔧 ${event.toolName} started
-${stringifyShort(event.args, 1200)}`;
-    await sendInlineEvent(inline);
+    await sendInlineEvent(formatToolBrief(event.toolName, event.args));
     } catch (err) { renderLog.warn("render tool_execution_start handler failed", { err }); }
   });
 
@@ -447,14 +536,14 @@ ${stringifyShort(event.args, 1200)}`;
     if (isBackgroundAgentActivity()) return;
     const level = renderLevel(deps.getConfig(), "tool");
     if (level !== "full") return;
+    const text = extractToolResultParts(event.partialResult).body;
+    if (!text.trim()) return;
     const now = Date.now();
     const last = toolUpdateAt.get(event.toolCallId) ?? 0;
     if (now - last < TOOL_UPDATE_MS) return;
     toolUpdateAt.set(event.toolCallId, now);
-    const partial = stringifyShort(event.partialResult, 700);
-    if (!partial || partial === "{}") return;
-    await sendInlineEvent(`🔄 ${event.toolName} update
-${partial}`);
+    await sendInlineEvent(`🔄 ${event.toolName}
+${stringifyShort(text, 700)}`);
     } catch (err) { renderLog.warn("render tool_execution_update handler failed", { err }); }
   });
 
@@ -539,8 +628,9 @@ ${partial}`);
     }
     const config = deps.getConfig();
     const thinkingLevel = renderLevel(config, "thinking");
-    const toolLevel = renderLevel(config, "tool");
-    const rendered = contentToRenderParts(message.content, thinkingLevel, toolLevel);
+    // Tool calls are rendered by tool_execution_start instead; rendering the
+    // toolCall blocks here as well would print every call twice.
+    const rendered = contentToRenderParts(message.content, thinkingLevel, "brief", { includeToolCalls: false });
     await sendInlineEvents(rendered.inlineEvents);
     // Redact the whole reply (prose *and* the oversized code blocks pulled out
     // of it below) before it is converted to HTML or sent as Markdown (§4.7.4).
