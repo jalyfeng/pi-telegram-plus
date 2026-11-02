@@ -180,3 +180,59 @@ describe("a Telegram tap stays the cause of the close until the dialog moves on"
     expect(ctx.last()).not.toContain("Answered in the terminal");
   });
 });
+
+/** A runtime with no dialog open: what a replacement runtime is after a session switch. */
+function freshRuntime() {
+  const focus = fakeFocus();
+  const turn: TelegramTurn = { chatId: 42, sourceMessageId: 7, queuedAttachments: [] };
+  const broker = new DialogBroker({
+    transport: { answerCallbackQuery: async () => undefined, removeInlineKeyboard: async () => undefined } as unknown as BrokerDeps["transport"],
+    focus,
+    origin: { active: () => undefined } as unknown as BrokerDeps["origin"],
+    activeChatId: () => 42,
+    activeTurns: () => [turn],
+    writeText: () => true,
+    enabled: () => true,
+  });
+  broker.start();
+  return { broker, focus };
+}
+
+describe("a tap whose act ran is answered as done, whichever runtime sees it next", () => {
+  it("answers a tap whose act tears the runtime down while it runs", async () => {
+    let ctx!: Awaited<ReturnType<typeof open>>;
+    ctx = await open((_action, host) => {
+      // The host switches session inside the act: the runtime is disposed before the act returns.
+      ctx.broker.stop({ handOver: true });
+      host.close();
+      return true;
+    });
+
+    expect(ctx.tap("y")).toEqual({ handled: true });
+  });
+
+  it("answers a replay of that tap, delivered to the replacement runtime", async () => {
+    let old!: Awaited<ReturnType<typeof open>>;
+    old = await open((_action, host) => {
+      old.broker.stop({ handOver: true });
+      host.close();
+      return true;
+    });
+    const callback = { sessionId: old.session.id, generation: old.session.generation, op: "y" };
+    expect(old.broker.handleCallback(42, undefined, callback)).toEqual({ handled: true });
+
+    // The update was not checkpointed before the switch, so the replacement runtime gets it again.
+    const next = freshRuntime();
+    expect(next.broker.handleCallback(42, undefined, callback)).toEqual({ handled: true, clear: true });
+  });
+
+  it("still answers a tap on a dialog the terminal closed before any act, with the notice", async () => {
+    const ctx = await open(() => true);
+    ctx.focus.closeToEditor();
+    await vi.advanceTimersByTimeAsync(10);
+    const next = freshRuntime();
+
+    expect(next.broker.handleCallback(42, undefined, { sessionId: ctx.session.id, generation: ctx.session.generation, op: "y" }))
+      .toEqual({ handled: true, toast: "Answered in the terminal", clear: true });
+  });
+});

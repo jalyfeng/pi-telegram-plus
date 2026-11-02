@@ -82,6 +82,40 @@ export const REFRESH_MS = 1_000;
 /** §4.7.1: only the last few generations of button identity are kept. */
 const KEEP_GENERATIONS = 3;
 
+/**
+ * Taps whose act has run, by callback identity, shared by every runtime in the process. A session
+ * switch can re-deliver the tap that caused it (the update was not checkpointed before the switch),
+ * and the runtime that gets it again must answer it as done, not as "Answered in the terminal".
+ * Kept on globalThis, like the pending notices, so it survives a runtime replacement.
+ */
+const ACTED_TAPS = Symbol.for("pi-telegram-plus.acted-taps");
+const ACTED_TAP_TTL_MS = 2 * 60 * 1000;
+
+function actedTaps(): Map<string, number> {
+  const g = globalThis as typeof globalThis & Record<symbol, Map<string, number> | undefined>;
+  g[ACTED_TAPS] ??= new Map();
+  return g[ACTED_TAPS] as Map<string, number>;
+}
+
+/**
+ * A dialog id unique within the process, across broker instances and runtime replacements: the
+ * acted-tap record above is keyed by it. The counter lives on globalThis for the same reason.
+ */
+const DIALOG_SEQUENCE = Symbol.for("pi-telegram-plus.dialog-sequence");
+
+function nextDialogId(): string {
+  const g = globalThis as typeof globalThis & Record<symbol, number | undefined>;
+  const sequence = g[DIALOG_SEQUENCE] ?? 0;
+  g[DIALOG_SEQUENCE] = sequence + 1;
+  return `${Date.now().toString(36)}.${sequence.toString(36)}`;
+}
+
+function wasActed(key: string, now = Date.now()): boolean {
+  const map = actedTaps();
+  for (const [known, at] of map) if (now - at > ACTED_TAP_TTL_MS) map.delete(known);
+  return map.has(key);
+}
+
 export type TextPurpose = "input" | "editor" | "search";
 
 /**
@@ -293,7 +327,6 @@ export class DialogBroker {
   private readonly deferred = new Map<string, ReturnType<typeof setTimeout>>();
   /** The background-refresh tick, alive between start() and stop(). */
   private refreshTimer?: ReturnType<typeof setInterval>;
-  private sequence = 0;
   /** Sessions drawn on a command's own message, and the scope that owns it. */
   private readonly scopes = new WeakMap<DialogSession, CommandScope>();
   /** Sessions with no focus behind them: a command's paged output (`showPaged`). */
@@ -528,7 +561,7 @@ export class DialogBroker {
     const adapter = pickAdapterSafely(component, ctx) ?? unsupportedAdapter;
     const owner = this.owner(info.commandScope);
     const session: DialogSession = {
-      id: `${Date.now().toString(36)}.${(this.sequence++).toString(36)}`,
+      id: nextDialogId(),
       generation: 0,
       openedAt: Date.now(),
       focus: component,
@@ -596,10 +629,14 @@ export class DialogBroker {
     this.deps.focus.validate();
     const session = this.session;
     const tapKey = `${callback.sessionId}|${callback.generation}|${callback.op}|${callback.arg ?? ""}`;
+    // A tap whose act already ran (here or in the runtime it switched) was answered by that act.
+    if (wasActed(tapKey)) {
+      brokerLog.debug("callback answered: its act already ran", { sessionId: callback.sessionId, op: callback.op });
+      return { handled: true, clear: true };
+    }
     if (!session || session.state === "closed") {
-      // The same tap delivered again, after the act it caused closed the dialog: that click was
-      // answered, so it is not a terminal answer. Any other tap on a closed dialog is.
-      if (session?.lastTapKey === tapKey) return { handled: true, clear: true };
+      // Only a tap that reaches a dialog already closed or replaced is "Answered in the terminal".
+      brokerLog.debug("callback refused: no open dialog", { reason: session ? "closed" : "none", state: session?.state ?? null, callbackId: callback.sessionId, op: callback.op });
       return { handled: true, toast: "Answered in the terminal", clear: true };
     }
     // Every way a tap can be refused is a user-visible dead button, so say which one
@@ -610,6 +647,7 @@ export class DialogBroker {
       brokerLog.debug("callback refused", {
         reason,
         toast,
+        state: session.state,
         sessionId: session.id,
         callbackId: callback.sessionId,
         generation: session.generation,
@@ -675,10 +713,12 @@ export class DialogBroker {
 
     session.model = model;
     session.state = "resolving";
-    session.lastTapKey = tapKey;
     session.lastAction = resolved.label;
+    // Recorded before the act: a switch inside the act tears this runtime down before it returns.
+    actedTaps().set(tapKey, Date.now());
     const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
+      actedTaps().delete(tapKey);
       session.state = "open";
       this.redraw(session);
       return refuse("act-refused", "This button does nothing here", false);
@@ -871,7 +911,7 @@ export class DialogBroker {
     const focus = {};
     const adapter: DialogAdapter = { id: "paged-output", detect: () => false, read: () => model, act: () => false };
     const session: DialogSession = {
-      id: `${Date.now().toString(36)}.${(this.sequence++).toString(36)}`,
+      id: nextDialogId(),
       generation: 0,
       openedAt: Date.now(),
       focus,

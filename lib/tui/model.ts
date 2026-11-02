@@ -255,6 +255,4 @@ export type DialogSession = {
    * an answer.
    */
   telegramAction?: { cancelled: boolean; drawn?: string };
-  /** The callback that last reached the host through this dialog; a repeat of it is not a terminal answer. */
-  lastTapKey?: string;
 };
