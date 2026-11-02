@@ -1465,18 +1465,27 @@ function wizardBackLabel(component: object): string | undefined {
   return firstText(found.node) || "Back";
 }
 
-/** The select model for a wizard's choice step: its title, lead, items and Back. */
-function wizardChoiceModel(component: object, choices: WizardChoices): DialogModel {
+/** The wizard step's title text (`omp.mcpAdd.title`), else the overlay head, else `fallback`. */
+function wizardTitle(component: object, fallback: string): string {
   const titleNode = findDescribedNode(component, (node) => node.k === "text" && isObject(node.p) && node.p.role === WIZARD_TITLE_ROLE);
-  const leadNode = findDescribedNode(component, (node) => node.k === "text" && isObject(node.p) && node.p.role === WIZARD_LEAD_ROLE);
   const root = describeTree(component);
   const head = root ? overlayHead(root, new Set<object>()) : "";
-  const title = (titleNode ? nodeText(titleNode.node).trim() : "") || head || "Choose";
-  const lead = leadNode ? nodeText(leadNode.node).trim() : "";
+  return (titleNode ? nodeText(titleNode.node).trim() : "") || head || fallback;
+}
+
+/** The wizard step's lead text (`omp.mcpAdd.lead`), or "". */
+function wizardLead(component: object): string {
+  const leadNode = findDescribedNode(component, (node) => node.k === "text" && isObject(node.p) && node.p.role === WIZARD_LEAD_ROLE);
+  return leadNode ? nodeText(leadNode.node).trim() : "";
+}
+
+/** The select model for a wizard's choice step: its title, lead, items and Back. */
+function wizardChoiceModel(component: object, choices: WizardChoices): DialogModel {
+  const lead = wizardLead(component);
   const back = wizardBackLabel(component);
   return {
     kind: "select",
-    title,
+    title: wizardTitle(component, "Choose"),
     items: choices.items,
     total: choices.items.length,
     ...(lead ? { subtitle: lead } : {}),
@@ -1484,15 +1493,100 @@ function wizardChoiceModel(component: object, choices: WizardChoices): DialogMod
   };
 }
 
+/** The footer button whose `actions.click` is `act`, with the component that takes its event. */
+function wizardButton(component: object, act: string): DescribedNode | undefined {
+  return findDescribedNode(component, (node) => isObject(node.p) && isObject(node.p.actions) && node.p.actions.click === act);
+}
+
+/** The label of the footer's primary button (`actions.click === "next"`), when the step has one. */
+function wizardNextLabel(component: object): string | undefined {
+  const found = wizardButton(component, "next");
+  if (!found) return undefined;
+  return firstText(found.node) || "Next";
+}
+
+/** Roles whose text is not part of a confirmation's body (title and lead are shown on their own; the rest is chrome). */
+const WIZARD_CHROME_ROLES = new Set([WIZARD_TITLE_ROLE, WIZARD_LEAD_ROLE, "omp.mcpAdd.progress", "omp.mcpAdd.tag", "omp.actions"]);
+
+/** Plain text of a wizard step's body, in document order: text nodes only, never a rendered screen. */
+function collectWizardBody(component: object, depth: number, visited: Set<object>, lines: string[]): void {
+  if (depth > MAX_COMPONENT_DEPTH || visited.has(component)) return;
+  visited.add(component);
+  const root = describeTree(component);
+  if (!root) return;
+  visited.add(root);
+  collectWizardBodyNode(root, depth, visited, lines);
+}
+
+function collectWizardBodyNode(node: NativeNodeLike, depth: number, visited: Set<object>, lines: string[]): void {
+  const role = isObject(node.p) && typeof node.p.role === "string" ? node.p.role : undefined;
+  if (role !== undefined && WIZARD_CHROME_ROLES.has(role)) return;
+  // Buttons carry their own labels; they are not body text.
+  if (isObject(node.p) && isObject(node.p.actions)) return;
+  if (node.k === "text") {
+    const text = nodeText(node).trim();
+    if (text) lines.push(text);
+    return;
+  }
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  for (const child of children) {
+    if (!isObject(child)) continue;
+    const component = describableChild(child);
+    if (component) {
+      collectWizardBody(component, depth + 1, visited, lines);
+      continue;
+    }
+    const childNode = child as NativeNodeLike;
+    if (visited.has(childNode)) continue;
+    visited.add(childNode);
+    collectWizardBodyNode(childNode, depth, visited, lines);
+  }
+}
+
+/**
+ * A wizard's confirmation step (e.g. the MCP add wizard's "Save this
+ * configuration?"): no field and no choice list, but a footer `next` button.
+ * The confirm model has two answers: `next` is yes, `back` is no.
+ */
+function wizardConfirmModel(component: object): DialogModel {
+  const lines: string[] = [];
+  const lead = wizardLead(component);
+  if (lead) lines.push(lead);
+  collectWizardBody(component, 0, new Set<object>(), lines);
+  const confirmLabel = wizardNextLabel(component) ?? "Next";
+  const cancelLabel = wizardBackLabel(component);
+  return {
+    kind: "confirm",
+    title: wizardTitle(component, "Confirm"),
+    ...(lines.length > 0 ? { message: lines.join("\n") } : {}),
+    confirmLabel,
+    ...(cancelLabel ? { cancelLabel } : {}),
+  };
+}
+
 /**
  * Answer a wizard's choice step: a tapped item is the host's `activate` on its
  * list (what Enter on the highlighted row sends), Back and Cancel are its
- * `action` events. Only the events the host's own handler takes are sent.
+ * `action` events. A confirmation step's yes is its `next` and no is `back`.
+ * Only the events the host's own handler takes are sent.
  */
 function actWizardChoices(component: object, action: DialogAction, ctx: AdapterContext): boolean {
   const choices = wizardChoices(component);
-  if (!choices) return false;
   let event: unknown;
+  if (!choices) {
+    // No choice list: a confirmation step (footer `next`) answers yes / no.
+    if (wizardButton(component, "next") === undefined) return false;
+    if (action.type === "confirm") {
+      // Yes presses the footer's `next`; no presses its `back` (Escape's action).
+      const button = wizardButton(component, action.yes ? "next" : "back");
+      if (!button) return false;
+      event = { type: "action", key: "", act: action.yes ? "next" : "back", mods: [] };
+      return sendPickerEvent(button.owner, event, ctx);
+    }
+    if (action.type !== "cancel") return false;
+    event = { type: "action", key: "", act: "cancel", mods: [] };
+    return sendPickerEvent(component, event, ctx);
+  }
   if (action.type === "choose") {
     if (!choices.items.some((item) => item.key === action.key)) return false;
     event = { type: "activate", key: choices.keypath, item: action.key };
@@ -1532,6 +1626,8 @@ export const tspInputAdapter: DialogAdapter = {
       // A wizard's choice step (e.g. the MCP add wizard's transport) has a list, not a field.
       const choices = wizardChoices(component);
       if (choices) return wizardChoiceModel(component, choices);
+      // A confirmation step (e.g. the MCP add wizard's review): a footer `next` and no field.
+      if (wizardButton(component, "next") !== undefined) return wizardConfirmModel(component);
       return { kind: "unsupported", what: "OMP text prompt closed or no longer an input" };
     }
     const title = found.heading ?? promptTitle(found.label) ?? "Input";

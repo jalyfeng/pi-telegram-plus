@@ -1838,3 +1838,72 @@ describe("tsp input wizard choice step", () => {
     expect(tspInputAdapter.act(component, { type: "key", name: "wizard:back" }, ctxFor())).toBe(false);
   });
 });
+
+describe("tsp input wizard review step", () => {
+  /** The MCP add wizard's review step: a summary body and a footer with Back and Save, no field or list. */
+  const reviewWizard = () => ({
+    k: "col",
+    c: [
+      {
+        k: "overlay",
+        p: { role: "omp.overlay.mcpAdd", head: "Add MCP server" },
+        c: [
+          {
+            k: "col",
+            c: [
+              { k: "row", p: { role: "omp.mcpAdd.progress" }, c: [{ k: "col", p: { role: "omp.mcpAdd.phase" }, c: [{ k: "text", p: { text: "Name" } }] }] },
+              { k: "text", p: { text: "Save this configuration?", role: "omp.mcpAdd.title" } },
+              {
+                k: "col",
+                p: { role: "omp.mcpAdd.body" },
+                c: [
+                  { k: "text", p: { text: "Name: github" } },
+                  { k: "text", p: { text: "Transport: stdio" } },
+                  { k: "text", p: { text: "Command: npx" } },
+                ],
+              },
+              {
+                k: "row",
+                p: { role: "omp.actions" },
+                c: [
+                  { k: "row", p: { role: "omp.btn", actions: { click: "back" } }, c: [{ k: "text", p: { text: "Back" } }] },
+                  { k: "row", p: { role: "omp.btn", actions: { click: "next" } }, c: [{ k: "text", p: { text: "Save" } }] },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  it("reads the review as a confirmation with the body text and the footer's labels", () => {
+    const component = makeComponent(reviewWizard());
+    expect(tspInputAdapter.read(component, ctxFor())).toEqual({
+      kind: "confirm",
+      title: "Save this configuration?",
+      message: "Name: github\nTransport: stdio\nCommand: npx",
+      confirmLabel: "Save",
+      cancelLabel: "Back",
+    });
+  });
+
+  it("sends the footer's next on yes and back on no", () => {
+    const component = makeComponent(reviewWizard());
+    expect(tspInputAdapter.act(component, { type: "confirm", yes: true }, ctxFor())).toBe(true);
+    expect(tspInputAdapter.act(component, { type: "confirm", yes: false }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([
+      { type: "action", key: "", act: "next", mods: [] },
+      { type: "action", key: "", act: "back", mods: [] },
+    ]);
+  });
+
+  it("refuses a no when the footer has no back button", () => {
+    const tree = reviewWizard();
+    const footer = tree.c[0].c[0].c[3] as { c: unknown[] };
+    footer.c = footer.c.slice(1);
+    const component = makeComponent(tree);
+    expect(tspInputAdapter.act(component, { type: "confirm", yes: false }, ctxFor())).toBe(false);
+    expect(component.events).toEqual([]);
+  });
+});
