@@ -312,6 +312,24 @@ describe("Terminal-only commands from Telegram", () => {
     run.mockRestore();
   });
 
+  it("answers a suffixed terminal-only command such as /git:foo with the terminal hint", async () => {
+    const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
+    const submit = vi.fn(() => true);
+    const harness = createHarness({
+      bridge: createBridge({
+        submit,
+        getCommands: async () => [{ name: "git", description: "Git", source: "builtin" as const }],
+      }),
+    });
+
+    await send(harness.controller, "/git:foo");
+
+    expect(harness.calls.some((call) => call.text === "/git:foo only works in the terminal.")).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    run.mockRestore();
+  });
+
   it("answers /cd on OMP with the /move hint and does not dispatch it", async () => {
     const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
     const submit = vi.fn(() => true);
@@ -339,5 +357,57 @@ describe("Terminal-only commands from Telegram", () => {
 
     expect(nativeCd).toHaveBeenCalledTimes(1);
     expect(harness.calls.some((call) => call.text?.includes("only works in the terminal"))).toBe(false);
+  });
+});
+
+describe("Colon-suffixed host commands (/force:read)", () => {
+  const SHARED_STATE_KEY = "__piTelegramPlusTuiBridgeState";
+
+  it("hands /force:read to the host editor as typed, not as a prompt", async () => {
+    // The gateway needs a captured host editor; write a fake one into the shared
+    // bridge state and restore it afterwards, as the local TUI test does.
+    const state = (globalThis as unknown as Record<string, Record<string, unknown>>)[SHARED_STATE_KEY];
+    const saved = { host: state.host, mode: state.mode, ui: state.ui, editor: state.editor };
+    Object.assign(state, { host: "omp", mode: {}, ui: {}, editor: { onSubmit: vi.fn(() => undefined) } });
+    try {
+      const submit = vi.fn(() => true);
+      const harness = createHarness({
+        bridge: createBridge({
+          submit,
+          getHost: () => "omp",
+          getCommands: async () => [{ name: "force", description: "Force the next turn", source: "builtin" as const }],
+        }),
+      });
+
+      await send(harness.controller, "/force:read check hello.txt");
+
+      expect(submit).toHaveBeenCalledWith("/force:read check hello.txt");
+      expect(harness.session.prompt).not.toHaveBeenCalled();
+    } finally {
+      Object.assign(state, saved);
+    }
+  });
+
+  it("keeps the old behaviour when the host has no command for the base name", async () => {
+    const state = (globalThis as unknown as Record<string, Record<string, unknown>>)[SHARED_STATE_KEY];
+    const saved = { host: state.host, mode: state.mode, ui: state.ui, editor: state.editor };
+    Object.assign(state, { host: "omp", mode: {}, ui: {}, editor: { onSubmit: vi.fn(() => undefined) } });
+    try {
+      const submit = vi.fn(() => true);
+      const harness = createHarness({
+        bridge: createBridge({
+          submit,
+          getHost: () => "omp",
+          getCommands: async () => [{ name: "force", description: "Force the next turn", source: "builtin" as const }],
+        }),
+      });
+
+      await send(harness.controller, "/nosuch:thing hi");
+
+      expect(submit).not.toHaveBeenCalled();
+      expect(harness.session.prompt).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.assign(state, saved);
+    }
   });
 });

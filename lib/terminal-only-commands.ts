@@ -25,7 +25,8 @@ const toCommandName = (name: string): string => name.replace(/_/g, "-").toLowerC
  * `/cd` cannot create a session there.
  */
 export function isTerminalOnlyCommand(name: string, host: TuiHost): boolean {
-  const normalized = toCommandName(name);
+  // `/git:foo` is the host's `/git` with a suffix: judged by its base name.
+  const normalized = toCommandName(name).split(":")[0] ?? "";
   if (TERMINAL_ONLY_COMMANDS.has(normalized)) return true;
   return host === "omp" && normalized === "cd";
 }

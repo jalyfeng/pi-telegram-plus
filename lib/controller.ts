@@ -1481,10 +1481,20 @@ export function createTelegramController(deps: {
     // Every other command the host serves goes to the gateway (§0.1 #4): the
     // host executes it, OutputCapture returns the output and the Broker owns
     // any dialog it raises.
-    const candidates = new Set([name, name.replace(/_/g, "-"), name.replace(/-/g, "_")]);
     const catalog = await bridge.getCommands().catch(() => []);
-    const served = catalog.find((command) => candidates.has(command.name)
-      || (command.aliases ?? []).some((alias) => candidates.has(alias)));
+    const findServed = (commandName: string) => {
+      const candidates = new Set([commandName, commandName.replace(/_/g, "-"), commandName.replace(/-/g, "_")]);
+      return catalog.find((command) => candidates.has(command.name)
+        || (command.aliases ?? []).some((alias) => candidates.has(alias)));
+    };
+    // `/force:read` is the host's `/force` with the `:read` suffix: a host that
+    // takes `/force:read` in its editor serves it under the base name.
+    const colonAt = name.indexOf(":");
+    const exact = findServed(name);
+    const suffixed = !exact && colonAt > 0
+      ? { base: name.slice(0, colonAt), suffix: name.slice(colonAt), served: findServed(name.slice(0, colonAt)) }
+      : undefined;
+    const served = exact ?? suffixed?.served;
     if (served) {
       // §4.5 rule 6: same as the /new gateway path above.
       if (settleOpenDialog(chatId, messageThreadId, sourceMessageId) === "blocked") {
@@ -1493,15 +1503,18 @@ export function createTelegramController(deps: {
       }
       // Telegram cannot spell `-` in a command name, so `scoped-models` is advertised as
       // `scoped_models`. The host only knows its own spelling: submit that one.
+      // A suffixed name keeps its suffix (`force` + `:read`), and usage records the base only.
+      const hostName = suffixed?.served ? `${suffixed.served.name}${suffixed.suffix}` : served.name;
+      const usageName = suffixed?.served ? suffixed.base : name;
       const handled = await commandGateway.run({
-        name: served.name,
+        name: hostName,
         args,
         origin: { chatId, messageThreadId, sourceMessageId },
         transport: deps.transport,
       });
       if (handled) {
         ctrlLog.debug("command route", { name, route: "gateway" });
-        recordCommandUsage(name);
+        recordCommandUsage(usageName);
         return true;
       }
     }
