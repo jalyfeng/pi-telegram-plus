@@ -610,7 +610,8 @@ export function registerTelegramRenderer(
     showFinalError(turn, error, false);
   };
 
-  const onSessionEvent = (event: any): void => {
+  const onSessionEvent = (event: any, via: "pi.on" | "subscribe"): void => {
+    renderLog.debug("retry event received", { host: hostName, via, type: event?.type });
     try {
       switch (event?.type) {
         case "auto_retry_start":
@@ -632,7 +633,10 @@ export function registerTelegramRenderer(
    * when the next run starts. OMP never reaches this (its events arrive through pi.on).
    */
   const attachRetryEvents = (): void => {
-    if (hostIsOmp) return;
+    if (hostIsOmp) {
+      renderLog.debug("retry events not subscribed: OMP delivers them through pi.on", { host: hostName });
+      return;
+    }
     const session = deps.getSession?.();
     if (retrySession?.session === session) return;
     retrySession?.unsubscribe();
@@ -641,22 +645,40 @@ export function registerTelegramRenderer(
       renderLog.debug("retry events not subscribed: no session with subscribe", { host: hostName, hasSession: session !== undefined });
       return;
     }
-    retrySession = { session, unsubscribe: session.subscribe(onSessionEvent) };
+    retrySession = { session, unsubscribe: session.subscribe((event: any) => onSessionEvent(event, "subscribe")) };
     renderLog.debug("retry events subscribed to the session", { host: hostName });
   };
 
-  // OMP: the retry events and the settled agent_end come through extension handlers.
-  // pi 1.4.0 has no such extension events (its agent_end precedes the retry decision),
-  // so there they come from the session subscription above.
+  // The retry events arrive through extension handlers on OMP. pi 1.4.0 never emits them
+  // there (it has no such extension events), so on pi they stay unused and come from the
+  // session subscription above. The names are registered on both hosts: they cannot fire
+  // on pi, and this keeps OMP from depending on the host check for them. The settled
+  // agent_end is OMP-only: pi's extension agent_end precedes the retry decision.
+  // OMP's extension API declares these events; pi's typed API does not, so they are named untyped here.
+  const onHostEvent = (pi as unknown as { on(event: string, handler: (event: any) => Promise<void>): unknown }).on;
+  onHostEvent.call(pi, "auto_retry_start", async (event: any) => {
+    renderLog.debug("handler auto_retry_start", { host: hostName });
+    onSessionEvent(event, "pi.on");
+  });
+  onHostEvent.call(pi, "auto_retry_end", async (event: any) => {
+    renderLog.debug("handler auto_retry_end", { host: hostName });
+    onSessionEvent(event, "pi.on");
+  });
   if (hostIsOmp) {
-    // OMP's extension API declares these events; pi's typed API does not, so they are named untyped here.
-    const onHostEvent = (pi as unknown as { on(event: string, handler: (event: any) => Promise<void>): unknown }).on;
-    onHostEvent.call(pi, "auto_retry_start", async (event: any) => { onSessionEvent(event); });
-    onHostEvent.call(pi, "auto_retry_end", async (event: any) => { onSessionEvent(event); });
-    onHostEvent.call(pi, "agent_end", async (event: any) => { onSessionEvent(event); });
+    onHostEvent.call(pi, "agent_end", async (event: any) => {
+      renderLog.debug("handler agent_end", { host: hostName });
+      onSessionEvent(event, "pi.on");
+    });
   }
+  renderLog.debug("renderer retry handlers registered", {
+    host: hostName,
+    isOmp: hostIsOmp,
+    piOn: hostIsOmp ? ["auto_retry_start", "auto_retry_end", "agent_end"] : ["auto_retry_start", "auto_retry_end"],
+    subscribe: !hostIsOmp,
+  });
 
   pi.on("agent_start", async () => {
+    renderLog.debug("handler agent_start", { host: hostName });
     try {
     sentInlineEvents.clear();
     toolArgs.clear();
@@ -773,6 +795,8 @@ ${stringifyShort(text, 700)}`);
   };
 
   pi.on("message_end", async (event) => {
+    const messageEndInfo = event.message as AnyMessage;
+    renderLog.debug("handler message_end", { host: hostName, role: messageEndInfo?.role, stopReason: messageEndInfo?.stopReason });
     try {
     const message = event.message as AnyMessage;
     if (message.role === "user") {
@@ -784,6 +808,7 @@ ${stringifyShort(text, 700)}`);
     // The TUI never shows them as conversation — suppress them while agent
     // activity is in flight and the main loop is idle.
     if (isBackgroundAgentActivity()) {
+      renderLog.debug("message_end skipped: background agent activity", { host: hostName, stopReason: message.stopReason });
       await maybeSendWorkflowNotice();
       return;
     }

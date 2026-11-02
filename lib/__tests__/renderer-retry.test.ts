@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createTurnNotice } from "../controller.ts";
 import { escapeHtml } from "../html.ts";
+import { mainOnlyEvents } from "../main-only-pi.ts";
 import { registerTelegramRenderer } from "../renderer.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "../turn-context.ts";
 import type { TelegramTransport, TelegramTurn } from "../types.ts";
@@ -330,5 +331,80 @@ describe("Telegram renderer: provider error and auto-retry status (P2-5)", () =>
       });
       expect(session.listenerCount()).toBe(0);
     });
+  });
+});
+
+/**
+ * OMP's extension runner in miniature: handlers are kept per event name, and each handler
+ * is called with (event, ctx). The renderer gets the same `pi` that index.ts gives it, which
+ * is the mainOnlyEvents wrapper, so a sub-agent ctx is filtered out there as on OMP.
+ */
+describe("OMP delivery through the main-only wrapper (host-free)", () => {
+  function ompRunner() {
+    const handlers = new Map<string, Array<(event: any, ctx: any) => Promise<void>>>();
+    const rawPi = {
+      on: (event: string, handler: (event: any, ctx: any) => Promise<void>) => {
+        const list = handlers.get(event) ?? [];
+        list.push(handler);
+        handlers.set(event, list);
+        return () => undefined;
+      },
+    };
+    const dispatch = async (event: { type: string; [key: string]: unknown }, ctx: unknown = { agent: { kind: "main" } }) => {
+      for (const handler of handlers.get(event.type) ?? []) await handler(event, ctx);
+    };
+    return { pi: mainOnlyEvents(rawPi as any), dispatch, handlers };
+  }
+
+  it("auto_retry_* and the settled agent_end reach the renderer when dispatched the way OMP does", async () => {
+    const runner = ompRunner();
+    const sent: string[] = [];
+    const edits: string[] = [];
+    const transport = {
+      sendText: async (_chatId: number, text: string) => { sent.push(text); return [{ message_id: 500 }]; },
+      editText: async (_chatId: number, _messageId: number, text: string) => { edits.push(text); },
+    } as unknown as TelegramTransport;
+    registerTelegramRenderer(runner.pi, {
+      isOmp: true,
+      getConfig: () => ({ botToken: "token", activeChatId: 111, tool: "brief", thinking: "brief" }),
+      transport,
+      getActiveTurn: () => getCurrentTelegramTurn(),
+      hasActiveTurns: () => true,
+    });
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await runWithTelegramTurn(turn, async () => {
+      await runner.dispatch({ type: "agent_start" });
+      await runner.dispatch({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: ERROR } });
+      await runner.dispatch({ type: "auto_retry_start", attempt: 1, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR });
+      await runner.dispatch({ type: "auto_retry_end", success: false, attempt: 1, finalError: ERROR });
+      await runner.dispatch({ type: "agent_end", messages: [], willContinue: undefined });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("Retrying (1/10)");
+    expect(edits.at(-1)!.startsWith("❌ ")).toBe(true);
+  });
+
+  it("a sub-agent ctx is filtered by the wrapper, so its retry events do not touch the main turn", async () => {
+    const runner = ompRunner();
+    const sent: string[] = [];
+    const transport = {
+      sendText: async (_chatId: number, text: string) => { sent.push(text); return [{ message_id: 500 }]; },
+      editText: async () => undefined,
+    } as unknown as TelegramTransport;
+    registerTelegramRenderer(runner.pi, {
+      isOmp: true,
+      getConfig: () => ({ botToken: "token", activeChatId: 111, tool: "brief", thinking: "brief" }),
+      transport,
+      getActiveTurn: () => getCurrentTelegramTurn(),
+      hasActiveTurns: () => true,
+    });
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await runWithTelegramTurn(turn, async () => {
+      await runner.dispatch({ type: "auto_retry_start", attempt: 1, maxAttempts: 10, delayMs: 1000, errorMessage: ERROR }, { agent: { kind: "sub" } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(sent).toHaveLength(0);
   });
 });
