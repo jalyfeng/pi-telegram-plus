@@ -316,17 +316,22 @@ function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire"
   if (!active) {
     return { text: header(model.title, undefined, ["(no questions to show)"]), rows: [cancelRow(ctx)], keyMap: new Map(), page: 0, pages: 1 };
   }
-  const status = model.questions
-    .map((question, index) => `${index === activeIndex ? "▸" : ""}${index + 1}${question.answered ? "✓" : "·"}`)
-    .join(" ");
+  // A single question has no tabs to show: no progress line and no switch row.
+  const multiple = model.questions.length > 1;
+  const answeredCount = model.questions.filter((question) => question.answered).length;
+  const status = multiple
+    ? `Question ${activeIndex + 1} of ${model.questions.length} · answered: ${answeredCount}`
+    : undefined;
   const body = `${escapeHtml(shorten(active.prompt, 300))}\n`;
   const { rows, keyMap } = itemButtons(active.items, 0, ctx, active.multi ? "t" : "c");
-  const switchRow = keep([
-    activeIndex > 0 ? button("◀ Prev question", ctx, "q", String(activeIndex - 1)) : undefined,
-    button(`Question ${activeIndex + 1}/${model.questions.length}`, ctx, "q", String((activeIndex + 1) % model.questions.length)),
-    activeIndex < model.questions.length - 1 ? button("Next question ▶", ctx, "q", String(activeIndex + 1)) : undefined,
-  ]);
-  if (switchRow.length > 0) rows.unshift(switchRow);
+  if (multiple) {
+    const switchRow = keep([
+      activeIndex > 0 ? button("◀ Prev question", ctx, "q", String(activeIndex - 1)) : undefined,
+      button(`Question ${activeIndex + 1}/${model.questions.length}`, ctx, "q", String((activeIndex + 1) % model.questions.length)),
+      activeIndex < model.questions.length - 1 ? button("Next question ▶", ctx, "q", String(activeIndex + 1)) : undefined,
+    ]);
+    if (switchRow.length > 0) rows.unshift(switchRow);
+  }
   const actions: TelegramButton[] = [];
   if (active.allowCustom) {
     const custom = button("✏️ Type an answer", ctx, "i");

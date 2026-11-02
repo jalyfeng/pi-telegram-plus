@@ -192,3 +192,30 @@ describe("describedText redaction of raw text", () => {
     expect(html).toContain("<pre>x=***</pre>");
   });
 });
+
+describe("renderDialog questionnaire progress", () => {
+  const CTX = { sessionId: "s1", generation: 1 };
+  const question = (id: string, answered: boolean) => ({
+    id,
+    prompt: `Pick for ${id}`,
+    items: [{ key: "option:0", label: "red" }, { key: "option:1", label: "green", current: true }],
+    multi: false,
+    allowCustom: true,
+    answered,
+  });
+  const buttonTexts = (rows: { text: string }[][]) => rows.flat().map((button) => button.text);
+
+  it("a single question shows no progress line and no Question 1/1 switch button", () => {
+    const rendered = renderDialog({ kind: "questionnaire", title: "Ask", questions: [question("q", false)], active: 0, canSubmit: false }, CTX);
+    expect(rendered.text).not.toContain("Question 1");
+    expect(rendered.text).not.toContain("▸");
+    expect(buttonTexts(rendered.rows).some((text) => text.includes("Question 1/1"))).toBe(false);
+    expect(buttonTexts(rendered.rows)).toContain("✏️ Type an answer");
+  });
+
+  it("two questions show the position and how many are answered", () => {
+    const rendered = renderDialog({ kind: "questionnaire", title: "Ask", questions: [question("a", false), question("b", false)], active: 0, canSubmit: false }, CTX);
+    expect(rendered.text).toContain("Question 1 of 2 · answered: 0");
+    expect(buttonTexts(rendered.rows)).toContain("Question 1/2");
+  });
+});
