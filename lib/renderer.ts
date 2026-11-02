@@ -204,11 +204,22 @@ function basename(path: string): string {
 /** Hashline patch headers: `[<path>#<TAG>]` at the start of a line. */
 const EDIT_FILE_HEADER = /^\[([^\]\n]+?)#[^\]\n]+\]/gm;
 
+/** Up to three file names, then a count of the rest. */
+function summarizeFileNames(names: string[]): string {
+  const shown = names.slice(0, 3).join(", ");
+  return names.length > 3 ? `${shown} (+${names.length - 3} more)` : shown;
+}
+
 function summarizeEditPatch(input: string): string {
   const files = [...new Set([...input.matchAll(EDIT_FILE_HEADER)].map((match) => basename(match[1])))];
   if (files.length === 0) return "patch";
-  const shown = files.slice(0, 3).join(", ");
-  return files.length > 3 ? `${shown} (+${files.length - 3} more)` : shown;
+  return summarizeFileNames(files);
+}
+
+/** A non-empty array whose items are all non-blank strings, or undefined. */
+function stringListArg(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  return value.every((item) => typeof item === "string" && item.trim().length > 0) ? value as string[] : undefined;
 }
 
 function summarizeTodo(a: ToolArgs): string {
@@ -222,7 +233,7 @@ function summarizeTodo(a: ToolArgs): string {
   }
   if (op === "append") {
     const count = Array.isArray(a.items) ? a.items.length : 0;
-    return `append ${count} items`;
+    return `append ${count} ${count === 1 ? "item" : "items"}`;
   }
   const task = typeof a.task === "string" ? firstLine(a.task) : "";
   return task ? `${op}: ${task}` : op;
@@ -272,8 +283,17 @@ function toolArgsText(toolName: string, a: ToolArgs): string {
     }
     case "write":
       return str("path");
-    case "edit":
-      return summarizeEditPatch(str("input"));
+    case "edit": {
+      // pi edit: { path, edits }. OMP edit: hashline patch in `input`.
+      const path = str("path");
+      if (!path) return summarizeEditPatch(str("input"));
+      const edits = Array.isArray(a.edits) ? a.edits.length : 0;
+      return edits > 1 ? `${path} (${edits} edits)` : path;
+    }
+    case "tg_attach": {
+      const paths = stringListArg(a.paths);
+      return paths ? summarizeFileNames(paths.map(basename)) : "";
+    }
     case "bash":
       return firstLine(str("command"));
     case "eval": {
@@ -286,12 +306,15 @@ function toolArgsText(toolName: string, a: ToolArgs): string {
     }
     case "glob":
       return str("path") || str("pattern");
-    case "grep": {
+    case "grep":
+    case "find": {
       const pattern = firstLine(str("pattern"));
       const path = str("path");
       if (!pattern) return path;
       return path ? `"${pattern}" in ${path}` : `"${pattern}"`;
     }
+    case "ls":
+      return str("path");
     case "todo":
       return summarizeTodo(a);
     case "wait":
@@ -302,12 +325,20 @@ function toolArgsText(toolName: string, a: ToolArgs): string {
       return firstLine(str("query"));
     case "task":
       return summarizeTask(a);
-    default:
-      return firstStringArg(a);
+    default: {
+      const first = firstStringArg(a);
+      if (first) return first;
+      for (const [key, value] of Object.entries(a)) {
+        if (key === "i") continue;
+        const list = stringListArg(value);
+        if (list) return summarizeFileNames(list.map(basename));
+      }
+      return "";
+    }
   }
 }
 
-function summarizeToolArgs(toolName: string, args: unknown, max = 96): string {
+export function summarizeToolArgs(toolName: string, args: unknown, max = 96): string {
   if (!args || typeof args !== "object") return "";
   return shortenSummary(toolArgsText(toolName, args as ToolArgs), max);
 }
