@@ -1019,6 +1019,10 @@ describe("who closed a dialog and what they tapped", () => {
       };
       broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
       await settle();
+      // The dialog then says something new on its own, and the next draw shows it.
+      current = { kind: "select", title: "Other sessions", items: [], total: 0 };
+      focus.openDialog(session.focus as Record<string, unknown>);
+      await settle();
       vi.setSystemTime(Date.now() + 2_000);
       focus.closeToEditor();
       await settle();

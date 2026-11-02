@@ -703,9 +703,9 @@ export class DialogBroker {
     // typed answer. It is taken back if the host refuses the tap.
     const previousAction = session.telegramAction;
     const cancelled = resolved.action.type === "cancel";
-    // Taken before the act: a redraw the act causes must not become the baseline the tap is judged by.
-    const drawn = this.contentOf(session);
-    session.telegramAction = { cancelled, drawn };
+    // The baseline (`drawn`) is taken after the act, from the model it leaves behind: what the act
+    // itself changes is part of this tap. Until then the marker has no baseline and no draw judges it.
+    session.telegramAction = { cancelled };
     const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
       session.telegramAction = previousAction;
@@ -728,7 +728,7 @@ export class DialogBroker {
         if (resolved.action.type === "toggle" || resolved.action.type === "cycle" || resolved.action.type === "submenu") {
           session.telegramAction = undefined;
         }
-        this.redraw(session);
+        this.redrawAnswered(session);
       } else {
         this.retire(session, this.deps.focus.current());
       }
@@ -768,7 +768,7 @@ export class DialogBroker {
     const answered = purpose === "input" || purpose === "editor";
     const before = { telegramAction: session.telegramAction, lastAction: session.lastAction, answeredSecret: session.answeredSecret };
     if (answered) {
-      session.telegramAction = { cancelled: false, drawn: this.contentOf(session) };
+      session.telegramAction = { cancelled: false };
       // Decided here, while the input is still the secret field: by the time the dialog closes,
       // the model may already show the progress that the submit started.
       session.answeredSecret = secret;
@@ -798,19 +798,20 @@ export class DialogBroker {
       return { handled: true, toast: "The host did not accept this input" };
     }
     if (this.session === session && session.state !== "closed") {
-      if (this.canDrive(session)) this.redrawAfterAnswer(session, answered);
+      if (this.canDrive(session)) this.redrawAnswered(session);
       else this.retire(session, this.deps.focus.current());
     }
     return { handled: true };
   }
 
   /**
-   * The redraw that follows a typed answer. The change it draws is the answer itself, so it must not
-   * consume the answer's marker: the marker is kept and re-anchored to what this draw shows.
+   * The redraw after a tap or a typed answer. Its own change belongs to that answer, so the marker is
+   * set aside while the model is re-read and drawn, then re-anchored to what this draw says: a later
+   * draw that says something different is the dialog moving on.
    */
-  private redrawAfterAnswer(session: DialogSession, answered: boolean): void {
+  private redrawAnswered(session: DialogSession): void {
     const action = session.telegramAction;
-    if (!answered || action === undefined) {
+    if (action === undefined) {
       this.redraw(session);
       return;
     }
@@ -1151,7 +1152,7 @@ export class DialogBroker {
     const signature = `${session.page}|${rendered.text}|${JSON.stringify(rendered.rows)}`;
     // A tap whose dialog says something different from what it said when the tap was made has been
     // answered by the host: the dialog moved on, so a later close is the terminal's, not that tap's.
-    if (session.telegramAction !== undefined && session.telegramAction.drawn !== this.contentOf(session)) {
+    if (session.telegramAction?.drawn !== undefined && session.telegramAction.drawn !== this.contentOf(session)) {
       session.telegramAction = undefined;
     }
     const fresh = telegram.messageId <= 0;

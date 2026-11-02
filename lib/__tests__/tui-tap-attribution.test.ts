@@ -98,7 +98,7 @@ async function open(
   // The refresh draws the dialog with its real model, which is what the user is tapping.
   await vi.advanceTimersByTimeAsync(1100);
   const tap = (op: string, arg?: string) => broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op, arg });
-  return { broker, focus, edits, session, tap, last: () => edits.filter((edit) => edit.kind === "editButtons" || edit.kind === "editText").at(-1)?.text ?? "" };
+  return { broker, focus, edits, session, tap, setModel: replace, last: () => edits.filter((edit) => edit.kind === "editButtons" || edit.kind === "editText").at(-1)?.text ?? "" };
 }
 
 beforeEach(() => {
@@ -143,6 +143,31 @@ describe("a Telegram tap's own close is a normal answer", () => {
 });
 
 describe("a Telegram tap stays the cause of the close until the dialog says something new", () => {
+  it("keeps a pick's close as Telegram's when the act itself leaves the picker's state", async () => {
+    const choosing: DialogModel = {
+      kind: "select",
+      title: "Model",
+      subtitle: "Set as default: choose one",
+      items: [{ key: "a", label: "mock/mock" }, { key: "b", label: "mock/mock-model-2" }],
+      total: 2,
+    };
+    const list: DialogModel = { kind: "select", title: "Model", items: choosing.items, total: 2 };
+    const ctx = await open((_action, host) => {
+      // Choosing a row leaves the picker's own state: the subtitle and the buttons go back to the list.
+      host.setModel(list);
+      return true;
+    }, choosing);
+
+    expect(ctx.tap("c", "0.1")).toEqual({ handled: true });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(ctx.session.telegramAction).toBeDefined();
+    ctx.focus.closeToEditor();
+    await vi.advanceTimersByTimeAsync(1500);
+
+    expect(ctx.last()).toContain("✅");
+    expect(ctx.last()).not.toContain("Answered in the terminal");
+  });
+
   it("keeps a pick's close as Telegram's when the act only moves the terminal cursor and redraws", async () => {
     const picker = (focused: number): DialogModel => ({
       kind: "select",
@@ -169,14 +194,19 @@ describe("a Telegram tap stays the cause of the close until the dialog says some
     expect(ctx.last()).not.toContain("Answered in the terminal");
   });
 
-  it("counts the terminal's close as the terminal's after a tap moved the dialog to another model", async () => {
+  it("counts the terminal's close as the terminal's after a draw says something new following the tap", async () => {
     const ctx = await open((action, host) => {
-      // Cancel returns to a list the terminal user is still looking at.
+      // Cancel returns to a list: that list is what the tap leaves behind, the baseline it is judged by.
       if (action.type === "cancel") host.setModel({ kind: "confirm", title: "Back to the list?" });
       return true;
     });
     ctx.tap("x");
     await vi.advanceTimersByTimeAsync(1500);
+    expect(ctx.session.telegramAction).toBeDefined();
+
+    // The dialog moves on again on its own, and the next draw shows it.
+    ctx.setModel({ kind: "confirm", title: "Another question?" });
+    await vi.advanceTimersByTimeAsync(1100);
     expect(ctx.session.telegramAction).toBeUndefined();
 
     ctx.focus.closeToEditor();
