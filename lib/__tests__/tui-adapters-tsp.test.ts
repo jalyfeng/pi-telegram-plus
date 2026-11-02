@@ -646,6 +646,66 @@ describe("tsp prefs act", () => {
   });
 });
 
+describe("tsp prefs choice list", () => {
+  const themes = ["alabaster", "amethyst", "anthracite", "dark", "light"];
+  const themeProps = (options: string[], value: string) => ({
+    title: "Settings",
+    pages: [],
+    page: "general",
+    sections: [
+      {
+        id: "s",
+        title: "Appearance",
+        rows: [
+          { id: "theme", label: "Dark Theme", control: { k: "choice", value, options: options.map((v) => ({ value: v, label: v })) } },
+        ],
+      },
+    ],
+  });
+
+  it("opens a list on the row for a choice with more than two options", () => {
+    const host = makePrefsHost(themeProps(themes, "dark"));
+    const row = asSettings(tspPrefsAdapter.read(host, ctxFor())).items.find((item) => item.key === "theme");
+    expect(row).toEqual({ key: "theme", label: "Dark Theme", value: "dark", hasSubmenu: true, group: "Appearance" });
+  });
+
+  it("shows every option in the submenu with the current one marked", () => {
+    const host = makePrefsHost(themeProps(themes, "dark"));
+    expect(tspPrefsAdapter.act(host, { type: "submenu", key: "theme" }, ctxFor())).toBe(true);
+    const model = asSettings(tspPrefsAdapter.read(host, ctxFor()));
+    expect(model.submenu?.itemKey).toBe("theme");
+    const list = model.submenu?.model;
+    if (list?.kind !== "select") throw new Error("expected a select submenu");
+    expect(list.multi).toBeFalsy();
+    expect(list.items.map((item) => item.key)).toEqual(themes);
+    expect(list.items.filter((item) => item.current).map((item) => item.key)).toEqual(["dark"]);
+  });
+
+  it("sends the chosen option's value and closes the submenu", () => {
+    const host = makePrefsHost(themeProps(themes, "dark"));
+    tspPrefsAdapter.act(host, { type: "submenu", key: "theme" }, ctxFor());
+    expect(tspPrefsAdapter.act(host, { type: "choose", key: "anthracite" }, ctxFor())).toBe(true);
+    expect(host.events).toEqual([{ type: "change", key: "", item: "theme", value: "anthracite" }]);
+    const model = asSettings(tspPrefsAdapter.read(host, ctxFor()));
+    expect(model.submenu).toBeUndefined();
+    expect(model.items.find((item) => item.key === "theme")?.value).toBe("anthracite");
+  });
+
+  it("refuses a choose key that is not one of the options", () => {
+    const host = makePrefsHost(themeProps(themes, "dark"));
+    tspPrefsAdapter.act(host, { type: "submenu", key: "theme" }, ctxFor());
+    expect(tspPrefsAdapter.act(host, { type: "choose", key: "purple" }, ctxFor())).toBe(false);
+    expect(host.events).toEqual([]);
+  });
+
+  it("keeps a two-option choice as a pair of values with no submenu", () => {
+    const host = makePrefsHost(themeProps(["dark", "light"], "dark"));
+    const row = asSettings(tspPrefsAdapter.read(host, ctxFor())).items.find((item) => item.key === "theme");
+    expect(row).toEqual({ key: "theme", label: "Dark Theme", value: "dark", values: ["dark", "light"], group: "Appearance" });
+    expect(tspPrefsAdapter.act(host, { type: "submenu", key: "theme" }, ctxFor())).toBe(false);
+  });
+});
+
 /** A page holding one row of each editable control kind, plus a read-only `keys` row. */
 function controlProps() {
   return {

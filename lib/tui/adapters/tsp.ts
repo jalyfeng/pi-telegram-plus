@@ -772,6 +772,11 @@ function choiceOptions(control: HostRecord): { value: string; label: string; det
   return usable;
 }
 
+/** A choice with more than two options opens a list on Telegram; two stay a pair of values. */
+function choiceOpensList(control: HostRecord): boolean {
+  return choiceOptions(control).length > 2;
+}
+
 /** How many steps a number control may enumerate as buttons before the input opens instead. */
 const MAX_NUMBER_STEPS = 12;
 
@@ -847,7 +852,7 @@ function prefsChangeAdopted(owner: object, rowId: string, value: unknown): boole
 }
 
 /** The row kinds whose editor this adapter keeps on the Telegram side. */
-type PrefsSubmenuKind = "text" | "number" | "multi";
+type PrefsSubmenuKind = "text" | "number" | "multi" | "choice";
 
 /** The submenu open on the plugin side, per prefs component: the row it edits and its kind. */
 const prefsSubmenus = new WeakMap<object, { rowId: string; kind: PrefsSubmenuKind }>();
@@ -887,12 +892,9 @@ function prefsControlItem(row: PrefsRowLike): DialogItem & { values?: string[]; 
   if (control?.k === "choice") {
     const options = choiceOptions(control);
     const current = options.find((option) => option.value === control.value);
-    return {
-      key,
-      label,
-      value: current ? current.label : typeof control.value === "string" ? control.value : "",
-      values: options.map((option) => option.label),
-    };
+    const value = current ? current.label : typeof control.value === "string" ? control.value : "";
+    if (choiceOpensList(control)) return { key, label, value, hasSubmenu: true };
+    return { key, label, value, values: options.map((option) => option.label) };
   }
   if (control?.k === "number" && typeof control.value === "number") {
     const steps = numberSteps(control);
@@ -966,6 +968,15 @@ function prefsSubmenuModel(owner: object, props: PrefsProps): { itemKey: string;
     return undefined;
   }
   const title = tspText(row.label);
+  if (state.kind === "choice") {
+    const items = choiceOptions(control).map((option) => ({
+      key: option.value,
+      label: option.label,
+      current: option.value === control.value,
+      ...(option.detail ? { note: option.detail } : {}),
+    }));
+    return { itemKey: state.rowId, model: { kind: "select", title, items, total: items.length } };
+  }
   if (state.kind === "multi") {
     const selected = multiSelected(control);
     const items = choiceOptions(control).map((option) => ({
@@ -1031,8 +1042,15 @@ function prefsSubmenuAct(
     prefsSubmenus.delete(owner);
     return true;
   }
+  if (action.type === "choose" && state.kind === "choice") {
+    const chosen = choiceOptions(control).find((option) => option.value === action.key);
+    if (!chosen) return false;
+    if (!sendChange(chosen.value)) return false;
+    prefsSubmenus.delete(owner);
+    return true;
+  }
   if (action.type === "submit" && typeof action.text === "string") {
-    if (state.kind === "multi") return false;
+    if (state.kind === "multi" || state.kind === "choice") return false;
     let value: string | number = action.text;
     if (state.kind === "number") {
       const parsed = Number(action.text);
@@ -1145,7 +1163,12 @@ export const tspPrefsAdapter: DialogAdapter = {
         // An action control fires its own event with its row id as `value`
         // (what the native backend sends when its button is pressed).
         target = { type: "action", key: keypath, act: control.act, value: row.id, mods: [] };
-      } else if (control.k === "text" || control.k === "number" || control.k === "multi") {
+      } else if (
+        control.k === "text"
+        || control.k === "number"
+        || control.k === "multi"
+        || (control.k === "choice" && choiceOpensList(control))
+      ) {
         // The host's editor is a terminal widget Telegram cannot type into
         // later; keep the input on this side and remember the row it edits.
         prefsSubmenus.set(owner, { rowId: row.id as string, kind: control.k });
