@@ -16,6 +16,7 @@ type AnyMessage = {
   role?: string;
   content?: unknown;
   errorMessage?: string;
+  stopReason?: string;
   usage?: { cost?: { total?: number }; totalTokens?: number };
   model?: string;
   provider?: string;
@@ -353,7 +354,12 @@ export function registerTelegramRenderer(
     transport: TelegramTransport;
     getActiveTurn: (chatId?: number, messageThreadId?: number) => TelegramTurn | undefined;
     hasActiveTurns?: () => boolean;
-    getSession?: () => { isStreaming: boolean; extensionRunner: { createCommandContext(): unknown } } | undefined;
+    /** `subscribe` carries the host's session events, including auto-retry start/end (P2-5). */
+    getSession?: () => {
+      isStreaming: boolean;
+      extensionRunner: { createCommandContext(): unknown };
+      subscribe?: (listener: (event: any) => void) => () => void;
+    } | undefined;
     /** Shared secret store, so assistant replies are redacted too (§4.7.4). */
     secrets?: SecretStore;
   },
@@ -486,16 +492,121 @@ export function registerTelegramRenderer(
     for (const event of events) await sendInlineEvent(event);
   };
 
-  pi.on("agent_start", async () => {
-    try {
-    sentInlineEvents.clear();
-    toolArgs.clear();
-    toolUpdateAt.clear();
+  // ── Provider error and auto-retry status (P2-5) ─────────────────────────
+  // A failed attempt is not sent as a message of its own. One status message
+  // per turn shows what became of it: retrying, recovered, or one final ❌.
+  // The host orders its events so that the failed assistant message_end comes
+  // first; auto_retry_start follows only if the attempt is retried; agent_end
+  // then settles the run, with willRetry set when a retry follows.
+  type RetryStatus = { messageId?: number; lastError?: string; queue: Promise<void> };
+  const retryStatuses = new WeakMap<TelegramTurn, RetryStatus>();
+  const noTurnRetryStatus: RetryStatus = { queue: Promise.resolve() };
+  /** Error of a failed attempt not yet retried or settled in the current run. */
+  let pendingError: string | undefined;
+  let retrySession: { session: unknown; unsubscribe: () => void } | undefined;
+
+  const retryStatusFor = (turn: TelegramTurn | undefined): RetryStatus => {
+    if (!turn) return noTurnRetryStatus;
+    let status = retryStatuses.get(turn);
+    if (!status) {
+      status = { queue: Promise.resolve() };
+      retryStatuses.set(turn, status);
+    }
+    return status;
+  };
+
+  /** Sends the turn's status message once, then edits it in place. Writes run in order. */
+  const writeRetryStatus = (turn: TelegramTurn | undefined, html: string): Promise<void> => {
+    const status = retryStatusFor(turn);
+    status.queue = status.queue.then(async () => {
+      if (!turn) {
+        await sendDefault(html);
+        return;
+      }
+      if (status.messageId === undefined && turn.replaceMessageId !== undefined) {
+        status.messageId = turn.replaceMessageId;
+        turn.replaceMessageId = undefined;
+      }
+      if (status.messageId !== undefined) {
+        try {
+          await deps.transport.editText(turn.chatId, status.messageId, html);
+          return;
+        } catch (err) {
+          renderLog.debug("retry status edit failed; sending a new message", { err });
+          status.messageId = undefined;
+        }
+      }
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId);
+      status.messageId = sent[0]?.message_id;
+    }).catch(renderLog.swallow("warn", "retry status write failed"));
+    return status.queue;
+  };
+
+  const headline = (text: string, max: number): string => shortenSummary(firstLine(text), max);
+
+  /** Redacts, then escapes: the one way a retry-status text reaches Telegram. */
+  const retryHtml = (turn: TelegramTurn | undefined, text: string): string => escapeHtml(redactFor(turn, text));
+
+  const showFinalError = (turn: TelegramTurn | undefined, error: string, fromRetryNotice: boolean): void => {
+    // Recorded synchronously: the host's own "Retry failed" notice is forwarded in the same emit.
+    if (turn && fromRetryNotice) turn.finalErrorShown = redactFor(turn, error);
+    void writeRetryStatus(turn, `❌ ${retryHtml(turn, headline(error, 1000))}`);
+  };
+
+  const onRetryStart = (event: { attempt: number; maxAttempts: number; delayMs: number; errorMessage?: string }): void => {
     const turn = deps.getActiveTurn();
-    if (!turn) return;
-    if (turn.replaceMessageId !== undefined) await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Working…</b>");
-    } catch (err) { renderLog.warn("render status-clear handler failed", { err }); }
-  });
+    const error = headline(event.errorMessage ?? "", 200) || "Unknown error";
+    retryStatusFor(turn).lastError = error;
+    pendingError = undefined;
+    const seconds = Math.round(event.delayMs / 1000);
+    void writeRetryStatus(turn, `⚠️ ${retryHtml(turn, error)}\nRetrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s…`);
+  };
+
+  const onRetryEnd = (event: { success: boolean; attempt: number; finalError?: string }): void => {
+    const turn = deps.getActiveTurn();
+    const status = retryStatusFor(turn);
+    pendingError = undefined;
+    if (event.success) {
+      const retries = event.attempt;
+      const lastError = status.lastError ?? "Unknown error";
+      void writeRetryStatus(turn, `⚠️ ${retryHtml(turn, lastError)}\nRecovered after ${retries} ${retries === 1 ? "retry" : "retries"}.`);
+      return;
+    }
+    if (event.finalError === "Retry cancelled") {
+      void writeRetryStatus(turn, "⏹️ Retry cancelled.");
+      return;
+    }
+    showFinalError(turn, event.finalError || "Unknown error", true);
+  };
+
+  /** agent_end without a retry after a failed attempt: that error is final. */
+  const onRunSettled = (event: { willRetry?: boolean }): void => {
+    if (pendingError === undefined || event.willRetry === true) return;
+    const error = pendingError;
+    pendingError = undefined;
+    showFinalError(deps.getActiveTurn(), error, false);
+  };
+
+  const onSessionEvent = (event: any): void => {
+    try {
+      switch (event?.type) {
+        case "auto_retry_start": onRetryStart(event); break;
+        case "auto_retry_end": onRetryEnd(event); break;
+        case "agent_end": onRunSettled(event); break;
+        default: break;
+      }
+    } catch (err) { renderLog.warn("render retry event failed", { err }); }
+  };
+
+  /** Follows the active main session. A replaced session is unsubscribed when the next run starts. */
+  const attachRetryEvents = (): void => {
+    const session = deps.getSession?.();
+    if (retrySession?.session === session) return;
+    retrySession?.unsubscribe();
+    retrySession = undefined;
+    if (!session || typeof session.subscribe !== "function") return;
+    retrySession = { session, unsubscribe: session.subscribe(onSessionEvent) };
+  };
 
   pi.on("agent_start", async () => {
     try {
@@ -503,6 +614,8 @@ export function registerTelegramRenderer(
     toolArgs.clear();
     toolUpdateAt.clear();
     workflowNoticeSent = false;
+    pendingError = undefined;
+    attachRetryEvents();
     const turn = deps.getActiveTurn();
     if (!turn) return;
     if (turn.replaceMessageId !== undefined) await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Working…</b>");
@@ -632,9 +745,15 @@ ${stringifyShort(text, 700)}`);
     // toolCall blocks here as well would print every call twice.
     const rendered = contentToRenderParts(message.content, thinkingLevel, "brief", { includeToolCalls: false });
     await sendInlineEvents(rendered.inlineEvents);
+    // A failed attempt with no text is not sent as a message of its own: the
+    // retry events decide what it becomes (see onRetryStart / onRunSettled).
+    if (message.stopReason === "error" && rendered.body.trim() === "" && contentImages(message.content).length === 0) {
+      pendingError = message.errorMessage || "Unknown error";
+      return;
+    }
     // Redact the whole reply (prose *and* the oversized code blocks pulled out
     // of it below) before it is converted to HTML or sent as Markdown (§4.7.4).
-    const rawBody = redactFor(deps.getActiveTurn(), rendered.body || message.errorMessage || "");
+    const rawBody = redactFor(deps.getActiveTurn(), rendered.body);
     // Pull oversized code blocks out of the body before rendering: they'd
     // otherwise be split across many <pre> messages (painful on mobile). They
     // are sent as downloadable files after the body.

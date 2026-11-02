@@ -72,7 +72,13 @@ export type OutputPager = (target: { chatId: number; messageThreadId?: number; m
 type OutputTransport = Pick<TelegramTransport, "sendText" | "editText" | "sendDocument">;
 
 /** The Telegram turn a host notice belongs to (the turn's chat, topic and source message). */
-export type NoticeTarget = { chatId: number; messageThreadId?: number; sourceMessageId?: number };
+export type NoticeTarget = {
+  chatId: number;
+  messageThreadId?: number;
+  sourceMessageId?: number;
+  /** Live: the final auto-retry error the turn already shows (see TelegramTurn.finalErrorShown). */
+  readonly finalErrorShown?: string;
+};
 
 /** Host notices (`showStatus` / `showError` / `showWarning`) raised while a Telegram turn
  * runs, outside any command scope. Without it they would be dropped (#33). */

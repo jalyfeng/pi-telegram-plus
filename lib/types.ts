@@ -191,6 +191,11 @@ export type TelegramTurn = {
   pendingReplyTargets?: Array<{ text: string; messageId: number }>;
   /** Message to edit in-place for callback-button initiated turns. */
   replaceMessageId?: number;
+  /**
+   * The redacted final error of this turn's failed auto-retry, once the renderer has shown
+   * it. The host's own "Retry failed" notice for the same error is then not sent again.
+   */
+  finalErrorShown?: string;
   queuedAttachments: Array<{ path: string; fileName: string }>;
   attachmentsSent?: boolean;
 };
