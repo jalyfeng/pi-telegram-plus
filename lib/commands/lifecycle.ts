@@ -1,5 +1,6 @@
 import { getCurrentTelegramTurn } from "../turn-context.ts";
 import { queuePendingNotice } from "../pending-notices.ts";
+import { isOmpHost } from "../session-capture.ts";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { CommandRegistry } from "./register.ts";
 
@@ -55,18 +56,19 @@ export function registerLifecycleCommands(registry: CommandRegistry): void {
   // so an accidental tap should not kill the host silently.
   const shutdownAfterConfirm = async (_args: string, ctx: ExtensionCommandContext): Promise<void> => {
     const ui = ctx.ui;
-    const confirmed = await ui.confirm("Quit pi?", "pi will exit and Telegram will stop responding.");
+    const host = isOmpHost() ? "omp" : "pi";
+    const confirmed = await ui.confirm(`Quit ${host}?`, `${host} will exit and Telegram will stop responding.`);
     if (confirmed) {
       ctx.shutdown();
-      ui.notify("Shutdown requested. If pi keeps running, stop it from the TUI/terminal.", "info");
+      ui.notify(`Shutdown requested. If ${host} keeps running, stop it from the TUI/terminal.`, "info");
     }
   };
   registry.registerCommand("quit", {
-    description: "Shut down pi",
+    description: "Shut down the host after confirmation",
     handler: shutdownAfterConfirm,
   });
   registry.registerCommand("exit", {
-    description: "Shut down pi",
+    description: "Shut down the host after confirmation",
     handler: shutdownAfterConfirm,
   });
 

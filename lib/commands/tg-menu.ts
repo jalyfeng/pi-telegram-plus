@@ -12,6 +12,7 @@ import type { TuiHost } from "../tui-bridge.ts";
 import { configToolFlow, configThinkingFlow, configRetryFlow, configBashFlow, configModeFlow } from "./tg-config.ts";
 import { formatPairingInstructions } from "../pairing.ts";
 import { formatDebugReport } from "./info.ts";
+import { recordTelegramCommandDescription } from "../telegram-command-descriptions.ts";
 import {
   addBotFlow,
   clearBotDefaultFlow,
@@ -138,6 +139,7 @@ export function registerTgMenuCommand(
   commandDeps?: CommandMenuDeps,
   sessionDeps?: SessionDeps,
 ): void {
+  recordTelegramCommandDescription("tg", "Open the Telegram management menu");
   registry.registerCommand("tg", {
     description: "Open the Telegram management menu",
     handler: (_args, ctx) => runTgMenu(

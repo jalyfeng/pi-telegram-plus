@@ -4,6 +4,7 @@ import { log } from "./logger.ts";
 import { loadRecentCommands } from "./command-usage.ts";
 import { getTuiCommands, tuiBridge, type TuiCommand, type TuiHost } from "./tui-bridge.ts";
 import { isTerminalOnlyCommand } from "./terminal-only-commands.ts";
+import { getTelegramCommandDescriptions } from "./telegram-command-descriptions.ts";
 
 const menuLog = log.child("menu-commands");
 
@@ -73,6 +74,8 @@ export type MenuCommandOptions = {
   tuiCommands?: readonly TuiCommand[];
   /** Host kind; decides which terminal-only commands are left out. Defaults to "unknown". */
   host?: TuiHost;
+  /** Descriptions the plugin registered for the commands it serves on Telegram, keyed by command name. */
+  pluginDescriptions?: ReadonlyMap<string, string>;
 };
 
 export type TelegramMenuBuildResult = {
@@ -88,12 +91,21 @@ export function buildTelegramMenuCommandsFull(
 ): TelegramMenuBuildResult {
   const commands = new Map<string, string>();
   const host = options.host ?? "unknown";
+  // The single place that decides a menu description. A command the plugin serves
+  // on Telegram shows the plugin's own text: the host's text describes the
+  // terminal command. Otherwise the host's text, then the static fallback.
+  const pluginDescriptions = new Map<string, string>();
+  for (const [name, description] of options.pluginDescriptions ?? []) {
+    const n = toTelegramCommandName(name);
+    if (n && description.trim()) pluginDescriptions.set(n, description.trim());
+  }
   const addCommand = (name: string, description?: string) => {
     const telegramName = toTelegramCommandName(name);
     if (!telegramName || commands.has(telegramName)) return;
     // Terminal-only commands (and /cd on OMP) are never offered in Telegram.
     if (isTerminalOnlyCommand(name, host)) return;
-    commands.set(telegramName, (description?.trim() || `Run /${telegramName}`).slice(0, 256));
+    const text = pluginDescriptions.get(telegramName) || description?.trim() || `Run /${telegramName}`;
+    commands.set(telegramName, text.slice(0, 256));
   };
 
   // When the TUI bridge has captured the host catalog, a static entry the host
@@ -101,24 +113,39 @@ export function buildTelegramMenuCommandsFull(
   // model as prompt text (e.g. `clone` on OMP, or `thinking` where the host has
   // no native command). Filter static entries against the live catalog; keep
   // plugin-served commands. With no captured catalog, keep the curated list.
+  // Host descriptions come from the host's structured lists: pi's getCommands()
+  // (the raw extension text) and OMP's builtin list. The autocomplete text is a
+  // display string: pi prefixes it with a source tag ("[t] ..."), so it is used
+  // only for a name no structured list describes.
   const catalogNames = new Set<string>();
-  const catalogDescriptions = new Map<string, string>();
-  const noteCatalog = (name: string, description?: string) => {
+  const structuredDescriptions = new Map<string, string | undefined>();
+  const autocompleteDescriptions = new Map<string, string>();
+  const noteCatalog = (name: string, description: string | undefined, structured: boolean) => {
     const n = toTelegramCommandName(name);
     if (!n) return;
     catalogNames.add(n);
-    const trimmed = description?.trim();
-    if (trimmed && !catalogDescriptions.has(n)) catalogDescriptions.set(n, trimmed);
+    const trimmed = description?.trim() || undefined;
+    if (structured) {
+      if (!structuredDescriptions.has(n)) structuredDescriptions.set(n, trimmed);
+    } else if (trimmed && !autocompleteDescriptions.has(n)) {
+      autocompleteDescriptions.set(n, trimmed);
+    }
   };
-  for (const command of options.tuiCommands ?? []) noteCatalog(command.name, command.description);
-  for (const command of pi.getCommands()) noteCatalog(command.name, command.description);
+  const hostDescription = (n: string | undefined): string | undefined => {
+    if (!n) return undefined;
+    return structuredDescriptions.has(n) ? structuredDescriptions.get(n) : autocompleteDescriptions.get(n);
+  };
+  for (const command of options.tuiCommands ?? []) {
+    noteCatalog(command.name, command.description, command.source === "builtin");
+  }
+  for (const command of pi.getCommands()) noteCatalog(command.name, command.description, true);
   const catalogAvailable = (options.tuiCommands?.length ?? 0) > 0;
   for (const command of TELEGRAM_MENU_COMMANDS) {
     const n = toTelegramCommandName(command.command);
     if (catalogAvailable && n && !catalogNames.has(n) && !TELEGRAM_SERVED_COMMANDS.has(n)) continue;
     // The static copy is a fallback wording; the live host description wins so
     // the BotMenu never shows text the host itself stopped using.
-    addCommand(command.command, (n ? catalogDescriptions.get(n) : undefined) ?? command.description);
+    addCommand(command.command, hostDescription(n) ?? command.description);
   }
 
   const recentPriority = new Map<string, number>();
@@ -137,7 +164,7 @@ export function buildTelegramMenuCommandsFull(
     if (commands.has(n)) continue;
     if (seenDynamic.has(n)) continue;
     seenDynamic.add(n);
-    dynamic.push({ name: command.name, desc: command.description });
+    dynamic.push({ name: command.name, desc: hostDescription(n) });
   }
   for (const cmd of pi.getCommands()) {
     const n = toTelegramCommandName(cmd.name);
@@ -145,7 +172,7 @@ export function buildTelegramMenuCommandsFull(
     if (commands.has(n)) continue;
     if (seenDynamic.has(n)) continue;
     seenDynamic.add(n);
-    dynamic.push({ name: cmd.name, desc: cmd.description });
+    dynamic.push({ name: cmd.name, desc: hostDescription(n) });
   }
   for (const name of options.recent ?? []) {
     const n = toTelegramCommandName(name);
@@ -211,7 +238,12 @@ async function doSyncTelegramCommands(botToken: string, pi: ExtensionAPI, apiBas
     loadRecentCommands().catch(() => []),
     getTuiCommands().catch(() => []),
   ]);
-  const { commands, overflow } = buildTelegramMenuCommandsFull(pi, { recent, tuiCommands, host: tuiBridge.getHost() });
+  const { commands, overflow } = buildTelegramMenuCommandsFull(pi, {
+    recent,
+    tuiCommands,
+    host: tuiBridge.getHost(),
+    pluginDescriptions: getTelegramCommandDescriptions(),
+  });
   await setTelegramMyCommands(botToken, commands, apiBase);
   menuOverflowByBot.set(syncKey(botToken, apiBase), overflow);
 }

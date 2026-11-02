@@ -10,6 +10,8 @@ import {
   syncTelegramCommands,
 } from "../menu-commands.ts";
 import type * as tuiBridgeModule from "../tui-bridge.ts";
+import { registerAllCommands } from "../commands/register.ts";
+import { getTelegramCommandDescriptions } from "../telegram-command-descriptions.ts";
 
 // v6: the host bridge is the only path for host commands - run these with the bridge up.
 vi.mock("../tui-bridge.ts", async (importOriginal) => {
@@ -371,5 +373,59 @@ describe("terminal-only commands in BotMenu", () => {
     const names = new Set(commands.map((c) => c.command));
     expect(names.has("open")).toBe(false);
     expect(names.has("tools")).toBe(true);
+  });
+});
+
+describe("menu descriptions come from the source that owns them", () => {
+  it("never shows a host source tag for an extension command", () => {
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [hostCommand("foo", "Do foo")] as any },
+      {
+        host: "pi",
+        tuiCommands: [{ name: "foo", description: "[t] Do foo", source: "autocomplete" }],
+      },
+    );
+    expect(commands.find((c) => c.command === "foo")?.description).toBe("Do foo");
+  });
+
+  it("keeps the plugin's own command description free of the tag", () => {
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [hostCommand("cwd", "Show current working directory")] as any },
+      {
+        host: "pi",
+        tuiCommands: [{ name: "cwd", description: "[t] Show current working directory", source: "autocomplete" }],
+      },
+    );
+    expect(commands.find((c) => c.command === "cwd")?.description).toBe("Show current working directory");
+  });
+
+  it("uses the plugin's registered description for a command it serves on Telegram", () => {
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [] },
+      {
+        host: "pi",
+        tuiCommands: [{ name: "copy", description: "Copy last agent message to clipboard", source: "autocomplete" }],
+        pluginDescriptions: new Map([["copy", "Send the last assistant reply as text"]]),
+      },
+    );
+    expect(commands.find((c) => c.command === "copy")?.description).toBe("Send the last assistant reply as text");
+  });
+
+  it("records the descriptions registered by the command modules and the menu uses them", () => {
+    const registered = new Map<string, { description?: string }>();
+    registerAllCommands(
+      { registerCommand: (name, options) => { registered.set(name, options); } },
+      { getSession: () => undefined },
+    );
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [] },
+      {
+        host: "pi",
+        tuiCommands: [{ name: "hotkeys", description: "Show keyboard shortcuts", source: "autocomplete" }],
+        pluginDescriptions: getTelegramCommandDescriptions(),
+      },
+    );
+    expect(registered.get("hotkeys")?.description).toBe("How to use pi from Telegram");
+    expect(commands.find((c) => c.command === "hotkeys")?.description).toBe("How to use pi from Telegram");
   });
 });

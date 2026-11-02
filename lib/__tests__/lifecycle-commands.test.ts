@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { isOmpHost } from "../session-capture.ts";
 import { registerLifecycleCommands } from "../commands/lifecycle.ts";
 import type { CommandRegistry } from "../commands/register.ts";
 import { runWithTelegramTurn } from "../turn-context.ts";
 import { takePendingNotices, type PendingNotice } from "../pending-notices.ts";
+
+vi.mock("../session-capture.ts", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../session-capture.ts")>();
+  return { ...mod, isOmpHost: vi.fn(() => false) };
+});
 
 type HandlerEntry = {
   name: string;
@@ -41,8 +47,8 @@ describe("registerLifecycleCommands /quit and /exit", () => {
     const { registry, handlers } = makeRegistry();
     registerLifecycleCommands(registry);
 
-    expect(handlers.get("quit")?.description).toBe("Shut down pi");
-    expect(handlers.get("exit")?.description).toBe("Shut down pi");
+    expect(handlers.get("quit")?.description).toBe("Shut down the host after confirmation");
+    expect(handlers.get("exit")?.description).toBe("Shut down the host after confirmation");
   });
 
   for (const name of ["quit", "exit"] as const) {
@@ -55,6 +61,17 @@ describe("registerLifecycleCommands /quit and /exit", () => {
 
       expect(confirm).toHaveBeenCalledWith("Quit pi?", "pi will exit and Telegram will stop responding.");
       expect(shutdown).toHaveBeenCalledTimes(1);
+    });
+
+    it(`/${name} names the host omp in its confirmation on OMP`, async () => {
+      vi.mocked(isOmpHost).mockReturnValueOnce(true);
+      const { registry, handlers } = makeRegistry();
+      registerLifecycleCommands(registry);
+      const { ctx, confirm } = makeCtx(true);
+
+      await handlers.get(name)!.handler("", ctx);
+
+      expect(confirm).toHaveBeenCalledWith("Quit omp?", "omp will exit and Telegram will stop responding.");
     });
 
     it(`/${name} does nothing when the confirmation is declined`, async () => {

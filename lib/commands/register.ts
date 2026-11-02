@@ -2,6 +2,7 @@ import type { CapturedAgentSession, TelegramTransport, TelegramTurn } from "../t
 import { registerSessionCommands } from "./session.ts";
 import { registerInfoCommands } from "./info.ts";
 import { registerLifecycleCommands } from "./lifecycle.ts";
+import { recordTelegramCommandDescription } from "../telegram-command-descriptions.ts";
 
 export type CommandRegistry = {
   registerCommand: (name: string, options: { description?: string; handler: (args: string, ctx: any) => Promise<void> }) => void;
@@ -31,7 +32,15 @@ export function registerAllCommands(
   sessionDeps: SessionDeps,
   infoDeps?: InfoDeps,
 ): void {
-  registerSessionCommands(registry, sessionDeps);
-  registerInfoCommands(registry, { ...sessionDeps, ...(infoDeps ?? {}) });
-  registerLifecycleCommands(registry);
+  // Every command registered here is served by the plugin on Telegram, so its
+  // description is the one the BotMenu shows (see menu-commands.ts).
+  const recording: CommandRegistry = {
+    registerCommand: (name, options) => {
+      recordTelegramCommandDescription(name, options.description);
+      registry.registerCommand(name, options);
+    },
+  };
+  registerSessionCommands(recording, sessionDeps);
+  registerInfoCommands(recording, { ...sessionDeps, ...(infoDeps ?? {}) });
+  registerLifecycleCommands(recording);
 }
