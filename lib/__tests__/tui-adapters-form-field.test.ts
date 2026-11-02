@@ -108,36 +108,74 @@ describe("tsp picker with a nested rename field", () => {
   });
 });
 
-describe("tsp input wizard step with a nested TextFormField (MCP add)", () => {
-  /** The wizard's text step: its title, then the field as a described child component. */
-  function wizardRoot(field: object) {
+describe("tsp input wizard step (MCP add)", () => {
+  /**
+   * The wizard as OMP builds it: the step's TextFormField is private to the
+   * wizard (its WizardStep holds it in a private field), so the public `children`
+   * walk finds no field. Typing reaches the field through the wizard's own
+   * `handleInput`; the footer's `next` button is in the description.
+   */
+  function wizardRoot(options: { next: boolean }) {
+    const events: unknown[] = [];
+    let value = "";
+    const input = {
+      describe: () => ({ k: "input", p: { text: value, placeholder: "localfs" } }),
+    };
+    const footer = options.next
+      ? [{ k: "row", p: { role: "omp.btn", actions: { click: "next" } }, c: [{ k: "text", p: { text: "Next" } }] }]
+      : [];
+    const step = { debugKind: "WizardStep" };
+    return {
+      children: [{ children: [step] }],
+      describe: () => ({
+        k: "overlay",
+        c: [
+          { k: "text", p: { text: "Name the server", role: "omp.mcpAdd.title" } },
+          { k: "col", c: [input] },
+          ...footer,
+        ],
+      }),
+      handleInput: (data: string) => {
+        if (data === "\x15") value = "";
+        else value += data;
+      },
+      handleNativeEvent: (event: unknown) => {
+        events.push(event);
+      },
+      events,
+      value: () => value,
+    };
+  }
+
+  it("sends next after typing the name, so the wizard submits its field", () => {
+    const root = wizardRoot({ next: true });
+    expect(tspInputAdapter.act(root, { type: "submit", text: "localfs" }, ctxFor())).toBe(true);
+    expect(root.value()).toBe("localfs");
+    expect(root.events).toEqual([{ type: "action", key: "", act: "next", mods: [] }]);
+  });
+
+  it("keeps the submit event for a dialog without a next button", () => {
+    const root = wizardRoot({ next: false });
+    expect(tspInputAdapter.act(root, { type: "submit", text: "localfs" }, ctxFor())).toBe(true);
+    expect(root.events).toEqual([{ type: "action", key: "", act: "submit", mods: [] }]);
+  });
+
+  it("answers through a nested field when one is reachable", () => {
+    const field = makeField("");
     const events: unknown[] = [];
     const fieldComponent = Object.assign(field, {
       describe: () => ({ k: "input", p: { text: "", placeholder: "localfs" } }),
     });
     const root = {
       children: [fieldComponent],
-      describe: () => ({
-        k: "frame",
-        c: [
-          { k: "text", p: { text: "Name the server", role: "omp.mcpAdd.title" } },
-          fieldComponent,
-        ],
-      }),
+      describe: () => ({ k: "frame", c: [{ k: "text", p: { text: "Name the server", role: "omp.mcpAdd.title" } }, fieldComponent] }),
       handleNativeEvent: (event: unknown) => {
         events.push(event);
       },
-      events,
     };
-    return root;
-  }
-
-  it("submits the typed name through the field, not as an unsent typed string", () => {
-    const field = makeField("");
-    const root = wizardRoot(field);
     expect(tspInputAdapter.act(root, { type: "submit", text: "localfs" }, ctxFor())).toBe(true);
     expect(field.setValue).toHaveBeenCalledWith("localfs");
     expect(field.submit).toHaveBeenCalledTimes(1);
-    expect(root.events).toEqual([]);
+    expect(events).toEqual([]);
   });
 });

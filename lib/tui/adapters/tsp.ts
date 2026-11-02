@@ -321,6 +321,36 @@ export function describesDialog(component: object): boolean {
 }
 
 /**
+ * True when `component`'s description, or a component it nests, holds an
+ * action control whose `actions.click` is `act` (e.g. the wizard's footer
+ * `next` button). A `describe` that throws describes nothing.
+ */
+function describesAction(component: object, act: string, depth = 0, visited = new Set<object>()): boolean {
+  if (depth > MAX_COMPONENT_DEPTH || visited.has(component)) return false;
+  visited.add(component);
+  const root = describeTree(component);
+  if (!root) return false;
+  return nodeDescribesAction(root, act, depth, visited);
+}
+
+function nodeDescribesAction(node: NativeNodeLike, act: string, depth: number, visited: Set<object>): boolean {
+  if (isObject(node.p) && isObject(node.p.actions) && node.p.actions.click === act) return true;
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  for (const child of children) {
+    if (!isObject(child)) continue;
+    const component = describableChild(child);
+    if (component) {
+      if (describesAction(component, act, depth + 1, visited)) return true;
+      continue;
+    }
+    if (visited.has(child)) continue;
+    visited.add(child);
+    if (nodeDescribesAction(child as NativeNodeLike, act, depth, visited)) return true;
+  }
+  return false;
+}
+
+/**
  * True when `component`'s own description, or one of the components it nests,
  * holds an OMP login-dialog node (`omp.login.*`) or the login overlay root
  * (`omp.overlay.login`). The "only a link, waiting for the browser" form has no
@@ -1456,7 +1486,12 @@ export const tspInputAdapter: DialogAdapter = {
       // The dialog routes keystrokes to its current field: clear it, then
       // type. Enter is the `submit` action below, not a raw newline.
       if (!setInputValue(component, action.text ?? "")) return false;
-      event = { type: "action", key: "", act: "submit", mods: [] };
+      // The MCP add wizard answers `next` (its footer button, Enter's action) and
+      // ignores `submit`; the login and hook dialogs answer `submit`. Only a tree
+      // that describes a `next` button gets `next`.
+      event = describesAction(component, "next")
+        ? { type: "action", key: "", act: "next", mods: [] }
+        : { type: "action", key: "", act: "submit", mods: [] };
     } else if (action.type === "cancel") {
       event = { type: "action", key: "", act: "cancel", mods: [] };
     } else {
