@@ -59,13 +59,20 @@ const QUESTION: AskQuestion = {
 
 type Sent = { chatId: number; messageId: number; kind: string; text?: string; rows?: unknown };
 
-function setup(options: { draftBeneath?: boolean; holdSend?: boolean } = {}) {
+function setup(options: { draftBeneath?: boolean; holdSend?: boolean; undelivered?: boolean } = {}) {
   const sent: Sent[] = [];
   let nextId = 100;
   // With `holdSend`, sendButtons stays pending until the test calls `releaseSend()`.
   const held: Array<() => void> = [];
   const transport = {
     sendButtons: (chatId: number) => {
+      // `undelivered`: the active transport returns message_id 0 without sending (instance inactive,
+      // Telegram disconnected). The guard stops a resend loop from hanging the test.
+      if (options.undelivered) {
+        sent.push({ chatId, messageId: 0, kind: "send" });
+        if (sent.length > 20) throw new Error("resend loop");
+        return Promise.resolve({ message_id: 0 });
+      }
       nextId += 1;
       const messageId = nextId;
       sent.push({ chatId, messageId, kind: "send" });
@@ -249,5 +256,18 @@ describe("#22 one ask call sends one Telegram message", () => {
     expect(edits.length).toBeGreaterThan(0);
     expect(edits.every((entry) => entry.messageId === sendId)).toBe(true);
     expect(JSON.stringify(edits[edits.length - 1].rows)).toContain("blue");
+  });
+});
+
+describe("#31 a dialog whose first send was not delivered is not mirrored", () => {
+  it("S8 undelivered: message_id 0 is not resent in a microtask loop", async () => {
+    const { sent, toolUi, broker } = setup({ undelivered: true });
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+    (broker as unknown as { refresh(): void }).refresh();
+    (broker as unknown as { refresh(): void }).refresh();
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
   });
 });

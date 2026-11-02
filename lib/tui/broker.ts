@@ -992,6 +992,14 @@ export class DialogBroker {
         .sendButtons(chatId, rendered.text, rendered.rows, telegram.messageThreadId, session.owner?.sourceMessageId)
         .then((sent) => {
           session.sending = false;
+          // The active transport answers message_id 0 without sending when its instance is inactive or
+          // Telegram is disconnected. The dialog never reached Telegram, so stop mirroring it; otherwise
+          // show() sees a fresh message again and resends in a microtask loop that starves the event loop.
+          if (sent.message_id <= 0) {
+            session.telegram = undefined;
+            session.pendingSummary = undefined;
+            return;
+          }
           // Keep the id even when the session was replaced or closed meanwhile: the sent message still needs closing.
           session.telegram = { ...telegram, messageId: sent.message_id };
           if (session.state === "closed") {
