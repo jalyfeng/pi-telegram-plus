@@ -25,6 +25,7 @@ import { runInCommand } from "./command-context.ts";
 import type { DialogCallback } from "../callback-protocol.ts";
 import type { TelegramTransport, TelegramTurn } from "../types.ts";
 import { pickAdapter, unsupportedAdapter } from "./adapters/index.ts";
+import { isCustomAnswerPrompt } from "./adapters/ask.ts";
 import { describeTree } from "./adapters/tsp.ts";
 import { currentHostState } from "./host.ts";
 import { sendKeyTo } from "./keys.ts";
@@ -419,6 +420,11 @@ export class DialogBroker {
       if (session && session.state !== "closed" && session.focus !== component) {
         const race = session.entry?.kind === "ask" ? session.entry.race : undefined;
         if (race && !race.settled && this.deps.focus.entryFor(component) === undefined) return;
+        // A hosted ask (no race handle) opens the same custom-answer prompt for `Other`, and its
+        // call is still open, so the session and its message stay as they are. A settled race
+        // means the call is over and the prompt opens its own message (see the S4 test).
+        if (session.entry?.kind === "ask" && !race && isCustomAnswerPrompt(component)
+          && this.deps.focus.entryFor(component) === undefined) return;
       }
       // Same question, different object: the host moved focus from the dialog to the
       // overlay wrapper that holds it, and the wrapper is what receives keys from then

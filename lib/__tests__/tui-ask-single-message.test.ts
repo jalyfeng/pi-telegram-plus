@@ -50,6 +50,13 @@ class HookEditorComponent {
   setText(_text: string) { /* not modelled */ }
 }
 
+/** The host's custom-answer prompt for `Other`: a HookEditorComponent whose described root carries its role. */
+class CustomAnswerPromptComponent {
+  render() { return ""; }
+  handleInput(_key: string) { /* keys are not modelled */ }
+  describe() { return { k: "col", p: { role: "omp.overlay.hook-editor" }, c: [] }; }
+}
+
 const QUESTION: AskQuestion = {
   id: "colour",
   question: "Pick a color for the acceptance run",
@@ -271,3 +278,20 @@ describe("#31 a dialog whose first send was not delivered is not mirrored", () =
     expect(sendsOf(sent)).toHaveLength(1);
   });
 });
+
+describe("hosted ask: the custom-answer prompt keeps the ask session", () => {
+  it("S9 a prompt opened over a hosted ask (no race handle) sends no second message and ends no session", async () => {
+    const { sent, ui, toolUi, state, focus } = setup();
+    void toolUi.askDialog([QUESTION], askOptions());
+    await flush();
+    // The hosted case: the ask call has no race handle.
+    (focus.entryFor(state.ask as unknown as Record<string, unknown>) as unknown as { race?: unknown }).race = undefined;
+    ui.setFocus(new CustomAnswerPromptComponent());
+    await flush();
+    ui.setFocus(state.ask);
+    await flush();
+    expect(sendsOf(sent)).toHaveLength(1);
+    expect(sent.filter((entry) => (entry.kind === "edit" || entry.kind === "editText") && entry.text === "Answered in the terminal")).toEqual([]);
+  });
+});
+

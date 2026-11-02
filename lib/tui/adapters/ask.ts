@@ -340,7 +340,8 @@ function readHosted(component: object, questions: AskQuestion[], state: AskState
 /** OMP's custom-answer prompt (`HookEditorComponent`, the host's `Other` input) and its described root role. */
 const CUSTOM_ANSWER_PROMPT_ROLE = "omp.overlay.hook-editor";
 
-function isCustomAnswerPrompt(candidate: unknown): candidate is object {
+/** True for the host's custom-answer prompt (the `Other` input) over a hosted ask dialog. */
+export function isCustomAnswerPrompt(candidate: unknown): candidate is object {
   if (typeof candidate !== "object" || candidate === null) return false;
   const root = describeTree(candidate);
   return root !== undefined && roleOf(root) === CUSTOM_ANSWER_PROMPT_ROLE;
