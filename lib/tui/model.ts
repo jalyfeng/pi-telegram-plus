@@ -7,6 +7,7 @@
  * the live component. Nothing here imports the host: the model is plain data.
  */
 
+import type { CommandScope } from "./origin.ts";
 import type { RaceHandle } from "./race.ts";
 
 export type DialogItem = {
@@ -212,6 +213,11 @@ export type DialogSession = {
   owner?: DialogOrigin;
   /** True when the owner came from a command scope (in-place message reuse). */
   ownerFromScope: boolean;
+  /**
+   * The command whose call chain opened the dialog. A Telegram answer runs the host callback
+   * inside this command's chain, so the host output it makes lands on this command's message.
+   */
+  ownerScope?: CommandScope;
   /** The entry that named this dialog, so a wrapper taking focus keeps it (§4.1.2). */
   entry?: EntryInfo;
   telegram?: { chatId: number; messageThreadId?: number; messageId: number };

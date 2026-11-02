@@ -21,6 +21,7 @@
 import { appendFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { log } from "../logger.ts";
+import { runInCommand } from "./command-context.ts";
 import type { DialogCallback } from "../callback-protocol.ts";
 import type { TelegramTransport, TelegramTurn } from "../types.ts";
 import { pickAdapter, unsupportedAdapter } from "./adapters/index.ts";
@@ -485,6 +486,7 @@ export class DialogBroker {
       model: this.read(component, ctx, adapter) ?? { kind: "unsupported", what: `${adapter.id}: read failed` },
       owner: owner.origin,
       ownerFromScope: owner.fromScope,
+      ownerScope: owner.fromScope && owner.scope ? owner.scope : undefined,
       entry: ctx.entry,
       keyMap: new Map(),
       page: 0,
@@ -615,7 +617,7 @@ export class DialogBroker {
     session.model = model;
     session.state = "resolving";
     session.lastAction = resolved.label;
-    const done = this.act(subject, resolved.action, ctx);
+    const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
       session.state = "open";
       this.redraw(session);
@@ -681,13 +683,14 @@ export class DialogBroker {
       session.telegramAction = { cancelled: false, at: Date.now() };
       session.lastAction = "Sent an answer";
     }
-    const driven = purpose === "input" || purpose === "editor"
+    const driven = this.inOwnerScope(session, () => purpose === "input" || purpose === "editor"
       ? this.act(subject, { type: "submit", text }, ctx)
       : purpose === "search"
         ? this.act(subject, { type: "search", query: text }, ctx)
-        : false;
+        : false);
     const modeledField = effectiveInput(session.model) !== undefined;
-    const written = driven || (!modeledField && this.deps.writeText(purpose === "search" ? text : `${text}\r`));
+    const written = driven || (!modeledField && this.inOwnerScope(session, () =>
+      this.deps.writeText(purpose === "search" ? text : `${text}\r`)));
     const telegram = session.telegram;
     // The secret travelled in a Telegram message either way: it is deleted even
     // when the host refused it, because the chat is the one place it is readable.
@@ -716,7 +719,7 @@ export class DialogBroker {
     if (!this.canDrive(session)) return false;
     const subject = (session.subject ?? session.focus) as Record<string, unknown>;
     const ctx = this.context(subject, this.deps.focus.current());
-    const done = this.act(subject, { type: "cancel" }, ctx);
+    const done = this.inOwnerScope(session, () => this.act(subject, { type: "cancel" }, ctx));
     this.forgetPending(session);
     if (done && this.session === session) this.retire(session, this.deps.focus.current());
     return done;
@@ -903,6 +906,17 @@ export class DialogBroker {
       brokerLog.debug("adapter read failed", { err, ctor: ctorName(component) });
       return undefined;
     }
+  }
+
+  /**
+   * Runs `fn` (a host call made for a Telegram answer) in the call chain of the command that
+   * opened the session, so the host output it adds is that command's (see command-context.ts).
+   * A command that has already ended has no message to write to: `fn` runs without a scope.
+   */
+  private inOwnerScope<T>(session: DialogSession, fn: () => T): T {
+    const scope = session.ownerScope;
+    if (scope && !scope.ended) return runInCommand(scope, fn);
+    return fn();
   }
 
   private act(component: Record<string, unknown>, action: DialogAction, ctx: AdapterContext): boolean {
