@@ -125,7 +125,9 @@ describe("omp ask dialog adapter, hosted", () => {
     const model = askDialogAdapter.read(component, ctx);
     const items = questionnaire(model)[0]?.items ?? [];
     expect(items.map((item) => item.focused)).toEqual([true, false, false]);
-    expect(items.map((item) => item.current)).toEqual([false, true, false]);
+    // The recommended option says so in its label; nothing is ticked until an answer is chosen.
+    expect(items.map((item) => item.label)).toEqual(["red", "green (Recommended)", "blue"]);
+    expect(items.map((item) => item.current)).toEqual([false, false, false]);
   });
 
   it("chooses a row with one select event on the list and sends no key", () => {
@@ -197,7 +199,7 @@ describe("omp ask dialog adapter, hosted", () => {
     component.lists[0] = component.lists[0]?.map((row) => (row.key === "option:2" ? { ...row, checked: true } : row)) ?? [];
     const model = questionnaire(askDialogAdapter.read(component, ctx));
     expect(model[0]?.answered).toBe(true);
-    expect(model[0]?.items.map((item) => item.checked)).toEqual([false, false, true]);
+    expect(model[0]?.items.map((item) => item.current)).toEqual([false, false, true]);
     expect(askDialogAdapter.read(component, ctx)).toMatchObject({ canSubmit: true });
   });
 
@@ -207,7 +209,7 @@ describe("omp ask dialog adapter, hosted", () => {
     component.active = 1;
     const model = questionnaire(askDialogAdapter.read(component, ctx));
     expect(model[0]?.answered).toBe(true);
-    expect(model[0]?.items.map((item) => item.checked)).toEqual([false, true, false]);
+    expect(model[0]?.items.map((item) => item.current)).toEqual([false, true, false]);
     expect(model[1]?.answered).toBe(false);
   });
 
@@ -353,7 +355,7 @@ describe("omp ask dialog adapter with a race handle", () => {
     const model = askDialogAdapter.read(component, ctx);
     const first = model.kind === "questionnaire" ? model.questions[0] : undefined;
     expect(first?.answered).toBe(true);
-    expect(first?.items[first.items.length - 1]).toMatchObject({ label: "magenta", checked: true });
+    expect(first?.items[first.items.length - 1]).toMatchObject({ label: "magenta", current: true });
     // The typed row is not an option, so tapping it does nothing.
     expect(askDialogAdapter.act(component, { type: "choose", key: "custom:0" }, ctx)).toBe(false);
     expect(askDialogAdapter.act(component, { type: "toggle", key: "1:chocolate" }, ctx)).toBe(true);
@@ -387,3 +389,102 @@ describe("omp ask dialog adapter with a race handle", () => {
     await expect(answered).resolves.toBeUndefined();
   });
 });
+
+// ---- A typed answer on the hosted dialog (the host's own `Other` prompt) ----------
+
+type FakeEditor = { text: string; events: unknown[]; describe(cx: unknown): unknown; handleNativeEvent(event: unknown): void };
+
+/** The `HookEditorComponent` the host opens for `Other`: an editor node, and its own Submit button. */
+function fakePrompt(initial: string, onSubmit: (text: string) => void) {
+  const editor: FakeEditor = {
+    text: initial,
+    events: [],
+    describe() {
+      return { k: "editor", key: "input", p: { text: editor.text, cursor: editor.text.length } };
+    },
+    handleNativeEvent(event: unknown) {
+      editor.events.push(event);
+      const edit = event as { type?: string; from: number; to: number; text: string };
+      if (edit.type === "edit") editor.text = editor.text.slice(0, edit.from) + edit.text + editor.text.slice(edit.to);
+    },
+  };
+  const prompt = {
+    events: [] as unknown[],
+    describe() {
+      return {
+        k: "col",
+        p: { role: "omp.overlay.hook-editor" },
+        c: [editor, { k: "row", p: { role: "omp.btn", actions: { click: "cancel" } }, c: [] }, { k: "row", p: { role: "omp.btn", actions: { click: "submit" } }, c: [] }],
+      };
+    },
+    handleNativeEvent(event: unknown) {
+      prompt.events.push(event);
+      if ((event as { type?: string; act?: string }).type === "action" && (event as { act?: string }).act === "submit") onSubmit(editor.text);
+    },
+  };
+  return { prompt, editor };
+}
+
+/** A hosted ask whose `Other` row opens the custom-answer prompt in `root`, as the host does. */
+function hostedWithPrompt(questions: AskQuestion[], initial = "", opensPrompt = true) {
+  const hostedAsk = hosted(questions);
+  const { component, ctx } = hostedAsk;
+  // The host draws an `other` row after the options of every question.
+  component.lists = component.lists.map((rows) => [...rows, { key: "other", label: "Other…" }]);
+  const root = { children: [component] as unknown[] };
+  const submitted: string[] = [];
+  const { prompt, editor } = fakePrompt(initial, (text) => {
+    submitted.push(text);
+    root.children = [];
+  });
+  const base = component.handleNativeEvent.bind(component);
+  component.handleNativeEvent = (event: unknown) => {
+    base(event);
+    const select = event as { type?: string; item?: string };
+    if (opensPrompt && select.type === "select" && select.item === "other") root.children = [prompt];
+  };
+  const withRoot: AdapterContext = { ...ctx, root };
+  return { component, ctx: withRoot, keys: hostedAsk.keys, root, submitted, editor, prompt };
+}
+
+describe("omp ask dialog adapter, typed answers on the hosted dialog", () => {
+  it("selects the Other row first, then writes the text into the prompt and submits it", () => {
+    const { component, ctx, keys, submitted, editor, prompt } = hostedWithPrompt([colour]);
+    expect(askDialogAdapter.act(component, { type: "submit", text: "magenta" }, ctx)).toBe(true);
+    expect(component.events).toEqual([{ type: "select", key: "q0", item: "other" }]);
+    expect(editor.events).toEqual([{ type: "edit", key: "", from: 0, to: 0, text: "magenta", cursor: 7, len: 0 }]);
+    expect(prompt.events).toEqual([expect.objectContaining({ type: "action", act: "submit" })]);
+    expect(submitted).toEqual(["magenta"]);
+    expect(keys).toEqual([]);
+  });
+
+  it("replaces a prefilled prompt text as a whole", () => {
+    const { component, ctx, submitted } = hostedWithPrompt([colour], "old");
+    expect(askDialogAdapter.act(component, { type: "submit", text: "new" }, ctx)).toBe(true);
+    expect(submitted).toEqual(["new"]);
+  });
+
+  it("refuses when the host opens no prompt for Other, and writes nothing", () => {
+    const { component, ctx, submitted } = hostedWithPrompt([colour], "", false);
+    expect(askDialogAdapter.act(component, { type: "submit", text: "magenta" }, ctx)).toBe(false);
+    expect(submitted).toEqual([]);
+  });
+
+  it("refuses a question whose list has no Other row, or a blank text", () => {
+    const { component, ctx, submitted } = hostedWithPrompt([colour]);
+    component.lists[0] = component.lists[0]?.filter((row) => row.key !== "other") ?? [];
+    expect(askDialogAdapter.act(component, { type: "submit", text: "magenta" }, ctx)).toBe(false);
+    expect(askDialogAdapter.act(component, { type: "submit", text: "magenta" }, { ...ctx, root: undefined })).toBe(false);
+    expect(askDialogAdapter.act(component, { type: "submit", text: "   " }, ctx)).toBe(false);
+    expect(submitted).toEqual([]);
+  });
+
+  it("refuses on the Review tab, where no question is on screen", () => {
+    const { component, ctx, submitted } = hostedWithPrompt([colour, size]);
+    component.active = 2;
+    expect(askDialogAdapter.act(component, { type: "submit", text: "magenta" }, ctx)).toBe(false);
+    expect(component.events).toEqual([]);
+    expect(submitted).toEqual([]);
+  });
+});
+

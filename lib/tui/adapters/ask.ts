@@ -21,6 +21,7 @@
  */
 import type { AdapterContext, AskQuestion, DialogAction, DialogAdapter, DialogItem, DialogModel, Question } from "../model.ts";
 import type { RaceHandle } from "../race.ts";
+import { findShape } from "../find-shape.ts";
 import { describeTree, findDescribedNode, tspText, type DescribedNode, type NativeNodeLike } from "./tsp.ts";
 
 type AskState = {
@@ -39,6 +40,27 @@ type AskState = {
 const states = new WeakMap<object, AskState>();
 
 const rowKeyOf = (questionIndex: number, label: string) => `${questionIndex}:${label}`;
+
+const RECOMMENDED_SUFFIX = " (Recommended)";
+
+/**
+ * One option row as the host draws it. The recommended option says so after its
+ * label, as the host's own row does. A chosen row is marked with `current` on a
+ * single choice (the tick) and with `checked` on a multi choice (the box); the
+ * highlighted row is `focused` in the reads that know the cursor, never ticked.
+ */
+function optionItemOf(question: AskQuestion, questionIndex: number, optionIndex: number, chosen: boolean): DialogItem {
+  const option = question.options[optionIndex];
+  const recommended = question.recommended === optionIndex;
+  const label = option?.label ?? "";
+  const shown = recommended && !label.endsWith(RECOMMENDED_SUFFIX) ? `${label}${RECOMMENDED_SUFFIX}` : label;
+  return {
+    key: rowKeyOf(questionIndex, label),
+    label: shown,
+    description: option?.description,
+    ...(question.multi === true ? { checked: chosen } : { current: chosen }),
+  };
+}
 
 function stateFor(component: object, questions: AskQuestion[]): AskState {
   const signature = questions.map((question) => `${question.id}|${question.options.length}|${question.multi === true}`).join(";");
@@ -150,19 +172,14 @@ function actRaced(component: object, action: DialogAction, state: AskState, ques
 function readRaced(questions: AskQuestion[], state: AskState, title: string): DialogModel {
   const model: Question[] = questions.map((question, index) => {
     const chosen = state.answers.get(question.id) ?? [];
-    const items: DialogItem[] = question.options.map((option, optionIndex) => ({
-      key: rowKeyOf(index, option.label),
-      label: option.label,
-      description: option.description,
-      checked: chosen.includes(option.label),
-      current: question.recommended === optionIndex,
-    }));
+    const items: DialogItem[] = question.options.map((option, optionIndex) =>
+      optionItemOf(question, index, optionIndex, chosen.includes(option.label)));
     const typed = state.custom.get(question.id);
     if (typed !== undefined) {
       // A typed answer is drawn as a checked read-only row: the `custom:` prefix
       // is not an option key, so no action points at it - only new text replaces
       // it.
-      items.push({ key: `custom:${index}`, label: typed, checked: true });
+      items.push({ key: `custom:${index}`, label: typed, ...(question.multi === true ? { checked: true } : { current: true }) });
     }
     return {
       id: question.id,
@@ -305,11 +322,7 @@ function readHosted(component: object, questions: AskQuestion[], state: AskState
     const isLive = index === live;
     const typedOnHost = isLive && rows.some((row) => row.checked && !row.key.startsWith("option:"));
     const items: DialogItem[] = question.options.map((option, optionIndex) => ({
-      key: rowKeyOf(index, option.label),
-      label: option.label,
-      description: option.description,
-      checked: chosen.includes(option.label),
-      current: question.recommended === optionIndex,
+      ...optionItemOf(question, index, optionIndex, chosen.includes(option.label)),
       focused: isLive && selected === `option:${optionIndex}`,
     }));
     return {
@@ -322,6 +335,58 @@ function readHosted(component: object, questions: AskQuestion[], state: AskState
     };
   });
   return questionnaire(title, model, live ?? 0);
+}
+
+/** OMP's custom-answer prompt (`HookEditorComponent`, the host's `Other` input) and its described root role. */
+const CUSTOM_ANSWER_PROMPT_ROLE = "omp.overlay.hook-editor";
+
+function isCustomAnswerPrompt(candidate: unknown): candidate is object {
+  if (typeof candidate !== "object" || candidate === null) return false;
+  const root = describeTree(candidate);
+  return root !== undefined && roleOf(root) === CUSTOM_ANSWER_PROMPT_ROLE;
+}
+
+/**
+ * A typed answer on the hosted dialog, the way the host's own `Other` row takes it
+ * (ask-dialog.ts `#commitRow` on `other`, then `#promptForCustomInput`):
+ * 1. a `select` on the list's `other` row, which opens the custom-answer prompt
+ *    synchronously over the dialog;
+ * 2. a native `edit` over the prompt's editor node, replacing its whole text;
+ * 3. the prompt's own Submit button.
+ * Every step is an event named by the described tree; no key is sent. A refusal
+ * after step 1 leaves the host's prompt open for the terminal user to finish.
+ */
+function typeOtherAnswer(component: object, state: AskState, questions: AskQuestion[], text: string, ctx: AdapterContext): boolean {
+  if (text.trim() === "") return false;
+  const list = findDescribedNode(component, isOptionsList);
+  // No list is the Review tab: there is no question to answer there.
+  if (!list || !ctx.root) return false;
+  const index = questionIndexOf(list.node);
+  const question = index === undefined ? undefined : questions[index];
+  if (index === undefined || !question || question.allowCustom === false) return false;
+  const rows = liveRows(list.node);
+  if (!optionRowsMatch(rows, question, state.rowsSeen.get(index))) return false;
+  if (!rows.some((row) => row.key === "other")) return false;
+  if (!fire(list.owner, { type: "select", key: list.keypath, item: "other" }, ctx)) return false;
+
+  const prompt = findShape(ctx.root, isCustomAnswerPrompt, 2);
+  if (!prompt) return false;
+  const editor = findDescribedNode(prompt, (node) => node.k === "editor");
+  const current = editor ? propsOf(editor.node).text : undefined;
+  if (!editor || typeof current !== "string") return false;
+  const written = fire(editor.owner, {
+    type: "edit",
+    key: editor.keypath,
+    from: 0,
+    to: current.length,
+    text,
+    cursor: text.length,
+    len: current.length,
+  }, ctx);
+  if (!written) return false;
+
+  const submit = findDescribedNode(prompt, (node) => isButton(node, "submit"));
+  return submit !== undefined && fire(submit.owner, { type: "action", key: submit.keypath, act: "submit" }, ctx);
 }
 
 /** A hosted dialog act: every event is one the host's own backend would send,
@@ -363,9 +428,7 @@ function actHosted(component: object, action: DialogAction, state: AskState, que
   }
 
   if (action.type === "submit") {
-    // Typed answers exist only on the raced path (§4.12); the hosted dialog gets
-    // them from its own input, which this adapter does not drive.
-    if (action.text !== undefined) return false;
+    if (action.text !== undefined) return typeOtherAnswer(component, state, questions, action.text, ctx);
     if (!questions.every((question) => (state.answers.get(question.id)?.length ?? 0) > 0)) return false;
     // Submit on a question tab would commit that tab's highlighted row, so go to
     // the Review tab first and press its Submit button there.
