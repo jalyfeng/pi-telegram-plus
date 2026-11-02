@@ -12,6 +12,7 @@ import { markdownToTelegramHtml } from "../markdown.ts";
 import { splitTelegramHtml } from "../text-split.ts";
 import { stripAnsi } from "../ansi.ts";
 import { log, type LogFields } from "../logger.ts";
+import { queuePendingNotice } from "../pending-notices.ts";
 import type { TelegramTransport } from "../types.ts";
 import { hookMethod, hookOwnedMethod, isHostObject, onHostState, type HostState } from "./host.ts";
 import { installHook, removeOwnerHooks } from "./hooks.ts";
@@ -146,6 +147,8 @@ export class OutputCapture {
   private readonly livePanels = new WeakSet<object>();
   private readonly livePanelDone = new WeakSet<object>();
   private pager?: OutputPager;
+  /** Set by a teardown: this runtime's transport drops sends, so final renders are handed over. */
+  private handingOver = false;
   /** Registered while this capture runs: a command's own lines (notices) and its message. */
   private readonly route: CommandMessageRoute = {
     notice: (scope, html) => {
@@ -215,6 +218,16 @@ export class OutputCapture {
     const binding = this.finishedBindings.get(scope);
     if (!binding) return;
     void this.render(binding, true);
+  }
+
+  /**
+   * Teardown (P2-21): the runtime is about to lose its send lease. Its final render would be
+   * dropped by the transport, so from now on it is queued as a pending notice for the runtime
+   * that replaces this one (the same path /new and /reload use). Interim renders are not needed:
+   * the final content replaces them.
+   */
+  handOver(): void {
+    this.handingOver = true;
   }
 
   /** Flush the active binding and stop claiming output for it. */
@@ -658,6 +671,16 @@ export class OutputCapture {
     if (text === binding.lastText) return;
     binding.lastText = text;
     binding.lastEditAt = Date.now();
+    if (final && this.handingOver) {
+      queuePendingNotice({
+        chatId: binding.telegram.chatId,
+        messageThreadId: binding.telegram.messageThreadId,
+        editMessageId: binding.telegram.messageId,
+        html: text,
+        createdAt: Date.now(),
+      });
+      return;
+    }
     await this.transport.editText(binding.telegram.chatId, binding.telegram.messageId, text)
       .catch(outputLog.swallow("debug", "edit command output failed", { chatId: binding.telegram.chatId }));
   }

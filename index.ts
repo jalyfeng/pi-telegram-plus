@@ -815,7 +815,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     cancelTelegramCommandRefreshes();
     void polling.stop();
     heartbeat.dispose();
-    controller.dispose();
+    controller.dispose({ handOver: true });
     activeTurns.clear();
     ui.dispose();
     clearStatus();

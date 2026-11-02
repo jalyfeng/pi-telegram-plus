@@ -88,7 +88,8 @@ export type TelegramController = {
    * session's host hooks (#32).
    */
   startTui(): void;
-  dispose(): void;
+  /** `handOver`: the runtime is being replaced or shut down; see OutputCapture.handOver (P2-21). */
+  dispose(options?: { handOver?: boolean }): void;
 };
 
 /**
@@ -1868,8 +1869,11 @@ export function createTelegramController(deps: {
     },
 
     startTui,
-    dispose() {
-      dialogBroker.stop();
+    dispose(options) {
+      // The output hands its final render over before the broker settles a dialog into it,
+      // so a settled dialog's summary is written by the replacement runtime (P2-21).
+      if (options?.handOver) outputCapture.handOver();
+      dialogBroker.stop({ handOver: options?.handOver });
       commandGateway.dispose();
     },
   };

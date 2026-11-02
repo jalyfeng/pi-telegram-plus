@@ -315,7 +315,13 @@ export class DialogBroker {
     this.refreshTimer.unref?.();
   }
 
-  stop(): void {
+  /**
+   * Tear the broker down. With `handOver` (the runtime is being replaced or shut down) a dialog
+   * that Telegram has already answered is settled first: its summary goes onto the command's
+   * message, which OutputCapture writes as the final content before the runtime stops.
+   */
+  stop(options: { handOver?: boolean } = {}): void {
+    if (options.handOver) this.settleForTeardown();
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     clearInterval(this.refreshTimer);
@@ -462,13 +468,30 @@ export class DialogBroker {
     }
 
     session.closedBy = byTelegram ? "telegram" : "terminal";
-    const summary = byTelegram
-      ? telegramAction?.cancelled
-        ? "✖ Cancelled"
-        : `✅ ${isSecretSession(session) ? "Submitted (hidden)" : session.lastAction ?? "Done"}`
-      : "Answered in the terminal";
-    this.publish(session, summary);
+    this.publish(session, byTelegram ? this.telegramSummary(session) : "Answered in the terminal");
     return session.closedBy;
+  }
+
+  /** The one-line result of a dialog that Telegram answered (rule 4.2). */
+  private telegramSummary(session: DialogSession): string {
+    if (session.telegramAction?.cancelled) return "✖ Cancelled";
+    return `✅ ${isSecretSession(session) ? "Submitted (hidden)" : session.lastAction ?? "Done"}`;
+  }
+
+  /**
+   * Teardown (P2-21): a session switch removes the runtime while a Telegram answer may still be
+   * waiting for the host to close its dialog. The answer is written now, not by the next focus
+   * change, which this runtime will never see. Any unanswered Telegram tap still on the session
+   * is the one that closes it, so the time window used for focus changes does not apply here.
+   */
+  private settleForTeardown(): void {
+    const session = this.session;
+    if (!session || session.state === "closed" || this.detached.has(session)) return;
+    if (session.state !== "resolving" && session.telegramAction === undefined) return;
+    session.state = "closed";
+    session.closedBy = "telegram";
+    this.forgetPending(session);
+    this.publish(session, this.telegramSummary(session));
   }
 
   /** Open a session for a freshly focused component and show it (§4.5 rule 1). */
