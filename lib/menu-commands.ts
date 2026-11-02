@@ -8,7 +8,9 @@ import { getTelegramCommandDescriptions } from "./telegram-command-descriptions.
 
 const menuLog = log.child("menu-commands");
 
-const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = [
+// Names and order of the menu entries. Commands the plugin serves on Telegram
+// carry no description here: their description is the one they registered.
+const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description?: string }> = [
   // Keep the built-in pi commands in the same order as the TUI slash menu.
   { command: "login", description: "Configure provider authentication" },
   { command: "logout", description: "Remove stored credentials" },
@@ -16,7 +18,7 @@ const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = 
   { command: "scoped-models", description: "Enable/disable models for cycling" },
   { command: "settings", description: "Open settings menu" },
   { command: "resume", description: "Resume a previous session" },
-  { command: "new", description: "Start a new session" },
+  { command: "new" },
   { command: "name", description: "Set or show session name" },
   { command: "session", description: "Show session statistics" },
   { command: "tree", description: "Navigate session tree" },
@@ -24,22 +26,22 @@ const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description: string }> = 
   { command: "fork", description: "Fork from a previous message" },
   { command: "clone", description: "Clone at a previous message" },
   { command: "compact", description: "Compact session context" },
-  { command: "copy", description: "Copy last assistant message" },
+  { command: "copy" },
   { command: "export", description: "Export session" },
   { command: "share", description: "Share session as gist" },
-  { command: "reload", description: "Reload pi resources" },
-  { command: "hotkeys", description: "Show keyboard shortcuts" },
+  { command: "reload" },
+  { command: "hotkeys" },
   { command: "changelog", description: "Show changelog" },
-  { command: "quit", description: "Shut down pi" },
+  { command: "quit" },
 
   // Additional pi-telegram-plus commands.
-  { command: "cwd", description: "Show current working directory" },
-  { command: "cd", description: "Switch pi working directory" },
-  { command: "import", description: "Import a session" },
-  { command: "stop", description: "Stop the current agent turn" },
-  { command: "status", description: "Show runtime snapshot (workspace, model, context, messages)" },
+  { command: "cwd" },
+  { command: "cd" },
+  { command: "import" },
+  { command: "stop" },
+  { command: "status" },
   // Consolidated Telegram management menu — replaces all flat /tg-* commands.
-  { command: "tg", description: "Open the Telegram management menu" },
+  { command: "tg" },
 ];
 
 /**

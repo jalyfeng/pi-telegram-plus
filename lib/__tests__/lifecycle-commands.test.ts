@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isOmpHost } from "../session-capture.ts";
+import { hostCommandName } from "../session-capture.ts";
 import { registerLifecycleCommands } from "../commands/lifecycle.ts";
 import type { CommandRegistry } from "../commands/register.ts";
 import { runWithTelegramTurn } from "../turn-context.ts";
@@ -7,7 +7,7 @@ import { takePendingNotices, type PendingNotice } from "../pending-notices.ts";
 
 vi.mock("../session-capture.ts", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../session-capture.ts")>();
-  return { ...mod, isOmpHost: vi.fn(() => false) };
+  return { ...mod, hostCommandName: vi.fn(() => "pi" as const) };
 });
 
 type HandlerEntry = {
@@ -64,7 +64,7 @@ describe("registerLifecycleCommands /quit and /exit", () => {
     });
 
     it(`/${name} names the host omp in its confirmation on OMP`, async () => {
-      vi.mocked(isOmpHost).mockReturnValueOnce(true);
+      vi.mocked(hostCommandName).mockReturnValueOnce("omp");
       const { registry, handlers } = makeRegistry();
       registerLifecycleCommands(registry);
       const { ctx, confirm } = makeCtx(true);

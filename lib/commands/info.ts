@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import type { CommandRegistry } from "./register.ts";
 import { escapeHtml } from "../html.ts";
+import { hostCommandName } from "../session-capture.ts";
 import type { CapturedAgentSession, TelegramTransport, TelegramTurn } from "../types.ts";
 
 function formatFooterLikeTokenCount(value: number): string {
@@ -184,7 +185,7 @@ export function registerInfoCommands(
 
   // ── /hotkeys ──────────────────────────────────────────────────────────
   registry.registerCommand("hotkeys", {
-    description: "How to use pi from Telegram",
+    description: `How to use ${hostCommandName()} from Telegram`,
     handler: async (_args, ctx) => {
       const ui = ctx.ui;
       ui.notify(

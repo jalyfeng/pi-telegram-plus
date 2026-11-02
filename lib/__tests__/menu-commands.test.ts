@@ -30,7 +30,7 @@ describe("Telegram command menu", () => {
     it("exposes /tg as the consolidated management menu command", () => {
         const commands = buildTelegramMenuCommands({
             getCommands: () => [],
-        } as any);
+        } as any, { pluginDescriptions: new Map([["tg", "Open the Telegram management menu"]]) });
 
         expect(commands).toContainEqual({
             command: "tg",
@@ -165,11 +165,12 @@ describe("dynamic TUI catalog in BotMenu", () => {
           { name: "model", description: "Select model (opens selector UI)", source: "builtin" as const },
           { name: "quit", description: "Quit pi", source: "builtin" as const },
         ],
+        pluginDescriptions: new Map([["tg", "Open the Telegram management menu"]]),
       },
     );
     expect(commands.find((c) => c.command === "model")?.description).toBe("Select model (opens selector UI)");
     expect(commands.find((c) => c.command === "quit")?.description).toBe("Quit pi");
-    // Entries the catalog does not describe keep the fallback wording.
+    // A plugin-served entry the catalog does not describe keeps the plugin's own wording.
     expect(commands.find((c) => c.command === "tg")?.description).toBe("Open the Telegram management menu");
   });
 

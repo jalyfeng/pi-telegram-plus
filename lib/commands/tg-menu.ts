@@ -12,6 +12,7 @@ import type { TuiHost } from "../tui-bridge.ts";
 import { configToolFlow, configThinkingFlow, configRetryFlow, configBashFlow, configModeFlow } from "./tg-config.ts";
 import { formatPairingInstructions } from "../pairing.ts";
 import { formatDebugReport } from "./info.ts";
+import { hostCommandName } from "../session-capture.ts";
 import { recordTelegramCommandDescription } from "../telegram-command-descriptions.ts";
 import {
   addBotFlow,
@@ -428,7 +429,7 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
       }
     } else if (choice === connectLabel) {
       if (connection === "other-instance") {
-        ui.notify("Another pi instance is serving this bot", "info");
+        ui.notify(`Another ${hostCommandName()} instance is serving this bot`, "info");
       } else if (connection === "disconnected") {
         // flow awaits reconcile, so the next render shows the new state.
         await enableProjectFlow(ui, deps, cwd);
@@ -506,7 +507,7 @@ async function configMenu(ui: MenuUi, configDeps: TgConfigDeps, sessionDeps?: Se
 async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): Promise<boolean> {
   const coordinator = switchDeps.getCoordinator();
   if (!coordinator || !coordinator.isActive()) {
-    ui.notify("This pi instance is not the active Telegram instance.", "error");
+    ui.notify(`This ${hostCommandName()} instance is not the active Telegram instance.`, "error");
     return true; // back to main
   }
   const instances = await coordinator.listInstances();
@@ -517,7 +518,7 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
   }
 
   const choices = instances.map((instance) => formatInstanceChoice(instance, active.instanceId));
-  const selected = await pickMenu(ui, "Switch Telegram pi instance", [...choices, BACK_LABEL]);
+  const selected = await pickMenu(ui, `Switch Telegram ${hostCommandName()} instance`, [...choices, BACK_LABEL]);
   if (selected === BACK_LABEL) return true; // back to main
 
   const target = instances[choices.indexOf(selected)];
