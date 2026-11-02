@@ -818,6 +818,8 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async () => {
+    // sub-agent sessions re-run this factory; starting the TUI runtime only from the main session keeps a sub-agent's trackers from replacing the main session's host hooks (#32)
+    controller.startTui();
     // Only the main session reaches this handler (sub-agents are filtered by
     // mainOnlyEvents), so it takes over the process runtime from any earlier one.
     if (runtimeState.dispose && runtimeState.dispose !== disposeRuntime) runtimeState.dispose();

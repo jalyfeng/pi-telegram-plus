@@ -45,6 +45,13 @@ export type TelegramController = {
   handleCallbackQuery(query: TelegramCallbackQuery): Promise<void>;
   /** Dispatch a named command from an inline menu (e.g. /tg → Commands). */
   runCommand(name: string, args: string, chatId: number, messageThreadId?: number, sourceMessageId?: number): Promise<void>;
+  /**
+   * Starts the TUI runtime (host capture, focus tracking, output capture, dialog
+   * broker). Idempotent. Only the main session calls it: sub-agent sessions re-run
+   * the extension factory, and their own trackers would otherwise replace the main
+   * session's host hooks (#32).
+   */
+  startTui(): void;
   dispose(): void;
 };
 
@@ -797,7 +804,6 @@ export function createTelegramController(deps: {
       }));
     }),
   });
-  commandGateway.start();
 
   const dialogBroker = new DialogBroker({
     transport: deps.transport,
@@ -814,9 +820,16 @@ export function createTelegramController(deps: {
     // there it must stay completely inert - see hostOwnsPrompts.
     enabled: () => hostOwnsPrompts(bridge),
   });
-  dialogBroker.start();
   // Output too long for the command's message is paged on it by the broker.
+  // attachPager only stores the callback; it starts nothing, so it stays here.
   outputCapture.attachPager((target, title, html) => dialogBroker.showPaged(target, title, html));
+  let tuiStarted = false;
+  const startTui = (): void => {
+    if (tuiStarted) return;
+    tuiStarted = true;
+    commandGateway.start();
+    dialogBroker.start();
+  };
 
   /**
    * §4.2.6 item 2: while the DialogBroker is live, prompts raised by work this
@@ -1755,6 +1768,7 @@ export function createTelegramController(deps: {
       await dispatchNamedCommand(name.toLowerCase(), args, session, chatId, messageThreadId, sourceMessageId);
     },
 
+    startTui,
     dispose() {
       dialogBroker.stop();
       commandGateway.dispose();
