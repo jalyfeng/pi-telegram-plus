@@ -98,6 +98,10 @@ export class OutputCapture {
   /** `attached` already holds `mode` from the status-hook loop; report hooks
    * need their own dedupe set. */
   private readonly reportHooked = new WeakSet<object>();
+  /** Nesting depth of `mode.showCommandReport` calls in progress. While it is
+   * above zero the report container's `addChild` is part of that report, which
+   * `showCommandReport` already pushes with its title (see `attach`). */
+  private reportDepth = 0;
   /** D3b: bash components claimed by the "!" scope, and the ones whose final
    * render already went out. */
   private readonly bashTracked = new WeakSet<object>();
@@ -305,13 +309,15 @@ export class OutputCapture {
         }, this);
       }
     }
-    // A short OMP report (`showCommandReport` with the inline ReportPanel) is
-    // added to the report container by the controller, not through the mode.
-    // Inside a command's chain it is that command's output (v8 §0.2).
+    // A short OMP report added straight to the report container, outside
+    // `showCommandReport`, is that command's output when it runs inside the
+    // command's chain (v8 §0.2). A report made by `showCommandReport` is skipped
+    // here: that hook pushes it once, with its title (see below).
     const reports = isHostObject(state.mode) ? (state.mode as Record<string, unknown>).reportContainer : undefined;
     if (isHostObject(reports) && !this.attached.has(reports)) {
       this.attached.add(reports);
       hookMethod(reports, "addChild", "output-report-add-child", undefined, (args) => {
+        if (this.reportDepth > 0) return;
         const binding = this.binding;
         if (!binding || binding.finished || currentCommandScope() !== binding.scope) return;
         const child = args[0];
@@ -324,11 +330,18 @@ export class OutputCapture {
     }
     // OMP reports (`/mcp` and friends) draw a titled block on the main screen
     // instead of opening a dialog: `showCommandReport({ title, body })`. It is
-    // command output (T3.1).
+    // command output (T3.1). In oh-my-pi@v18.14.1 the host builds the ReportPanel
+    // and calls `reportContainer.addChild` inside that same synchronous call
+    // (modes/controllers/command-controller.ts showCommandReport), so the
+    // depth counter marks that addChild as part of this report.
     const mode = state.mode;
     if (isHostObject(mode) && !this.reportHooked.has(mode)) {
       this.reportHooked.add(mode);
-      hookMethod(mode, "showCommandReport", "output-command-report", undefined, (args) => {
+      hookMethod(mode, "showCommandReport", "output-command-report", () => {
+        // `hookMethod` runs `after` even when the host throws, so this is balanced.
+        this.reportDepth += 1;
+      }, (args) => {
+        this.reportDepth = Math.max(0, this.reportDepth - 1);
         // Only a report shown inside this binding's command chain is its output;
         // an agent-triggered report during an open scope is not (v8 §0.2).
         const binding = this.binding;
