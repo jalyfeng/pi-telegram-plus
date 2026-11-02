@@ -15,7 +15,7 @@ import type {
 } from "./types.ts";
 import type { TelegramUiRuntime } from "./telegram-ui.ts";
 import type { TuiBridgeAdapter } from "./tui-bridge.ts";
-import { tuiBridge as defaultTuiBridge, hostOwnsPrompts } from "./tui-bridge.ts";
+import { getTuiHostState, tuiBridge as defaultTuiBridge, hostOwnsPrompts } from "./tui-bridge.ts";
 import { isTerminalOnlyCommand, terminalOnlyReply } from "./terminal-only-commands.ts";
 import { escapeHtml } from "./html.ts";
 import { richMessageToPlainText } from "./rich-text-plain.ts";
@@ -1044,6 +1044,20 @@ export function createTelegramController(deps: {
   // While background workflow agents run, session.isStreaming stays true and
   // core rejects plain prompts; steer/followUp would drain into a workflow
   // agent's turn instead (repo issue #10).
+  // OMP's loop mode arms its loop prompt only from the editor's own submit
+  // (oh-my-pi@v18.14.1 packages/coding-agent/src/modes/controllers/input-controller.ts
+  // ~1400-1407), so a prompt the plugin hands to the host is invisible to it.
+  // Arm it synchronously, before the idle prompt is dispatched, as the host does.
+  const armOmpLoopPrompt = (text: string): void => {
+    try {
+      const mode = getTuiHostState().mode as { loopModeEnabled?: unknown; setLoopPrompt?: unknown } | undefined;
+      if (mode?.loopModeEnabled !== true || typeof mode.setLoopPrompt !== "function") return;
+      mode.setLoopPrompt(text);
+    } catch (err) {
+      ctrlLog.debug("arming OMP loop prompt failed", { err });
+    }
+  };
+
   const deliverToMainThread = async (text: string, chatId: number, messageThreadId: number | undefined, sourceMessageId: number | undefined, onTaken: TakenSignal): Promise<void> => {
     const session = deps.getSession();
     if (!session) return;
@@ -1092,6 +1106,7 @@ export function createTelegramController(deps: {
         }
         continue;
       }
+      armOmpLoopPrompt(text);
       try {
         await promptAndSignal(session, text, { source: "interactive" }, onTaken);
         return;

@@ -1,12 +1,18 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTelegramController } from "../controller.ts";
 import type * as tuiBridgeModule from "../tui-bridge.ts";
 import type { TelegramConfig } from "../types.ts";
 
 // v6: the host bridge is the only path for host commands - run these with the bridge up.
+// hostMode.value stands in for the captured host InteractiveMode (OMP loop mode tests).
+const hostMode = vi.hoisted(() => ({ value: undefined as unknown }));
 vi.mock("../tui-bridge.ts", async (importOriginal) => {
   const mod = await importOriginal<typeof tuiBridgeModule>();
-  return { ...mod, tuiBridge: { ...mod.tuiBridge, isAvailable: () => true, getHost: () => "pi" as const } };
+  return {
+    ...mod,
+    tuiBridge: { ...mod.tuiBridge, isAvailable: () => true, getHost: () => "pi" as const },
+    getTuiHostState: () => ({ host: "omp" as const, mode: hostMode.value }),
+  };
 });
 
 // ── TUI parity (fixed behavior, no modes) ────────────────────────────────
@@ -333,5 +339,82 @@ describe("TUI-parity message delivery", () => {
 
     expect(prompts.map((item) => item.text)).toEqual(["first", "second"]);
     expect(prompts.every((item) => item.opts && !("streamingBehavior" in item.opts))).toBe(true);
+  });
+});
+
+describe("OMP loop mode arms with prompts sent from Telegram", () => {
+  afterEach(() => {
+    hostMode.value = undefined;
+  });
+
+  it("arms the loop prompt before an idle Telegram prompt is handed to the host", async () => {
+    const streamingRef = { value: false };
+    const idleRef = { value: true };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    let promptsWhenArmed = -1;
+    const setLoopPrompt = vi.fn((_text: string) => {
+      promptsWhenArmed = prompts.length;
+    });
+    hostMode.value = { loopModeEnabled: true, setLoopPrompt };
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent);
+
+    await sendMessage(controller, "loop body");
+    await waitFor(() => prompts.length === 1);
+
+    expect(setLoopPrompt).toHaveBeenCalledTimes(1);
+    expect(setLoopPrompt).toHaveBeenCalledWith("loop body");
+    expect(promptsWhenArmed).toBe(0);
+    expect(prompts[0].text).toBe("loop body");
+  });
+
+  it("does not arm when OMP loop mode is off", async () => {
+    const streamingRef = { value: false };
+    const idleRef = { value: true };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const setLoopPrompt = vi.fn();
+    hostMode.value = { loopModeEnabled: false, setLoopPrompt };
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent);
+
+    await sendMessage(controller, "loop body");
+    await waitFor(() => prompts.length === 1);
+
+    expect(setLoopPrompt).not.toHaveBeenCalled();
+  });
+
+  it("does not arm when the message steers into a busy main turn", async () => {
+    const streamingRef = { value: true };
+    const idleRef = { value: false };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    const setLoopPrompt = vi.fn();
+    hostMode.value = { loopModeEnabled: true, setLoopPrompt };
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent, { messageMode: "steer" });
+
+    await sendMessage(controller, "steer me");
+    await waitFor(() => prompts.length === 1);
+
+    expect(prompts[0].opts?.streamingBehavior).toBe("steer");
+    expect(setLoopPrompt).not.toHaveBeenCalled();
+  });
+
+  it("still delivers the prompt when arming the loop throws", async () => {
+    const streamingRef = { value: false };
+    const idleRef = { value: true };
+    const prompts: Array<{ text: string; opts?: Record<string, unknown> }> = [];
+    const sent: Array<{ text: string }> = [];
+    hostMode.value = {
+      loopModeEnabled: true,
+      setLoopPrompt: () => {
+        throw new Error("boom");
+      },
+    };
+    const controller = createController(createSession(streamingRef, idleRef, prompts), sent);
+
+    await sendMessage(controller, "loop body");
+    await waitFor(() => prompts.length === 1);
+
+    expect(prompts[0].text).toBe("loop body");
   });
 });
