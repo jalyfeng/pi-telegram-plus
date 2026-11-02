@@ -242,7 +242,7 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
     // Keys are the exact callback arguments of the buttons drawn above, so the
     // Broker can look one up without knowing this is a nested view.
     for (const [key, value] of inner.keyMap) keyMap.set(key, value);
-    return { text: `${inner.text}\n<i>Submenu · Back sends Esc</i>`, rows, keyMap, page: 0, pages: 1 };
+    return { text: inner.text, rows, keyMap, page: 0, pages: 1 };
   }
   const page = Math.max(0, ctx.page ?? 0);
   // Page switches (shortcuts) are not list rows: they form a compact block under the list.

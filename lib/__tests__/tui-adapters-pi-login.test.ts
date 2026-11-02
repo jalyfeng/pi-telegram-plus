@@ -125,3 +125,43 @@ describe("piLoginAdapter act", () => {
     expect(completions).toEqual([{ ok: false, message: "Login cancelled" }]);
   });
 });
+
+describe("piLoginAdapter read: terminal key hints stay off the body", () => {
+  it("drops the key hint pi prints right after a prompt's input", () => {
+    const { dialog, ctx } = loginHarness();
+    void dialog.showPrompt("Paste your API key");
+    const model = piLoginAdapter.read(dialog, ctx);
+    expect(model.kind).toBe("input");
+    if (model.kind !== "input") return;
+    // Only the message is body; "(escape/ctrl+c to cancel ...)" is a key hint.
+    expect(model.placeholder).toBe("Paste your API key");
+  });
+
+  it("keeps the example line, drops the key hint, under a prompt with a placeholder", () => {
+    const { dialog, ctx } = loginHarness();
+    void dialog.showPrompt("Paste your API key", "sk-...");
+    const model = piLoginAdapter.read(dialog, ctx);
+    if (model.kind !== "input") throw new Error(`expected an input model, got ${model.kind}`);
+    expect(model.placeholder).toBe("Paste your API key\ne.g., sk-...");
+  });
+
+  it("drops the key hint under a manual input as well", () => {
+    const { dialog, ctx } = loginHarness();
+    void dialog.showManualInput("Paste the redirect URL");
+    const model = piLoginAdapter.read(dialog, ctx);
+    if (model.kind !== "input") throw new Error(`expected an input model, got ${model.kind}`);
+    expect(model.placeholder).toBe("Paste the redirect URL");
+  });
+
+  it("keeps every line of an information page, its last line included", () => {
+    const { dialog, ctx } = loginHarness();
+    // No input component in the content area: nothing is skipped.
+    dialog.showWaiting("Waiting for the browser...");
+    const model = piLoginAdapter.read(dialog, ctx);
+    if (model.kind !== "info") throw new Error(`expected an info model, got ${model.kind}`);
+    const lines = model.text.split("\n");
+    expect(lines[0]).toBe("Waiting for the browser...");
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("to cancel");
+  });
+});

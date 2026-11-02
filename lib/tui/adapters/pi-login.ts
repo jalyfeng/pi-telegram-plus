@@ -27,16 +27,36 @@ function contentChildren(component: object): unknown[] | undefined {
 }
 
 /**
+ * Index of the key-hint `Text` that pi prints right after the input, or -1.
+ * login-dialog.js `showPrompt` and `showManualInput` add `this.input` and then
+ * a `Text` such as "(escape/ctrl+c to cancel, enter to submit)": a terminal
+ * key hint, meaningless on Telegram. Found by position next to the input
+ * component, not by matching its words. With no input in the area (an
+ * information page) nothing is skipped.
+ */
+function keyHintIndex(component: object, children: unknown[]): number {
+  const input = (component as HostRecord).input;
+  if (!input || typeof input !== "object") return -1;
+  const at = children.indexOf(input);
+  if (at < 0) return -1;
+  const next = children[at + 1];
+  return next && typeof next === "object" && typeof (next as HostRecord).text === "string" ? at + 1 : -1;
+}
+
+/**
  * Readable lines of the content area: `Text` text (theme colours stripped),
  * and the bare `url` of an `AuthUrlComponent` (or anything else exposing one).
  * Lines starting with "> " are submitted values the host echoed back -
  * possibly API keys - and are skipped here so no model can carry them out.
+ * The key hint after the input is skipped too (see `keyHintIndex`).
  */
 function bodyLines(component: object): string[] {
   const children = contentChildren(component);
   if (!children) return [];
+  const hint = keyHintIndex(component, children);
   const lines: string[] = [];
-  for (const child of children) {
+  for (const [index, child] of children.entries()) {
+    if (index === hint) continue;
     if (!child || typeof child !== "object") continue;
     const record = child as HostRecord;
     if (typeof record.url === "string" && record.url.length > 0) {

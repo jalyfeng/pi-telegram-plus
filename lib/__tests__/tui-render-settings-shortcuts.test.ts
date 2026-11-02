@@ -70,3 +70,30 @@ describe("settings page switches as a compact block", () => {
     expect(rendered.keyMap.get("0.0.0")).toBe("row0=On");
   });
 });
+
+describe("settings submenu text", () => {
+  const submenu = (): SettingsModel => ({
+    kind: "settings",
+    title: "Settings",
+    items: [{ key: "model-thinking", label: "Default thinking level per model", value: "", hasSubmenu: true }],
+    submenu: {
+      itemKey: "model-thinking",
+      model: {
+        kind: "select",
+        title: "Per-Model Thinking Level",
+        total: 1,
+        subtitle: "Step 1/2 · Select a model to configure",
+        items: [{ key: "0:Model A", label: "Model A", focused: true, current: false }],
+      },
+    },
+  });
+
+  it("carries the step line and no plugin-internal note about Esc", () => {
+    const rendered = renderDialog(submenu(), { ...CTX, page: 0 });
+    expect(rendered.text).toContain("Step 1/2 · Select a model to configure");
+    expect(rendered.text).not.toContain("Back sends Esc");
+    expect(rendered.text).not.toContain("Submenu");
+    // The way back is the Back button itself.
+    expect(labels(rendered.rows).flat()).toContain("↩ Back");
+  });
+});
