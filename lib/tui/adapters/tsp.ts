@@ -1428,6 +1428,85 @@ function ownerMasks(owner: object): boolean {
   return isObject(inner) && inner.mask === true;
 }
 
+/** The MCP add wizard's step title and lead (`omp.mcpAdd.title` / `.lead`). */
+const WIZARD_LEAD_ROLE = "omp.mcpAdd.lead";
+/** Extra-action key for the wizard's Back button (the renderer sends it back as a `key` action). */
+const WIZARD_BACK_KEY = "wizard:back";
+
+/** A choice step of a wizard: the host's `list` node and its `item` children. */
+type WizardChoices = {
+  owner: object;
+  keypath: string;
+  items: { key: string; label: string; note?: string; focused: boolean }[];
+};
+
+/** The first list that holds plain `item` children, with its items read by shape. */
+function wizardChoices(component: object): WizardChoices | undefined {
+  const found = findDescribedNode(component, (node) => node.k === "list" && Array.isArray(node.c) && node.c.some((child) => isObject(child) && child.k === "item"));
+  if (!found) return undefined;
+  const props = isObject(found.node.p) ? found.node.p : {};
+  const selected = typeof props.selected === "string" ? props.selected : undefined;
+  const children = found.node.c as unknown[];
+  const items: WizardChoices["items"] = [];
+  children.forEach((child, index) => {
+    if (!isObject(child) || child.k !== "item" || !isObject(child.p)) return;
+    const key = child.key === undefined ? String(index) : String(child.key);
+    const label = tspText(child.p.label).trim();
+    const note = tspText(child.p.detail).trim();
+    items.push({ key, label, ...(note ? { note } : {}), focused: key === selected });
+  });
+  return { owner: found.owner, keypath: found.keypath, items };
+}
+
+/** The Back button's label when the host's action bar offers one. */
+function wizardBackLabel(component: object): string | undefined {
+  const found = findDescribedNode(component, (node) => isObject(node.p) && isObject(node.p.actions) && node.p.actions.click === "back");
+  if (!found) return undefined;
+  return firstText(found.node) || "Back";
+}
+
+/** The select model for a wizard's choice step: its title, lead, items and Back. */
+function wizardChoiceModel(component: object, choices: WizardChoices): DialogModel {
+  const titleNode = findDescribedNode(component, (node) => node.k === "text" && isObject(node.p) && node.p.role === WIZARD_TITLE_ROLE);
+  const leadNode = findDescribedNode(component, (node) => node.k === "text" && isObject(node.p) && node.p.role === WIZARD_LEAD_ROLE);
+  const root = describeTree(component);
+  const head = root ? overlayHead(root, new Set<object>()) : "";
+  const title = (titleNode ? nodeText(titleNode.node).trim() : "") || head || "Choose";
+  const lead = leadNode ? nodeText(leadNode.node).trim() : "";
+  const back = wizardBackLabel(component);
+  return {
+    kind: "select",
+    title,
+    items: choices.items,
+    total: choices.items.length,
+    ...(lead ? { subtitle: lead } : {}),
+    ...(back ? { extraActions: [{ label: back, key: WIZARD_BACK_KEY }] } : {}),
+  };
+}
+
+/**
+ * Answer a wizard's choice step: a tapped item is the host's `activate` on its
+ * list (what Enter on the highlighted row sends), Back and Cancel are its
+ * `action` events. Only the events the host's own handler takes are sent.
+ */
+function actWizardChoices(component: object, action: DialogAction, ctx: AdapterContext): boolean {
+  const choices = wizardChoices(component);
+  if (!choices) return false;
+  let event: unknown;
+  if (action.type === "choose") {
+    if (!choices.items.some((item) => item.key === action.key)) return false;
+    event = { type: "activate", key: choices.keypath, item: action.key };
+  } else if (action.type === "key" && action.name === WIZARD_BACK_KEY) {
+    if (wizardBackLabel(component) === undefined) return false;
+    event = { type: "action", key: "", act: "back", mods: [] };
+  } else if (action.type === "cancel") {
+    event = { type: "action", key: "", act: "cancel", mods: [] };
+  } else {
+    return false;
+  }
+  return sendPickerEvent(choices.owner, event, ctx);
+}
+
 /**
  * OMP's built-in text prompts (login API keys): the host describes the field
  * as an `input` node and takes `{ act: "submit" | "cancel" }` on its root.
@@ -1449,7 +1528,12 @@ export const tspInputAdapter: DialogAdapter = {
 
   read(component): DialogModel {
     const found = findPrompt(component);
-    if (!found) return { kind: "unsupported", what: "OMP text prompt closed or no longer an input" };
+    if (!found) {
+      // A wizard's choice step (e.g. the MCP add wizard's transport) has a list, not a field.
+      const choices = wizardChoices(component);
+      if (choices) return wizardChoiceModel(component, choices);
+      return { kind: "unsupported", what: "OMP text prompt closed or no longer an input" };
+    }
     const title = found.heading ?? promptTitle(found.label) ?? "Input";
     const secret = ownerMasks(found.input.owner) || SECRET_TITLE.test(title);
     const placeholder = tspText(found.input.props.placeholder).trim();
@@ -1465,7 +1549,7 @@ export const tspInputAdapter: DialogAdapter = {
 
   act(component, action, ctx) {
     // Never act on a stale tree: the prompt may be gone underneath us.
-    if (findNode(component, "input") === undefined) return false;
+    if (findNode(component, "input") === undefined) return actWizardChoices(component, action, ctx);
     const handle = (component as Partial<Describable>).handleNativeEvent;
     if (typeof handle !== "function") return false;
     let event: unknown;

@@ -1752,3 +1752,89 @@ describe("tsp picker row-scoped actions", () => {
     expect(asSelect(tspPickerAdapter.read(first, ctxFor())).subtitle).toBe("Delete: choose a session");
   });
 });
+
+describe("tsp input wizard choice step", () => {
+  /** The MCP add wizard's transport step (`omp.mcpAdd.choices`), as OMP describes it. */
+  const choiceWizard = (selected = "0", withBack = true) => ({
+    k: "col",
+    c: [
+      {
+        k: "overlay",
+        p: { role: "omp.overlay.mcpAdd", head: "Add MCP server" },
+        c: [
+          {
+            k: "col",
+            c: [
+              { k: "text", p: { text: "How does omp reach it?", role: "omp.mcpAdd.title" } },
+              { k: "text", p: { text: "Pick how the server is started.", role: "omp.mcpAdd.lead" } },
+              {
+                k: "list",
+                key: "choices-transport",
+                p: { selected, role: "omp.mcpAdd.choices" },
+                c: [
+                  { k: "item", key: "0", p: { label: "Local command (stdio)", detail: "Runs a process" } },
+                  { k: "item", key: "1", p: { label: "Remote server (http)" } },
+                  { k: "item", key: "2", p: { label: "Server-sent events (sse)" } },
+                ],
+              },
+              {
+                k: "row",
+                p: { role: "omp.actions" },
+                c: [
+                  { k: "row", p: { role: "omp.btn", actions: { click: "cancel" } }, c: [{ k: "text", p: { text: "Cancel" } }] },
+                  ...(withBack ? [{ k: "row", p: { role: "omp.btn", actions: { click: "back" } }, c: [{ k: "text", p: { text: "Back" } }] }] : []),
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  it("reads the choice step as a single-choice list with the highlight on the selected item", () => {
+    const component = makeComponent(choiceWizard("0"));
+    expect(tspInputAdapter.read(component, ctxFor())).toEqual({
+      kind: "select",
+      title: "How does omp reach it?",
+      subtitle: "Pick how the server is started.",
+      items: [
+        { key: "0", label: "Local command (stdio)", note: "Runs a process", focused: true },
+        { key: "1", label: "Remote server (http)", focused: false },
+        { key: "2", label: "Server-sent events (sse)", focused: false },
+      ],
+      total: 3,
+      extraActions: [{ label: "Back", key: "wizard:back" }],
+    });
+  });
+
+  it("answers a tapped choice with the host's activate event on the list", () => {
+    const component = makeComponent(choiceWizard());
+    expect(tspInputAdapter.act(component, { type: "choose", key: "1" }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([{ type: "activate", key: expect.stringMatching(/choices-transport$/), item: "1" }]);
+  });
+
+  it("refuses a choice the list does not hold", () => {
+    const component = makeComponent(choiceWizard());
+    expect(tspInputAdapter.act(component, { type: "choose", key: "9" }, ctxFor())).toBe(false);
+    expect(component.events).toEqual([]);
+  });
+
+  it("sends Back and Cancel as the host's action events", () => {
+    const component = makeComponent(choiceWizard());
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:back" }, ctxFor())).toBe(true);
+    expect(tspInputAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([
+      { type: "action", key: "", act: "back", mods: [] },
+      { type: "action", key: "", act: "cancel", mods: [] },
+    ]);
+  });
+
+  it("offers no Back when the host shows no back button", () => {
+    const component = makeComponent(choiceWizard("0", false));
+    const model = tspInputAdapter.read(component, ctxFor());
+    expect(model).toMatchObject({ kind: "select" });
+    expect(model).not.toHaveProperty("extraActions");
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:back" }, ctxFor())).toBe(false);
+  });
+});
