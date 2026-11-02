@@ -156,7 +156,7 @@ function confirmButtonLabel(model: DialogModel, yes: boolean): string {
 
 /** The text of the key button the tap came from; the internal key is only the fallback. */
 function keyButtonLabel(model: DialogModel, key: string): string {
-  if (model.kind === "select") {
+  if (model.kind === "select" || model.kind === "input") {
     const label = model.extraActions?.find((extra) => extra.key === key)?.label;
     if (label) return label;
   }

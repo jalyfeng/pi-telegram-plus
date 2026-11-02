@@ -187,6 +187,18 @@ describe("host detail shown as message text (Y-2)", () => {
     expect(keyMap.size).toBe(0);
   });
 
+  it("keeps the host's line and paragraph breaks in a confirmation's text", () => {
+    const message = "omp connects to the server as soon as it is saved.\n\nName: fs2\nTransport: Local command · stdio";
+    const { text } = renderDialog({ kind: "confirm", title: "Review and save", message, confirmLabel: "Save server", cancelLabel: "Back" }, CTX);
+    expect(text).toContain("omp connects to the server as soon as it is saved.\n\nName: fs2\nTransport: Local command · stdio");
+  });
+
+  it("puts an input's extra buttons above Cancel", () => {
+    const model: DialogModel = { kind: "input", title: "Arguments", secret: false, extraActions: [{ label: "Continue", key: "wizard:skip" }] };
+    const { rows } = renderDialog(model, CTX);
+    expect(texts(rows)).toEqual([["Continue"], ["Cancel"]]);
+  });
+
   it("keeps Yes and No for a confirm without host labels", () => {
     const { rows } = renderDialog({ kind: "confirm", title: "Sure?" }, CTX);
     expect(texts(rows)).toEqual([["✅ Yes", "❌ No"], ["Cancel"]]);

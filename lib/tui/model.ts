@@ -91,6 +91,8 @@ export type DialogModel =
       prefill?: string;
       /** A multi-step wizard's step list, with the step on screen marked `current`. */
       steps?: { label: string; current: boolean }[];
+      /** Buttons under the field (e.g. a wizard's Skip on an optional step); each one's tap is a `key` action with its `key`. */
+      extraActions?: { label: string; key: string }[];
     }
   | { kind: "editor"; title: string; prefill?: string }
   | { kind: "progress"; text: string; cancellable: boolean }

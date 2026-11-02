@@ -356,7 +356,7 @@ function renderApproval(model: Extract<DialogModel, { kind: "approval" }>, ctx: 
 }
 
 function renderConfirm(model: Extract<DialogModel, { kind: "confirm" }>, ctx: RenderContext): RenderedDialog {
-  const body = model.message ? `${escapeHtml(shorten(model.message, 900))}\n` : "";
+  const body = model.message ? `${escapeHtml(messageBody(model.message))}\n` : "";
   if (model.confirmLabel) {
     // The host named its own buttons (e.g. Delete / Cancel): use them, not Yes / No.
     const answers = keep([
@@ -383,11 +383,36 @@ function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: Render
     model.secret ? "<i>Secret input: send a message; the bot will not echo it.</i>\n" : "",
     "Send a message as the input, or tap Cancel.",
   ];
-  return { text: header(model.title, undefined, body), rows: [cancelRow(ctx)], keyMap: new Map(), page: 0, pages: 1 };
+  // The input's extra buttons (e.g. Skip) sit above Cancel, as a select's do.
+  const extras = keep((model.extraActions ?? []).map((extra) => button(shorten(extra.label, MAX_LABEL), ctx, "k", extra.key)));
+  return { text: header(model.title, undefined, body), rows: [...chunk(extras), cancelRow(ctx)], keyMap: new Map(), page: 0, pages: 1 };
 }
 
 /** Progress lines keep their line breaks: each line is shortened on its own,
  * and whole lines are dropped from the end once the 900-character budget is spent. */
+/**
+ * A confirmation's message as Telegram text: each line shortened on its own,
+ * so the host's line breaks and paragraph breaks survive; whole lines are
+ * dropped from the end once the 900-character budget is spent.
+ */
+function messageBody(text: string): string {
+  const kept: string[] = [];
+  let total = 0;
+  for (const raw of text.split("\n")) {
+    const line = shorten(raw, 900);
+    if (line === "") {
+      if (kept.length > 0 && kept[kept.length - 1] !== "") kept.push("");
+      continue;
+    }
+    const cost = line.length + (kept.length > 0 ? 1 : 0);
+    if (total + cost > 900) break;
+    kept.push(line);
+    total += cost;
+  }
+  while (kept.length > 0 && kept[kept.length - 1] === "") kept.pop();
+  return kept.join("\n");
+}
+
 function progressBody(text: string): string {
   const kept: string[] = [];
   let total = 0;

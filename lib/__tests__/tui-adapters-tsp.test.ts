@@ -7,7 +7,7 @@
  * with the host.
  * The prefs tests pin the settings-page mapping and the §4.12 race hand-off.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { pickAdapter } from "../tui/adapters/index.ts";
 import { describesLoginSheet, describesTextInput, findPicker, tspInputAdapter, tspLoginAdapter, tspPickerAdapter, tspPrefsAdapter } from "../tui/adapters/tsp.ts";
 import type { AdapterContext, DialogModel } from "../tui/model.ts";
@@ -1928,7 +1928,7 @@ describe("tsp input wizard review summary", () => {
                     role: "omp.mcpAdd.summary",
                     items: [
                       { k: "Name", v: "localfs" },
-                      { k: "Transport", v: "stdio" },
+                      { k: "Transport", v: [{ t: "Local command  " }, { t: "stdio" }] },
                       { k: "Arguments", v: "hello" },
                       { k: "Auth", v: [{ t: "None" }] },
                       { k: "Saved in", v: [{ t: "This project  " }, { t: ".omp/mcp.json" }] },
@@ -1954,14 +1954,75 @@ describe("tsp input wizard review summary", () => {
       title: "Review and save",
       message: [
         "omp connects to the server as soon as it is saved.",
-        "Name: localfs",
-        "Transport: stdio",
-        "Arguments: hello",
-        "Auth: None",
-        "Saved in: This project  .omp/mcp.json",
-      ].join("\n"),
+        ["Name: localfs", "Transport: Local command · stdio", "Arguments: hello", "Auth: None", "Saved in: This project · .omp/mcp.json"].join("\n"),
+      ].join("\n\n"),
       confirmLabel: "Save server",
       cancelLabel: "Back",
     });
+  });
+});
+
+describe("tsp input wizard optional step", () => {
+  /** A text step of the MCP add wizard: title row with an Optional tag, a footer with Continue and Back. */
+  const optionalStep = (optional: boolean) => {
+    const title: { k: string; p: { text: string; role: string } }[] = [{ k: "text", p: { text: "Arguments", role: "omp.mcpAdd.title" } }];
+    if (optional) title.push({ k: "text", p: { text: "Optional", role: "omp.mcpAdd.tag" } });
+    return {
+      k: "frame",
+      c: [
+        { k: "row", p: { role: "omp.mcpAdd.head" }, c: title },
+        { k: "input", p: { text: "", placeholder: "hello" } },
+        {
+          k: "row",
+          p: { role: "omp.actions" },
+          c: [
+            { k: "row", p: { role: "omp.btn", actions: { click: "back" } }, c: [{ k: "text", p: { text: "Back" } }] },
+            { k: "row", p: { role: "omp.btn", actions: { click: "next" } }, c: [{ k: "text", p: { text: "Continue" } }] },
+          ],
+        },
+      ],
+    };
+  };
+
+  /** The step's text field, as a nested object the adapter reaches by shape. */
+  const withField = (tree: object) => {
+    const component = makeComponent(tree);
+    const field = {
+      input: { mask: false },
+      getValue: vi.fn(() => ""),
+      setValue: vi.fn(),
+      submit: vi.fn(),
+    };
+    return Object.assign(component, { field });
+  };
+
+  it("offers Skip on an optional step, labelled with the footer's Continue", () => {
+    const component = withField(optionalStep(true));
+    expect(tspInputAdapter.read(component, ctxFor())).toMatchObject({
+      kind: "input",
+      extraActions: [{ label: "Continue", key: "wizard:skip" }],
+    });
+  });
+
+  it("skips an optional step by submitting its field empty", () => {
+    const component = withField(optionalStep(true));
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:skip" }, ctxFor())).toBe(true);
+    expect(component.field.setValue).toHaveBeenCalledWith("");
+    expect(component.field.submit).toHaveBeenCalledTimes(1);
+    expect(component.field.setValue.mock.invocationCallOrder[0]).toBeLessThan(component.field.submit.mock.invocationCallOrder[0]);
+  });
+
+  it("gives a required step no Skip, and refuses one", () => {
+    const component = withField(optionalStep(false));
+    expect(tspInputAdapter.read(component, ctxFor())).not.toHaveProperty("extraActions");
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:skip" }, ctxFor())).toBe(false);
+    expect(component.field.submit).not.toHaveBeenCalled();
+  });
+
+  it("skips an optional step without a field by sending the footer's next", () => {
+    // The input node stays; no TextFormField is nested, so the footer's next answers the step.
+    const component = makeComponent(optionalStep(true));
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:skip" }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([{ type: "action", key: "", act: "next", mods: [] }]);
   });
 });

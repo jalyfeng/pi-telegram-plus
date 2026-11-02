@@ -1432,6 +1432,15 @@ function ownerMasks(owner: object): boolean {
 const WIZARD_LEAD_ROLE = "omp.mcpAdd.lead";
 /** Extra-action key for the wizard's Back button (the renderer sends it back as a `key` action). */
 const WIZARD_BACK_KEY = "wizard:back";
+/** Extra-action key for an optional text step's Skip button. */
+const WIZARD_SKIP_KEY = "wizard:skip";
+/** The "Optional" tag the host puts beside an optional step's title (`role: omp.mcpAdd.tag`). */
+const WIZARD_OPTIONAL_ROLE = "omp.mcpAdd.tag";
+
+/** True when the wizard step on screen is optional (its title carries the Optional tag). */
+function wizardOptional(component: object): boolean {
+  return findDescribedNode(component, (node) => node.k === "text" && isObject(node.p) && node.p.role === WIZARD_OPTIONAL_ROLE) !== undefined;
+}
 
 /** A choice step of a wizard: the host's `list` node and its `item` children. */
 type WizardChoices = {
@@ -1471,6 +1480,18 @@ function wizardTitle(component: object, fallback: string): string {
   const root = describeTree(component);
   const head = root ? overlayHead(root, new Set<object>()) : "";
   return (titleNode ? nodeText(titleNode.node).trim() : "") || head || fallback;
+}
+
+/**
+ * A value's readable segments joined with " · ": a span list is one segment per
+ * span (the host's "Local command" + "stdio" stay apart), a string is one segment.
+ */
+function valueText(value: unknown): string {
+  if (!Array.isArray(value)) return tspText(value).trim();
+  return value
+    .map((span) => (isObject(span) && typeof span.t === "string" ? span.t.trim() : ""))
+    .filter((segment) => segment !== "")
+    .join(" · ");
 }
 
 /** The wizard step's lead text (`omp.mcpAdd.lead`), or "". */
@@ -1533,7 +1554,7 @@ function collectWizardBodyNode(node: NativeNodeLike, depth: number, visited: Set
     for (const item of node.p.items) {
       if (!isObject(item)) continue;
       const key = tspText(item.k).trim();
-      const value = tspText(item.v).trim();
+      const value = valueText(item.v);
       if (key || value) lines.push(key && value ? `${key}: ${value}` : key || value);
     }
     return;
@@ -1559,16 +1580,16 @@ function collectWizardBodyNode(node: NativeNodeLike, depth: number, visited: Set
  * The confirm model has two answers: `next` is yes, `back` is no.
  */
 function wizardConfirmModel(component: object): DialogModel {
-  const lines: string[] = [];
-  const lead = wizardLead(component);
-  if (lead) lines.push(lead);
-  collectWizardBody(component, 0, new Set<object>(), lines);
+  const bodyLines: string[] = [];
+  collectWizardBody(component, 0, new Set<object>(), bodyLines);
+  // The lead is its own paragraph; the body lines (one per summary entry) follow it.
+  const message = [wizardLead(component), bodyLines.join("\n")].filter((part) => part !== "").join("\n\n");
   const confirmLabel = wizardNextLabel(component) ?? "Next";
   const cancelLabel = wizardBackLabel(component);
   return {
     kind: "confirm",
     title: wizardTitle(component, "Confirm"),
-    ...(lines.length > 0 ? { message: lines.join("\n") } : {}),
+    ...(message !== "" ? { message } : {}),
     confirmLabel,
     ...(cancelLabel ? { cancelLabel } : {}),
   };
@@ -1612,6 +1633,20 @@ function actWizardChoices(component: object, action: DialogAction, ctx: AdapterC
 }
 
 /**
+ * Skip an optional wizard text step: the nested field is submitted empty (its
+ * own `empty: "submit"` policy then moves on). Without a field the footer's
+ * `next` is the same answer.
+ */
+function actWizardSkip(component: object, ctx: AdapterContext): boolean {
+  if (!wizardOptional(component)) return false;
+  const field = findTextFormField(component);
+  if (field) return submitTextFormField(field, "") && requestRedraw(ctx);
+  const next = wizardButton(component, "next");
+  if (!next) return false;
+  return sendPickerEvent(next.owner, { type: "action", key: "", act: "next", mods: [] }, ctx);
+}
+
+/**
  * OMP's built-in text prompts (login API keys): the host describes the field
  * as an `input` node and takes `{ act: "submit" | "cancel" }` on its root.
  * The answer is typed through the root's own `handleInput` (the same
@@ -1643,12 +1678,15 @@ export const tspInputAdapter: DialogAdapter = {
     const title = found.heading ?? promptTitle(found.label) ?? "Input";
     const secret = ownerMasks(found.input.owner) || SECRET_TITLE.test(title);
     const placeholder = tspText(found.input.props.placeholder).trim();
+    // An optional step may be left empty: its footer's label (Continue) or "Skip" answers that.
+    const skip = wizardOptional(component) ? [{ label: wizardNextLabel(component) ?? "Skip", key: WIZARD_SKIP_KEY }] : undefined;
     return {
       kind: "input",
       title,
       ...(placeholder ? { placeholder } : {}),
       ...(found.detail === undefined ? {} : { detail: found.detail }),
       ...(found.steps === undefined ? {} : { steps: found.steps }),
+      ...(skip === undefined ? {} : { extraActions: skip }),
       secret,
     };
   },
@@ -1656,6 +1694,7 @@ export const tspInputAdapter: DialogAdapter = {
   act(component, action, ctx) {
     // Never act on a stale tree: the prompt may be gone underneath us.
     if (findNode(component, "input") === undefined) return actWizardChoices(component, action, ctx);
+    if (action.type === "key" && action.name === WIZARD_SKIP_KEY) return actWizardSkip(component, ctx);
     const handle = (component as Partial<Describable>).handleNativeEvent;
     if (typeof handle !== "function") return false;
     let event: unknown;
