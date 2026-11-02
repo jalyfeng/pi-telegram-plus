@@ -5,7 +5,6 @@ import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { SessionDeps, CommandRegistry } from "./register.ts";
 import { escapeHtml } from "../html.ts";
 import { log } from "../logger.ts";
-import { checkpointCurrentUpdateCursor } from "../polling.ts";
 import { isOmpHost } from "../session-capture.ts";
 
 const sessionLog = log.child("session");
@@ -74,9 +73,6 @@ export function registerSessionCommands(
       const ui = ctx.ui;
       const confirmed = await ui.confirm("New session", "Start a new session? Current session will be saved.");
       if (!confirmed) return;
-      // Commit this update's cursor before the in-process session replacement so
-      // the replacement runtime cannot re-fetch and re-run the unconfirmed /new.
-      await checkpointCurrentUpdateCursor();
       const result = await ctx.newSession(
         typeof deps.getSession()?.extensionRunner?.setUIContext === "function"
           // pi keeps its pre-existing withSession post-replacement hook.

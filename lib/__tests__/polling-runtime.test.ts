@@ -87,11 +87,12 @@ describe("TelegramPollingRuntime", () => {
         releaseHandler();
         await stopPromise;
 
+        // The cursor is committed before the handler; stop still waits for the handler to end.
         expect(events).toEqual([
-            "handle:start",
-            "handle:end",
             "persist:10",
             "set:10",
+            "handle:start",
+            "handle:end",
             "stopped",
         ]);
         expect(runtime.isActive()).toBe(false);

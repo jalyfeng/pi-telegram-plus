@@ -2,7 +2,6 @@ import { getCurrentTelegramTurn } from "../turn-context.ts";
 import { queuePendingNotice } from "../pending-notices.ts";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { CommandRegistry } from "./register.ts";
-import { checkpointCurrentUpdateCursor } from "../polling.ts";
 
 /**
  * All command handlers capture ctx.ui at entry and use the captured reference.
@@ -36,10 +35,6 @@ export function registerLifecycleCommands(registry: CommandRegistry): void {
       } else {
         ui.notify("Reloading…", "info");
       }
-      // /reload re-activates the plugin in-process; commit this update first so
-      // the replacement runtime does not re-fetch and re-run the unconfirmed
-      // /reload (which would call ctx.reload() again).
-      await checkpointCurrentUpdateCursor();
       await ctx.reload();
       return;
     },

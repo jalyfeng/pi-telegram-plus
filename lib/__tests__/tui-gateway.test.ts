@@ -8,8 +8,6 @@ import { FocusTracker } from "../tui/focus.ts";
 import type { TuiBridgeAdapter } from "../tui-bridge.ts";
 import { takePendingNotices } from "../pending-notices.ts";
 
-const checkpointCursor = vi.hoisted(() => vi.fn(async () => false));
-vi.mock("../polling.ts", () => ({ checkpointCurrentUpdateCursor: checkpointCursor }));
 
 afterEach(() => {
   vi.useRealTimers();
@@ -245,38 +243,6 @@ describe("command gateway", () => {
 
     const withoutHost = new CommandGateway({ ...deps, isEnabled: () => true, hostState: () => ({ host: "pi" }) });
     expect(await withoutHost.runText({ text: "!date", label: "!", origin: { chatId: 7 }, transport })).toBe(false);
-  });
-
-  it("commits the update cursor before submitting to the host", async () => {
-    vi.useFakeTimers();
-    const order: string[] = [];
-    checkpointCursor.mockImplementation(async () => { order.push("cursor"); return false; });
-    const transport = fakeTransport();
-    const origin = new OriginTracker({
-      isEditorFocused: () => true,
-      readDraft: () => "",
-      writeDraft: () => true,
-    });
-    const bridge = fakeBridge(Promise.resolve());
-    bridge.submitResult = () => { order.push("submit"); return { ok: true }; };
-    const gateway = new CommandGateway({
-      bridge,
-      origin,
-      output: new OutputCapture(transport, origin),
-      focus: new FocusTracker(),
-      isEnabled: () => true,
-      hostName: () => "pi",
-      hostState: () => ({ host: "pi", mode: {}, editor: {} }),
-      readDraft: () => "",
-    });
-    gateway.start();
-
-    await gateway.run({ name: "fork", args: "", origin: { chatId: 7 }, transport });
-
-    // Session-replacing host commands reactivate the plugin in-process; the
-    // cursor must be committed before the editor sees the text.
-    expect(order).toEqual(["cursor", "submit"]);
-    gateway.dispose();
   });
 
 });

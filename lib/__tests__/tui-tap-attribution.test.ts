@@ -120,16 +120,6 @@ describe("a Telegram tap's own close is a normal answer", () => {
     expect(ctx.last()).not.toContain("Answered in the terminal");
   });
 
-  it("answers a repeat of that same tap without a notice", async () => {
-    const ctx = await open((_action, host) => {
-      host.close();
-      return true;
-    });
-    ctx.tap("y");
-
-    expect(ctx.tap("y")).toEqual({ handled: true, clear: true });
-  });
-
   it("answers a different tap on the closed dialog with the notice", async () => {
     const ctx = await open((_action, host) => {
       host.close();
@@ -198,7 +188,7 @@ function freshRuntime() {
   return { broker, focus };
 }
 
-describe("a tap whose act ran is answered as done, whichever runtime sees it next", () => {
+describe("a tap whose act tears the runtime down", () => {
   it("answers a tap whose act tears the runtime down while it runs", async () => {
     let ctx!: Awaited<ReturnType<typeof open>>;
     ctx = await open((_action, host) => {
@@ -209,21 +199,6 @@ describe("a tap whose act ran is answered as done, whichever runtime sees it nex
     });
 
     expect(ctx.tap("y")).toEqual({ handled: true });
-  });
-
-  it("answers a replay of that tap, delivered to the replacement runtime", async () => {
-    let old!: Awaited<ReturnType<typeof open>>;
-    old = await open((_action, host) => {
-      old.broker.stop({ handOver: true });
-      host.close();
-      return true;
-    });
-    const callback = { sessionId: old.session.id, generation: old.session.generation, op: "y" };
-    expect(old.broker.handleCallback(42, undefined, callback)).toEqual({ handled: true });
-
-    // The update was not checkpointed before the switch, so the replacement runtime gets it again.
-    const next = freshRuntime();
-    expect(next.broker.handleCallback(42, undefined, callback)).toEqual({ handled: true, clear: true });
   });
 
   it("still answers a tap on a dialog the terminal closed before any act, with the notice", async () => {

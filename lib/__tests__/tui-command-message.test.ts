@@ -13,8 +13,6 @@ import type { FocusInfo, FocusTracker } from "../tui/focus.ts";
 import type { EntryInfo } from "../tui/model.ts";
 import type { TuiBridgeAdapter } from "../tui-bridge.ts";
 
-const checkpointCursor = vi.hoisted(() => vi.fn(async () => false));
-vi.mock("../polling.ts", () => ({ checkpointCurrentUpdateCursor: checkpointCursor }));
 
 afterEach(() => {
   vi.useRealTimers();
