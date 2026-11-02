@@ -26,8 +26,9 @@ export type TelegramUiContext = ExtensionUIContext & {
 };
 
 export type TelegramUiRuntime = {
-  /** onMenuMessage is told the id of the menu message each time menu() sends or edits it. */
-  create(chatId: number, messageThreadId?: number, sourceMessageId?: number, onMenuMessage?: (messageId: number) => void): TelegramUiContext;
+  /** onMenuMessage is told the id of the menu message each time menu() sends or edits it.
+   *  onConfirmMessage is told the id of the message confirm() sends, before it waits. */
+  create(chatId: number, messageThreadId?: number, sourceMessageId?: number, onMenuMessage?: (messageId: number) => void, onConfirmMessage?: (messageId: number) => void): TelegramUiContext;
   resolveInput(chatId: number, value: string | boolean | undefined, replyToMessageId?: number, fromCallback?: boolean, messageThreadId?: number): { handled: boolean; promptMessageId?: number };
   isSensitiveInput(chatId: number, replyToMessageId?: number, messageThreadId?: number): boolean;
   hasPendingInput(chatId: number, messageThreadId?: number): boolean;
@@ -117,7 +118,7 @@ export function createTelegramUiRuntime(deps: {
   };
 
   return {
-    create(chatId, messageThreadId, sourceMessageId, onMenuMessage) {
+    create(chatId, messageThreadId, sourceMessageId, onMenuMessage, onConfirmMessage) {
       // base is the real TUI UI context (create() is called BEFORE runWithTelegramUi
       // swaps the UI context, so this is the genuine TUI context). We forward persistent
       // /stateful methods to base so the TUI stays accurate even when the trigger came
@@ -164,8 +165,9 @@ export function createTelegramUiRuntime(deps: {
           const flowId = beginFlow();
           activeFlowByTarget.set(target, flowId);
           const sent = await sendOrReplaceButtons(chatId, messageThreadId, sourceMessageId, `<b>${escapeHtml(redact(title))}</b>\n${escapeHtml(redact(message))}`, [[
-            { text: "Yes", value: cb(flowId, "yes") }, { text: "No", value: cb(flowId, "no") }, { text: "Cancel", value: cb(flowId, "cancel") },
+            { text: "Yes", value: cb(flowId, "yes") }, { text: "No", value: cb(flowId, "no") },
           ]], flowId);
+          onConfirmMessage?.(sent.message_id);
           const value = await waitInput(chatId, messageThreadId, flowId, false, false, sent.message_id);
           activeFlowByTarget.delete(target);
           void deps.transport.removeInlineKeyboard(chatId, sent.message_id);

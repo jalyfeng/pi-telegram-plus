@@ -951,16 +951,23 @@ export function createTelegramController(deps: {
     }
 
     const policy: TelegramBashConfirm = deps.getConfig?.().bashConfirm ?? "dangerous";
+    let confirmedMessageId: number | undefined;
     if (policy === "always" || (policy === "dangerous" && isDangerousBash(command))) {
-      const confirmUi = deps.ui.create(chatId, messageThreadId, sourceMessageId);
+      // The confirmation message is the one message this command lives on: a
+      // refusal edits it, and an approval turns it into the ack (reuseMessageId).
+      // confirm() reports the id before it waits, so it is set once confirm resolves.
+      const confirmMessage: { id?: number } = {};
+      const confirmUi = deps.ui.create(chatId, messageThreadId, sourceMessageId, undefined, (messageId) => { confirmMessage.id = messageId; });
       const approved = await confirmUi.confirm(
         "Run shell command?",
         `${command}\n\ncwd: ${process.cwd()}\ncontext: ${excludeFromContext ? "excluded" : "included"}`,
       );
       if (!approved) {
-        await deps.transport.sendText(chatId, "Shell command cancelled.", messageThreadId, sourceMessageId);
+        const redacted = secretStore.redact(`${chatId}:${messageThreadId ?? "main"}`, command);
+        await deps.transport.editText(chatId, confirmMessage.id!, `<b>✖ Shell command cancelled.</b>\n${escapeHtml(redacted)}`).catch(() => undefined);
         return;
       }
+      confirmedMessageId = confirmMessage.id;
     }
 
     // D3b (decision 51): the host editor executes. The raw `!`/`!!` text is
@@ -982,6 +989,7 @@ export function createTelegramController(deps: {
         label: "!",
         origin: { chatId, messageThreadId, sourceMessageId },
         transport: deps.transport,
+        reuseMessageId: confirmedMessageId,
       });
     } finally {
       bashSubmitInFlight = false;

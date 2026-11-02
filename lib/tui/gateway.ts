@@ -33,6 +33,9 @@ export type GatewayTextRequest = {
   label: string;
   origin: Origin;
   transport: Pick<TelegramTransport, "sendText" | "editText">;
+  /** Edit this existing message (e.g. the confirmation the user just answered) into
+   *  the ack instead of sending a new one. Omitted: a new ack message is sent. */
+  reuseMessageId?: number;
 };
 
 export type GatewayDeps = {
@@ -102,7 +105,7 @@ export class CommandGateway {
    * only owns the ack, the scope, and the output capture. */
   async runText(request: GatewayTextRequest): Promise<boolean> {
     if (!(await this.hostReady(request.label))) return false;
-    return this.submitScoped(request.text, request.label, request.origin, request.transport);
+    return this.submitScoped(request.text, request.label, request.origin, request.transport, request.reuseMessageId);
   }
 
   private async hostReady(name: string): Promise<boolean> {
@@ -121,25 +124,35 @@ export class CommandGateway {
 
   /** Shared submit path (run/runText): ack the text, open the scope under
    * `label`, bind the output, submit to the editor, and let the scope settle
-   * on its own. */
+   * on its own. With `reuseMessageId` the ack edits that message instead of
+   * sending a new one. */
   private async submitScoped(
     commandText: string,
     label: string,
     origin: Origin,
     transport: GatewayRequest["transport"],
+    reuseMessageId?: number,
   ): Promise<boolean> {
     const draft = (this.deps.readDraft ?? readEditorText)();
     const ackHtml = `<b>▶️ ${escapeHtml(commandText)}</b>`;
-    const sent = await transport.sendText(
-      origin.chatId,
-      ackHtml,
-      origin.messageThreadId,
-      origin.sourceMessageId,
-    ).catch((err) => {
-      gatewayLog.debug("send gateway ack failed", { err, name: label });
-      return undefined;
-    });
-    const messageId = sent?.[0]?.message_id;
+    let messageId: number | undefined;
+    if (reuseMessageId !== undefined) {
+      await transport.editText(origin.chatId, reuseMessageId, ackHtml).catch((err) => {
+        gatewayLog.debug("edit gateway ack failed", { err, name: label });
+      });
+      messageId = reuseMessageId;
+    } else {
+      const sent = await transport.sendText(
+        origin.chatId,
+        ackHtml,
+        origin.messageThreadId,
+        origin.sourceMessageId,
+      ).catch((err) => {
+        gatewayLog.debug("send gateway ack failed", { err, name: label });
+        return undefined;
+      });
+      messageId = sent?.[0]?.message_id;
+    }
     if (messageId === undefined) return true;
 
     const scope = this.deps.origin.begin(origin, label, commandText, draft);

@@ -6,6 +6,8 @@ import { hostOwnsPrompts, type TuiBridgeAdapter } from "../tui-bridge.ts";
 
 type Call = { method: string; text?: string; messageId?: number; rows?: unknown };
 
+const CONFIRM_MESSAGE_ID = 7;
+
 function createTransport(calls: Call[]): TelegramTransport {
   const text = (value: string, messageId?: number): void => { calls.push({ method: "text", text: value, messageId }); };
   return {
@@ -86,11 +88,15 @@ function createHarness(options: {
     getSession: () => session,
     transport,
     ui: {
-      create: () => ({
+      // The confirmation is sent as message 7; confirm() reports that id before it waits.
+      create: (_chatId: number, _threadId?: number, _sourceId?: number, _onMenu?: unknown, onConfirmMessage?: (messageId: number) => void) => ({
         notify: async (message: string) => {
           if (options.notifySendsToChat) calls.push({ method: "text", text: String(message) });
         },
-        confirm,
+        confirm: async (...args: unknown[]) => {
+          onConfirmMessage?.(CONFIRM_MESSAGE_ID);
+          return (confirm as (...a: unknown[]) => unknown)(...args);
+        },
       }) as never,
       resolveInput: () => ({ handled: false }),
       isSensitiveInput: () => false,
@@ -169,6 +175,40 @@ describe("Telegram shell commands", () => {
       );
       await vi.waitFor(() => expect(harness.calls.some((call) => call.text?.includes("cancelled"))).toBe(true));
       expect(runText).not.toHaveBeenCalled();
+    } finally {
+      runText.mockRestore();
+    }
+  });
+
+  it("a refused command edits its confirmation message instead of sending a new one", async () => {
+    const runText = vi.spyOn(CommandGateway.prototype, "runText").mockResolvedValue(true);
+    try {
+      const harness = createHarness({ confirmResult: false });
+      await send(harness.controller, "!rm -rf /tmp/example", 12);
+
+      await vi.waitFor(() => expect(harness.calls.some((call) => call.messageId === CONFIRM_MESSAGE_ID)).toBe(true));
+      expect(harness.calls).toContainEqual(expect.objectContaining({
+        method: "text",
+        messageId: CONFIRM_MESSAGE_ID,
+        text: expect.stringContaining("✖ Shell command cancelled."),
+      }));
+      expect(harness.calls.some((call) => call.messageId === undefined && call.text?.includes("cancelled"))).toBe(false);
+      expect(runText).not.toHaveBeenCalled();
+    } finally {
+      runText.mockRestore();
+    }
+  });
+
+  it("an approved command runs on its confirmation message", async () => {
+    const runText = vi.spyOn(CommandGateway.prototype, "runText").mockResolvedValue(true);
+    try {
+      const harness = createHarness({ confirmResult: true });
+      await send(harness.controller, "!rm -rf /tmp/example", 12);
+
+      await vi.waitFor(() => expect(runText).toHaveBeenCalledWith(expect.objectContaining({
+        text: "!rm -rf /tmp/example",
+        reuseMessageId: CONFIRM_MESSAGE_ID,
+      })));
     } finally {
       runText.mockRestore();
     }

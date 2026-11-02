@@ -29,6 +29,31 @@ async function press({ runtime, renders }: ReturnType<typeof setup>, messageId: 
   expect(handled.handled).toBe(true);
 }
 
+describe("telegram ui confirm()", () => {
+  it("offers only Yes and No, reports its message id, and /stop answers it false", async () => {
+    const env = setup();
+    const reported: number[] = [];
+    const ui = env.runtime.create(CHAT, undefined, undefined, undefined, (messageId) => reported.push(messageId));
+
+    const answer = ui.confirm("Run shell command?", "rm -rf x");
+    await vi.waitFor(() => expect(env.runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(reported).toEqual([100]);
+    expect(env.renders.at(-1)!.flat().map((b) => b.text)).toEqual(["Yes", "No"]);
+
+    env.runtime.resolveInput(CHAT, undefined);
+    expect(await answer).toBe(false);
+  });
+
+  it("the Yes button answers true on the reported message", async () => {
+    const env = setup();
+    const ui = env.runtime.create(CHAT, undefined, undefined, undefined, () => undefined);
+
+    const answer = ui.confirm("Run shell command?", "ls");
+    await press(env, 100, "Yes");
+    expect(await answer).toBe(true);
+  });
+});
+
 describe("telegram ui menu() edit-in-place", () => {
   it("first menu sends, nested menus edit the same message, closeMenu removes the keyboard", async () => {
     const env = setup();

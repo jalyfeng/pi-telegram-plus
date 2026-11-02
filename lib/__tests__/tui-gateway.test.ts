@@ -245,6 +245,31 @@ describe("command gateway", () => {
     expect(await withoutHost.runText({ text: "!date", label: "!", origin: { chatId: 7 }, transport })).toBe(false);
   });
 
+  it("runText with reuseMessageId edits that message into the ack and binds the scope to it", async () => {
+    vi.useFakeTimers();
+    const transport = fakeTransport();
+    const origin = new OriginTracker({ isEditorFocused: () => true, readDraft: () => "", writeDraft: () => true });
+    const output = new OutputCapture(transport, origin);
+    const bridge = fakeBridge(Promise.resolve());
+    bridge.submitResult = () => ({ ok: true, result: Promise.resolve() });
+    const gateway = new CommandGateway({
+      bridge,
+      origin,
+      output,
+      focus: new FocusTracker(),
+      isEnabled: () => true,
+      hostName: () => "pi" as const,
+      hostState: () => ({ host: "pi", mode: {}, editor: {} }),
+      readDraft: () => "",
+    });
+    gateway.start();
+
+    expect(await gateway.runText({ text: "!ls", label: "!", origin: { chatId: 7 }, transport, reuseMessageId: 5 })).toBe(true);
+    expect(transport.sends).toEqual([]);
+    expect(transport.edits[0]).toEqual({ chatId: 7, messageId: 5, text: "<b>▶️ !ls</b>" });
+    expect(origin.active()?.telegramMessageId).toBe(5);
+    gateway.dispose();
+  });
 });
 
 describe("OutputCapture command reports", () => {

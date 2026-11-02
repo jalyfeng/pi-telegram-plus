@@ -807,7 +807,7 @@ class Pi085RunnerDouble {
     const sentConfirm = sent.find((item) => item.text.includes("New session"));
     expect(sentConfirm).toBeDefined();
     expect(tuiConfirm).not.toHaveBeenCalled();
-    expect(sentConfirm?.rows?.[0]?.map((button) => button.text)).toEqual(["Yes", "No", "Cancel"]);
+    expect(sentConfirm?.rows?.[0]?.map((button) => button.text)).toEqual(["Yes", "No"]);
 
     const rawCallback = sentConfirm?.rows?.[0]?.[0]?.value ?? "";
     const callbackValue = decodeUiCallback(rawCallback) ?? rawCallback;
@@ -870,7 +870,7 @@ class Pi085RunnerDouble {
     await vi.waitFor(() => expect(sent.find((item) => item.text.includes("Tool approval"))).toBeDefined());
     const approval = sent.find((item) => item.text.includes("Tool approval"));
     expect(tuiConfirm).not.toHaveBeenCalled();
-    expect(approval?.rows?.[0]?.map((button) => button.text)).toEqual(["Yes", "No", "Cancel"]);
+    expect(approval?.rows?.[0]?.map((button) => button.text)).toEqual(["Yes", "No"]);
     const approvalCallback = decodeUiCallback(approval?.rows?.[0]?.[0]?.value ?? "") ?? "";
     expect(uiRuntime.resolveInput(888, approvalCallback, approval?.message_id, true).handled).toBe(true);
 
