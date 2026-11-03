@@ -241,7 +241,9 @@ describe("tsp picker read", () => {
         { id: "1i3hwdoo7tpkv", label: "go-add-cleanup", dot: "success", facts: { kind: "Rules" } },
       ],
     };
-    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
+    // The dashboard declares its kind column; facts show only for declared columns.
+    const withColumns = { ...props, columns: [{ id: "kind", format: "dim" }] };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: withColumns }), ctxFor()));
     expect(model.items).toEqual([
       { key: "iw4iz75jiyl7", label: "⦸ deskvnc", description: "kind: Skills", note: "kind: Skills", current: false, focused: false },
       {
@@ -260,6 +262,23 @@ describe("tsp picker read", () => {
     expect(rendered.text).toContain("kind: Skills");
     expect(rendered.text).toContain("● go-add-cleanup");
     expect(rendered.text).toContain("kind: Rules");
+  });
+
+  it("shows facts only for the picker's declared columns, under the column's heading", () => {
+    const item = { id: "a", label: "alpha", facts: { model: "auto", kind: "Skills" } };
+    // No columns: the picker shows no facts at all (an agents row with four facts would flood the line).
+    const bare = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: { items: [item] } }), ctxFor()));
+    expect(bare.items[0]?.description).toBeUndefined();
+    // Declared columns: only those, in column order, labelled by the column's heading.
+    const declared = {
+      items: [item],
+      columns: [
+        { id: "kind", head: "Category" },
+        { id: "model", head: "Model" },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: declared }), ctxFor()));
+    expect(model.items[0]?.description).toBe("Category: Skills · Model: auto");
   });
 
   it("lists a disabled agent row so the user can still pick it", () => {

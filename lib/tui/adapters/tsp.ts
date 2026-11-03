@@ -51,6 +51,8 @@ type PickerProps = {
   selected?: unknown;
   current?: readonly unknown[];
   total?: unknown;
+  /** Declared columns (`TspPickerColumn`): the facts a row shows are the ones named here. */
+  columns?: unknown;
   /** The chip strip docked above the action bar; null when absent. */
   strip?: unknown;
   /** Shown in place of the list when it holds no visible items (`TspText`). */
@@ -431,12 +433,20 @@ function pickerStatusMark(dot: unknown): string {
   return typeof dot === "string" && Object.hasOwn(STATUS_GLYPH, dot) ? `${STATUS_GLYPH[dot]} ` : "";
 }
 
-/** The item's facts as message text, `kind: Skills`, in the host's own order. */
-function pickerFacts(facts: unknown): string[] {
-  if (!isObject(facts)) return [];
-  return Object.entries(facts).flatMap(([name, value]) => {
+/**
+ * The item's facts that the picker's declared `columns` show, as message text: `Category: Skills`, in
+ * column order, labelled by the column's heading (`head`, else its id). A picker that declares no columns
+ * shows no facts.
+ */
+function pickerFacts(facts: unknown, columns: unknown): string[] {
+  if (!isObject(facts) || !Array.isArray(columns)) return [];
+  return columns.flatMap((column) => {
+    if (!isObject(column) || typeof column.id !== "string") return [];
+    const value = (facts as Record<string, unknown>)[column.id];
     const text = typeof value === "number" ? String(value) : tspText(value);
-    return text === "" ? [] : [`${name}: ${text}`];
+    if (text === "") return [];
+    const name = typeof column.head === "string" && column.head !== "" ? column.head : column.id;
+    return [`${name}: ${text}`];
   });
 }
 
@@ -665,7 +675,7 @@ export const tspPickerAdapter: DialogAdapter = {
     const currentIds = Array.isArray(props.current) ? props.current : [];
     const items: DialogItem[] = visibleItems(props).map((item) => {
       const detail = item.detail === undefined ? "" : tspText(item.detail);
-      const description = [detail, ...pickerFacts(item.facts)].filter((part) => part !== "").join(" · ") || undefined;
+      const description = [detail, ...pickerFacts(item.facts, props.columns)].filter((part) => part !== "").join(" · ") || undefined;
       const badges = pickerBadges(item.badges);
       const label = `${pickerStatusMark(item.dot)}${tspText(item.label)}`;
       return {
