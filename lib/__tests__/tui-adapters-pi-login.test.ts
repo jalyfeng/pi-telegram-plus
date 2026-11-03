@@ -249,6 +249,18 @@ describe("piLoginAdapter read: the OAuth link step keeps its link and its lines"
   });
 });
 
+describe("piLoginAdapter read: the device-code page keeps its link and code, not the terminal click hint", () => {
+  it("drops the Cmd/Ctrl+click line under the link and keeps the link and the code", () => {
+    const { dialog, ctx } = loginHarness();
+    dialog.showDeviceCode({ verificationUri: "https://github.com/login/device", userCode: "MOCK-1234", expiresIn: 900 } as never);
+    const model = piLoginAdapter.read(dialog, ctx);
+    if (model.kind !== "info") throw new Error(`expected an info model, got ${model.kind}`);
+    expect(model.text).toContain("https://github.com/login/device");
+    expect(model.text).toContain("Enter code: MOCK-1234");
+    expect(model.text).not.toMatch(/click to open/i);
+  });
+});
+
 describe("the desktop guard: showAuth asks for a browser but never starts one", () => {
   it("records the open call and starts no process", () => {
     const { dialog } = loginHarness();

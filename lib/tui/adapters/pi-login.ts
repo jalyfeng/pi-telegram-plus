@@ -42,6 +42,15 @@ function hostKeyHintLines(): Set<string> {
   return new Set([`(${cancel})`, `(${cancelToSubmit})`, `(${close})`].map((line) => stripAnsi(line)));
 }
 
+/**
+ * The click hint login-dialog.js prints on a device-code page, as its own Text under the link. pi exports no
+ * helper for it (the literal is built inline from `process.platform`), so this is the same literal; a Text that
+ * is exactly this line (colours and OSC 8 links stripped) is the terminal's hint, not the page's content.
+ */
+function deviceCodeClickHint(): string {
+  return process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
+}
+
 /** The dynamic content area; its children come and go with the auth step. */
 function contentChildren(component: object): unknown[] | undefined {
   const record = component as HostRecord;
@@ -107,6 +116,7 @@ function bodyLines(component: object, skip?: number): string[] {
   if (!children) return [];
   const hints = keyHintIndexes(component, children);
   const hintLines = hostKeyHintLines();
+  const clickHint = deviceCodeClickHint();
   const lines: string[] = [];
   for (const [index, child] of children.entries()) {
     if (hints.has(index) || index === skip) continue;
@@ -119,7 +129,7 @@ function bodyLines(component: object, skip?: number): string[] {
     if (typeof record.text !== "string") continue;
     const plainText = stripAnsi(record.text);
     // A Text that is exactly one of pi's own key-hint lines (e.g. "(to cancel)" on a waiting page).
-    if (hintLines.has(plainText)) continue;
+    if (hintLines.has(plainText) || plainText === clickHint) continue;
     for (const raw of plainText.split("\n")) {
       const line = raw.trim();
       if (line.length === 0 || line.startsWith("> ")) continue;
