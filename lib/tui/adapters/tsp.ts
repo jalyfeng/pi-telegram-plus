@@ -435,13 +435,15 @@ function pickerStatusMark(dot: unknown): string {
 
 /**
  * The item's facts that the picker's declared `columns` show, as message text: `Category: Skills`, in
- * column order, labelled by the column's heading (`head`, else its id). A picker that declares no columns
- * shows no facts.
+ * column order, labelled by the column's heading (`head`, else its id). Bar columns are drawings and are
+ * left out; a picker that declares no columns shows no facts.
  */
 function pickerFacts(facts: unknown, columns: unknown): string[] {
   if (!isObject(facts) || !Array.isArray(columns)) return [];
   return columns.flatMap((column) => {
     if (!isObject(column) || typeof column.id !== "string") return [];
+    // A bar column draws a 0-1 value; its number is not text for the message.
+    if (column.format === "bar") return [];
     const value = (facts as Record<string, unknown>)[column.id];
     const text = typeof value === "number" ? String(value) : tspText(value);
     if (text === "") return [];

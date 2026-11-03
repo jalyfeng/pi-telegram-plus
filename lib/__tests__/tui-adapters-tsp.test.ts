@@ -264,6 +264,19 @@ describe("tsp picker read", () => {
     expect(rendered.text).toContain("kind: Rules");
   });
 
+  it("leaves out bar columns: a 0-1 bar is a drawing, not a value to print", () => {
+    const item = { id: "a", label: "alpha", facts: { depth: 0.5, kind: "Skills" } };
+    const props = {
+      items: [item],
+      columns: [
+        { id: "depth", format: "bar" },
+        { id: "kind", format: "dim" },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
+    expect(model.items[0]?.description).toBe("kind: Skills");
+  });
+
   it("shows facts only for the picker's declared columns, under the column's heading", () => {
     const item = { id: "a", label: "alpha", facts: { model: "auto", kind: "Skills" } };
     // No columns: the picker shows no facts at all (an agents row with four facts would flood the line).
