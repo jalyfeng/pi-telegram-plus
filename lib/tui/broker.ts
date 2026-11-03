@@ -507,14 +507,19 @@ export class DialogBroker {
    * keeps the page the user last saw and says how it ended; a dialog with answers gets its one line.
    * A dialog counts as read-only only if it never showed an answerable model and no hidden answer was
    * typed. A Close tap on a panel is its close: any tap on an answerable model already marked the session.
+   * `null` means no line at all: a progress wait the host ended on its own was never answered, so
+   * there is nothing to report (an upload that finished, a spinner that stopped).
    */
-  private closeSummary(session: DialogSession, byTelegram: boolean): string {
+  private closeSummary(session: DialogSession, byTelegram: boolean): string | null {
     const redact = (text: string) => this.redact(session, text);
     const answered = session.interactive === true || session.answeredSecret === true;
     if (session.model.kind === "info" && !answered) {
       return closedPanelHtml(session.model, session.page, byTelegram ? "✖ Closed" : "Closed in the terminal", redact);
     }
-    if (!byTelegram) return "Answered in the terminal";
+    if (!byTelegram) {
+      if (session.model.kind === "progress" && !answered) return null;
+      return "Answered in the terminal";
+    }
     return escapeHtml(redact(this.telegramSummary(session)));
   }
 
@@ -1242,7 +1247,7 @@ export class DialogBroker {
   }
 
   /** The replacement for a finished dialog (rules 4.2/4.3); `summary` is Telegram HTML, already redacted. */
-  private publish(session: DialogSession, summary: string): void {
+  private publish(session: DialogSession, summary: string | null): void {
     const telegram = session.telegram;
     if (!telegram) return;
     if (telegram.messageId <= 0) {
@@ -1250,17 +1255,24 @@ export class DialogBroker {
       if (session.sending) session.pendingSummary = summary;
       return;
     }
-    session.published = `${summary}|closed`;
+    session.published = `${summary ?? ""}|closed`;
     const scope = this.scopes.get(session);
     if (scope) {
       // The command's own message: its text is the command's final content, which
       // OutputCapture writes (header, summaries, output). While the scope runs the
       // summary is only recorded; once it has ended, the message is redrawn now.
       scope.dialogOpen = false;
-      scope.dialogSummaries.push(summary);
+      if (summary !== null) scope.dialogSummaries.push(summary);
       if (scope.ended) this.deps.settleScope?.(scope);
       this.rate(telegram, () => {
         void this.deps.transport.removeInlineKeyboard(telegram.chatId, telegram.messageId).catch(() => undefined);
+      });
+      return;
+    }
+    if (summary === null) {
+      // Nothing to say and nothing answered: the progress message has no reason to stay in the chat.
+      this.rate(telegram, () => {
+        void this.deps.transport.deleteMessage(telegram.chatId, telegram.messageId).catch(() => undefined);
       });
       return;
     }

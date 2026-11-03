@@ -107,7 +107,7 @@ function makeBroker(options: {
   const broker = new DialogBroker({
     transport: transport as unknown as BrokerDeps["transport"],
     focus,
-    origin: { active: () => options.scope } as unknown as BrokerDeps["origin"],
+    origin: { active: () => options.scope, touch: () => undefined } as unknown as BrokerDeps["origin"],
     activeChatId: () => 42,
     activeTurns: () => options.turns ?? [],
     writeText: (text: string) => {
@@ -1032,6 +1032,59 @@ describe("who closed a dialog and what they tapped", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("writes no closing line when the host ends a progress wait (e.g. /share uploading)", async () => {
+    const { transport, focus, session } = await scripted(
+      { kind: "progress", text: "Sharing session...", cancellable: true },
+      () => false,
+    );
+    focus.closeToEditor();
+    await settle();
+
+    expect(transport.edits.filter((entry) => entry.text.includes("Answered in the terminal"))).toEqual([]);
+    expect(transport.deleted).toEqual([session.telegram?.messageId]);
+  });
+
+  it("writes nothing into a running command scope when the host ends a progress wait", async () => {
+    const scope = {
+      id: "s2",
+      origin: { chatId: 7, messageThreadId: 3, sourceMessageId: 21 },
+      telegramMessageId: 555,
+      ended: false,
+      dialogSummaries: [] as string[],
+    } as unknown as CommandScope;
+    const { broker, focus } = makeBroker({ scope });
+    const { component } = selector(focus);
+    focus.openDialog(component);
+    await settle();
+    const session = broker.current()!;
+    const progress: DialogModel = { kind: "progress", text: "Sharing session...", cancellable: true };
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => progress,
+      act: () => true,
+    };
+    session.model = progress;
+    // The opening select made the dialog interactive; a loader never shows an answer, so clear that.
+    session.interactive = false;
+    focus.closeToEditor();
+    await settle();
+
+    expect(scope.dialogSummaries).toEqual([]);
+  });
+
+  it("writes Cancelled when Telegram cancels a progress wait", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "progress", text: "Sharing session...", cancellable: true },
+      () => true,
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "x" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✖ Cancelled");
+    expect(lastText(transport)).not.toContain("Answered in the terminal");
   });
 
   it("names the button a key tap pressed, not its internal id", async () => {

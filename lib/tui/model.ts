@@ -251,7 +251,8 @@ export type DialogSession = {
    */
   sending?: boolean;
   /** Summary of a close that happened while the first send was in flight; published once the message id is known. */
-  pendingSummary?: string;
+  /** A summary waiting for the first send's message id; `null` means no line at all. */
+  pendingSummary?: string | null;
   state: "open" | "resolving" | "closed";
   closedBy?: "telegram" | "terminal" | "replaced";
   lastAction?: string;
