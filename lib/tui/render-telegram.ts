@@ -350,8 +350,8 @@ function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire"
   return { text: header(model.title, status, [body]), rows, keyMap, page: 0, pages: 1 };
 }
 
-/** What a tool-approval card tells the user about typed text: the buttons answer; a new message comes after Deny. */
-const APPROVAL_HINT = "Answer with the buttons. To deny and give new instructions, tap Deny and send them as a new message.";
+/** What a tool-approval card says about typed text: a message denies the call and gives the new instructions. */
+const APPROVAL_HINT = "Send a message to deny and give new instructions.";
 
 function renderApproval(model: Extract<DialogModel, { kind: "approval" }>, ctx: RenderContext): RenderedDialog {
   const body = model.detail ? `<pre>${escapeHtml(clean(model.detail).slice(0, 900))}</pre>\n` : "";

@@ -27,7 +27,7 @@ import type { TelegramTransport, TelegramTurn } from "../types.ts";
 import { pickAdapter, unsupportedAdapter } from "./adapters/index.ts";
 import { isCustomAnswerPrompt } from "./adapters/ask.ts";
 import { describeTree } from "./adapters/tsp.ts";
-import { currentHostState } from "./host.ts";
+import { currentHostState, sendNativeText } from "./host.ts";
 import { sendKeyTo } from "./keys.ts";
 import type { FocusInfo, FocusTracker } from "./focus.ts";
 import { confirmDeclineLabel } from "./model.ts";
@@ -219,6 +219,9 @@ function sameList(previous: DialogModel | undefined, next: DialogModel): boolean
   return before.length === after.length && before.every((key, index) => key === after[index]);
 }
 
+/** The card's closing line when a Telegram message denied a tool approval and became its instructions (P2-39). */
+const DENIED_BY_TEXT = "✖ Denied — sent as new instructions";
+
 /** Where free text belongs, if it belongs to the dialog at all (§4.5.1). */
 export function textPurpose(model: DialogModel): TextPurpose | undefined {
   switch (model.kind) {
@@ -226,6 +229,9 @@ export function textPurpose(model: DialogModel): TextPurpose | undefined {
       return "input";
     case "editor":
       return "editor";
+    case "approval":
+      // A tool approval takes typed text as the answer that denies the call and steers the turn (P2-39).
+      return "input";
     case "select":
       return model.search ? "search" : undefined;
     case "settings":
@@ -495,6 +501,7 @@ export class DialogBroker {
   /** The one-line result of a dialog that Telegram answered (rule 4.2). */
   private telegramSummary(session: DialogSession): string {
     if (session.telegramAction?.cancelled) return "✖ Cancelled";
+    if (session.telegramAction?.summary !== undefined) return session.telegramAction.summary;
     if (session.answeredSecret || isSecretSession(session)) return "✅ Submitted (hidden)";
     return `✅ ${session.lastAction ?? "Done"}`;
   }
@@ -768,7 +775,9 @@ export class DialogBroker {
     const answered = purpose === "input" || purpose === "editor";
     const before = { telegramAction: session.telegramAction, lastAction: session.lastAction, answeredSecret: session.answeredSecret };
     if (answered) {
-      session.telegramAction = { cancelled: false };
+      // Text sent to a tool approval denies the call and becomes the next instruction: the card says so.
+      const summary = session.model.kind === "approval" ? DENIED_BY_TEXT : undefined;
+      session.telegramAction = summary === undefined ? { cancelled: false } : { cancelled: false, summary };
       // Decided here, while the input is still the secret field: by the time the dialog closes,
       // the model may already show the progress that the submit started.
       session.answeredSecret = secret;
@@ -779,7 +788,8 @@ export class DialogBroker {
       : purpose === "search"
         ? this.act(subject, { type: "search", query: text }, ctx)
         : false);
-    const modeledField = effectiveInput(session.model) !== undefined;
+    // A tool approval's text goes only to the composer: it is never typed into the terminal.
+    const modeledField = effectiveInput(session.model) !== undefined || session.model.kind === "approval";
     const written = driven || (!modeledField && this.inOwnerScope(session, () =>
       this.deps.writeText(purpose === "search" ? text : `${text}\r`)));
     const telegram = session.telegram;
@@ -1072,6 +1082,7 @@ export class DialogBroker {
       entry,
       redact: (text: string) => this.redactForTarget(text),
       sendKey: (name: string) => sendKeyTo(component, name),
+      sendText: (text: string) => sendNativeText(text),
       requestRender: () => {
         const render = state.ui?.requestRender;
         if (typeof render !== "function") return;

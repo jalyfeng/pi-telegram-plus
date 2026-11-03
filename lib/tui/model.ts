@@ -171,6 +171,12 @@ export type AdapterContext = {
   redact?: (text: string) => string;
   /** Send one named key to the focused component's handleInput. */
   sendKey(name: string): boolean;
+  /**
+   * Hand a typed message to the host composer as its own native `send` event (OMP's
+   * explicit-prompt path: the composer steers it, and a tool approval it is waiting on is
+   * denied by that steer). Absent when no composer is reachable.
+   */
+  sendText?(text: string): boolean;
   requestRender(): void;
 };
 
@@ -259,7 +265,7 @@ export type DialogSession = {
    * changes, the tap has been consumed and it is forgotten. `cancelled` tells a Cancel button from
    * an answer.
    */
-  telegramAction?: { cancelled: boolean; drawn?: string };
+  telegramAction?: { cancelled: boolean; drawn?: string; summary?: string };
 };
 
 /**

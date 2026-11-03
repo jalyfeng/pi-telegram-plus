@@ -171,18 +171,28 @@ describe("approvalAdapter without a race handle (described dialog)", () => {
     expect(adapter?.id).toBe("omp-approval");
   });
 
-  it("takes no typed text: the described dialog has no text structure to route it into", () => {
+  it("sends typed text to the host composer as its native send, never as keys", () => {
     const { component, events } = dialog();
+    const sendText = vi.fn(() => true);
     const { ctx, sendKey } = ctxFor();
-    expect(approvalAdapter.act(component, { type: "submit", text: "change course" }, ctx)).toBe(false);
+    expect(approvalAdapter.act(component, { type: "submit", text: "change course" }, { ...ctx, sendText })).toBe(true);
+    expect(sendText).toHaveBeenCalledWith("change course");
     expect(events).toEqual([]);
+    expect(sendKey).not.toHaveBeenCalled();
+  });
+
+  it("refuses typed text when the composer cannot take it", () => {
+    const { component } = dialog();
+    const { ctx, sendKey } = ctxFor();
+    expect(approvalAdapter.act(component, { type: "submit", text: "change course" }, { ...ctx, sendText: () => false })).toBe(false);
+    expect(approvalAdapter.act(component, { type: "submit", text: "change course" }, ctx)).toBe(false);
     expect(sendKey).not.toHaveBeenCalled();
   });
 });
 
 describe("approval card in Telegram", () => {
   const CTX = { sessionId: "s1", generation: 1 };
-  const HINT = "Answer with the buttons. To deny and give new instructions, tap Deny and send them as a new message.";
+  const HINT = "Send a message to deny and give new instructions.";
 
   it("offers the host's choices as buttons, with no second Close or Cancel beside Deny", () => {
     const model: DialogModel = {

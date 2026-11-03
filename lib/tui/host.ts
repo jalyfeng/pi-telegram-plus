@@ -133,6 +133,26 @@ export function readEditorText(): string {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * Hand `text` to the live composer as the host's own native `send` event (OMP's explicit-prompt
+ * path, `CustomEditor.handleNativeEvent`). It is the composer's structured input, not keystrokes:
+ * the composer submits it through its normal path, so a tool approval waiting on the composer
+ * takes it as a steer. False when no composer takes events.
+ */
+export function sendNativeText(text: string): boolean {
+  const { editor, defaultEditor } = getTuiHostState();
+  const target = editor ?? defaultEditor;
+  if (!isHostObject(target)) return false;
+  const handle = target.handleNativeEvent;
+  if (typeof handle !== "function") return false;
+  try {
+    (handle as HostMethod).call(target, { type: "send", key: "", text });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function writeEditorText(text: string): boolean {
   const { editor, defaultEditor } = getTuiHostState();
   const target = editor ?? defaultEditor;

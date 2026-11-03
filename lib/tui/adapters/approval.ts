@@ -17,9 +17,9 @@
  * its own row would. Nothing is answered with keys, and nothing is read off the
  * rendered frame.
  *
- * The described dialog takes no typed text: its tree has no input node and its
- * native events carry no text, so a message typed while it waits is not routed
- * into it (the composer beneath it is not reachable from the dialog's tree).
+ * Typed text is not part of either dialog. It goes to the host composer as its
+ * own native `send` event (`ctx.sendText`), the composer steers it, and the host
+ * denies the waiting call with it. Keys are never simulated for it.
  */
 import type { AdapterContext, DialogAdapter, DialogModel } from "../model.ts";
 import { describableChild, findDescribedNode, tspText, type DescribedNode, type NativeNodeLike } from "./tsp.ts";
@@ -177,6 +177,11 @@ export const approvalAdapter: DialogAdapter = {
   },
 
   act(component, action, ctx) {
+    // A typed message denies the call and becomes the next instruction: the host composer takes it as a steer (P2-39).
+    if (action.type === "submit") {
+      const text = action.text?.trim() ? action.text : undefined;
+      return text !== undefined && ctx.sendText !== undefined && ctx.sendText(text);
+    }
     const race = ctx.entry?.race;
     if (race === undefined) {
       if (action.type === "cancel") {
