@@ -261,6 +261,12 @@ export type DialogSession = {
    */
   answeredSecret?: boolean;
   /**
+   * Set once the dialog has shown anything other than an information page (an input, a list, a
+   * confirmation). A dialog that never did is a read-only panel; one that did is a dialog, even
+   * when its last page is an information page (a login that moved on after the key was submitted).
+   */
+  interactive?: boolean;
+  /**
    * Set when the broker itself sent a Telegram tap to the host. The close that follows belongs to
    * Telegram, however long after the tap it is observed, as long as the dialog still shows what was
    * drawn when the tap was made (`drawn`, the broker's signature of that draw). Once the dialog

@@ -1146,6 +1146,40 @@ describe("who closed a dialog and what they tapped", () => {
     }
   });
 
+  it("closes a login that moved from its key prompt to an information page as Submitted (hidden), not Closed", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+      focus.openDialog({});
+      await settle();
+      const session = broker.current()!;
+      // pi's login: a key prompt, then the same dialog shows an information page (pi-login's `info`).
+      let current: DialogModel = { kind: "input", title: "Paste your API key", secret: true };
+      session.adapter = {
+        id: "scripted",
+        detect: () => true,
+        read: () => current,
+        act: (_component, action) => {
+          if (action.type === "submit") current = { kind: "info", title: "Login to acme", text: "Signing in", closable: true };
+          return true;
+        },
+      };
+      session.model = current;
+
+      expect(broker.handleText(session, "sk-secret", 57)).toEqual({ handled: true });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+
+      expect(lastText(transport)).toContain("✅ Submitted (hidden)");
+      expect(lastText(transport)).not.toContain("✖ Closed");
+      expect(lastText(transport)).not.toContain("Signing in");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("closes a Cancel tap as Cancelled even when the host closes the dialog during the tap", async () => {
     const { broker, transport, session } = await scripted(
       { kind: "select", title: "Tool", items: [{ key: "a", label: "A" }], total: 1 },

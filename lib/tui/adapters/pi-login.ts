@@ -26,21 +26,29 @@ function contentChildren(component: object): unknown[] | undefined {
   return Array.isArray(container.children) ? container.children : undefined;
 }
 
+/** A `Text` pi writes for a submitted value: `replaceInputWithSubmittedText` puts `> value` where the input was. */
+function isSubmittedEcho(child: unknown): boolean {
+  const record = child as HostRecord | undefined;
+  return !!record && typeof record === "object" && typeof record.text === "string" && record.text.startsWith("> ");
+}
+
 /**
- * Index of the key-hint `Text` that pi prints right after the input, or -1.
- * login-dialog.js `showPrompt` and `showManualInput` add `this.input` and then
- * a `Text` such as "(escape/ctrl+c to cancel, enter to submit)": a terminal
- * key hint, meaningless on Telegram. Found by position next to the input
- * component, not by matching its words. With no input in the area (an
- * information page) nothing is skipped.
+ * Indexes of the key-hint `Text`s that pi prints right after an input, or after the echo of a submitted
+ * input. login-dialog.js `showPrompt` and `showManualInput` add `this.input` and then a `Text` such as
+ * "(escape/ctrl+c to cancel, enter to submit)": a terminal key hint, meaningless on Telegram. After a
+ * submit the input is replaced by its `> value` echo and the hint stays right behind it. Found by
+ * position next to the input or the echo, not by matching its words.
  */
-function keyHintIndex(component: object, children: unknown[]): number {
+function keyHintIndexes(component: object, children: unknown[]): Set<number> {
   const input = (component as HostRecord).input;
-  if (!input || typeof input !== "object") return -1;
-  const at = children.indexOf(input);
-  if (at < 0) return -1;
-  const next = children[at + 1];
-  return next && typeof next === "object" && typeof (next as HostRecord).text === "string" ? at + 1 : -1;
+  const hints = new Set<number>();
+  for (const [index, child] of children.entries()) {
+    const anchored = (input !== undefined && child === input) || isSubmittedEcho(child);
+    if (!anchored) continue;
+    const next = children[index + 1];
+    if (next && typeof next === "object" && typeof (next as HostRecord).text === "string") hints.add(index + 1);
+  }
+  return hints;
 }
 
 /**
@@ -48,15 +56,15 @@ function keyHintIndex(component: object, children: unknown[]): number {
  * and the bare `url` of an `AuthUrlComponent` (or anything else exposing one).
  * Lines starting with "> " are submitted values the host echoed back -
  * possibly API keys - and are skipped here so no model can carry them out.
- * The key hint after the input is skipped too (see `keyHintIndex`).
+ * The key hints after an input or its echo are skipped too (see `keyHintIndexes`).
  */
 function bodyLines(component: object): string[] {
   const children = contentChildren(component);
   if (!children) return [];
-  const hint = keyHintIndex(component, children);
+  const hints = keyHintIndexes(component, children);
   const lines: string[] = [];
   for (const [index, child] of children.entries()) {
-    if (index === hint) continue;
+    if (hints.has(index)) continue;
     if (!child || typeof child !== "object") continue;
     const record = child as HostRecord;
     if (typeof record.url === "string" && record.url.length > 0) {

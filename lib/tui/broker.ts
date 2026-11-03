@@ -48,6 +48,9 @@ import { queuePendingNotice } from "../pending-notices.ts";
 
 const brokerLog = log.child("tui-broker");
 
+/** Models a person can answer; an information page, a progress line or a placeholder is not one. */
+const ANSWERABLE_KINDS: ReadonlySet<DialogModel["kind"]> = new Set(["select", "settings", "questionnaire", "approval", "confirm", "input", "editor"]);
+
 /**
  * E2E diagnostic (issue #18 inventory): with PITG_TREE_DUMP set to a file path,
  * every dialog read appends the component's described tree and the model the
@@ -502,10 +505,13 @@ export class DialogBroker {
   /**
    * What a closed dialog leaves on its message, as Telegram HTML (rules 4.2/4.3). A read-only panel
    * keeps the page the user last saw and says how it ended; a dialog with answers gets its one line.
+   * A dialog counts as read-only only if it never showed an answerable model and no hidden answer was
+   * typed. A Close tap on a panel is its close: any tap on an answerable model already marked the session.
    */
   private closeSummary(session: DialogSession, byTelegram: boolean): string {
     const redact = (text: string) => this.redact(session, text);
-    if (session.model.kind === "info") {
+    const answered = session.interactive === true || session.answeredSecret === true;
+    if (session.model.kind === "info" && !answered) {
       return closedPanelHtml(session.model, session.page, byTelegram ? "✖ Closed" : "Closed in the terminal", redact);
     }
     if (!byTelegram) return "Answered in the terminal";
@@ -1165,6 +1171,7 @@ export class DialogBroker {
 
   /** Draw the session's current model onto its message. */
   private show(session: DialogSession): void {
+    if (ANSWERABLE_KINDS.has(session.model.kind)) session.interactive = true;
     const telegram = session.telegram;
     if (!telegram) return;
     const rendered = renderDialog(session.model, {

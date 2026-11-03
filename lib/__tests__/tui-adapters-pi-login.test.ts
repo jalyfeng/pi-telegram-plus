@@ -104,6 +104,18 @@ describe("piLoginAdapter act", () => {
     expect(JSON.stringify(after)).not.toContain("sk-test-123");
   });
 
+  it("drops the key hint that stays behind the echoed answer once the prompt is submitted", () => {
+    const { dialog, ctx } = loginHarness();
+    const answer = dialog.showPrompt("Paste your API key");
+    expect(piLoginAdapter.act(dialog, { type: "submit", text: "sk-test-123" }, ctx)).toBe(true);
+    void answer;
+    // The input is gone; the page is the message plus the key hint pi left behind the echo.
+    const after = piLoginAdapter.read(dialog, ctx);
+    if (after.kind !== "info") throw new Error(`expected an info model, got ${after.kind}`);
+    expect(after.text).toBe("Paste your API key");
+    expect(JSON.stringify(after)).not.toContain("to submit");
+  });
+
   it("refuses to submit while nothing waits for input", () => {
     const { dialog, ctx } = loginHarness();
     dialog.showWaiting("Waiting for the browser...");
