@@ -1568,7 +1568,9 @@ export function createTelegramController(deps: {
       }
       ctrlLog.debug("command route", { name, route: "telegram-handler" });
       recordCommandUsage(name);
-      await runCommandHandler(handler, args, session, chatId, messageThreadId, sourceMessageId, name);
+      // A host-control command gets its own ack message like an extension command (P2-35):
+      // its confirmation and result are written onto it, never onto a message of their own.
+      await runCommandHandler(handler, args, session, chatId, messageThreadId, sourceMessageId, name, true);
       return true;
     }
 

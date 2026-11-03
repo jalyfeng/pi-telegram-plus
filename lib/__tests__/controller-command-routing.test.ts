@@ -57,6 +57,8 @@ function createHarness(options: {
   telegramCommands?: Map<string, (args: string, ctx: unknown) => Promise<void>>;
   /** When set, the chat UI's menu() reports this message id to the controller, as telegram-ui does. */
   menuMessageId?: number;
+  /** Reports the host as OMP, which runs /new through its native handler. */
+  isOmpHost?: () => boolean;
 } = {}) {
   const calls: Call[] = [];
   const transport = createTransport(calls);
@@ -83,6 +85,7 @@ function createHarness(options: {
     endTelegramTurn: () => undefined,
     getConfig: () => ({ activeChatId: 42 }) as never,
     tuiBridge: bridge,
+    isOmpHost: options.isOmpHost,
   });
   return { controller, calls, session, bridge };
 }
@@ -447,5 +450,32 @@ describe("/tg menu message is the command scope's message (P18)", () => {
 
     await vi.waitFor(() => expect(tg).toHaveBeenCalledTimes(1));
     await vi.waitFor(() => expect(scopeSeen?.telegramMessageId).toBe(77));
+  });
+});
+
+describe("Host-control commands are one command, one message (P20, P2-35)", () => {
+  it("/new on OMP sends one ack message, and its confirmation and result are written onto it", async () => {
+    const handler = vi.fn(async () => undefined);
+    const harness = createHarness({
+      telegramCommands: new Map([["new", handler]]),
+      isOmpHost: () => true,
+    });
+
+    await send(harness.controller, "/new");
+
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    const texts = harness.calls.filter((call) => call.method === "text");
+    expect(texts.map((call) => call.text)).toEqual(["<b>▶️ /new</b>"]);
+  });
+
+  it("/hotkeys sends one message, the ack, not a second message for its output", async () => {
+    const handler = vi.fn(async () => undefined);
+    const harness = createHarness({ telegramCommands: new Map([["hotkeys", handler]]) });
+
+    await send(harness.controller, "/hotkeys");
+
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    const texts = harness.calls.filter((call) => call.method === "text");
+    expect(texts.map((call) => call.text)).toEqual(["<b>▶️ /hotkeys</b>"]);
   });
 });
