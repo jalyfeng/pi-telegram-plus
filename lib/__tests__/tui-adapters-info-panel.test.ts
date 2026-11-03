@@ -96,7 +96,7 @@ describe("infoPanelAdapter read", () => {
     const { ctx, keys } = ctxFor(panelEntry);
 
     const model = infoPanelAdapter.read(component, ctx);
-    expect(model).toEqual({ kind: "unsupported", title: "Status", what: "Object" });
+    expect(model).toEqual({ kind: "unsupported", title: "Status", what: "unknown dialog" });
     expect(JSON.stringify(model)).not.toContain("Some screen text");
     expect(render).not.toHaveBeenCalled();
 
@@ -107,11 +107,11 @@ describe("infoPanelAdapter read", () => {
 });
 
 /**
- * OMP's BorderedLoader (oh-my-pi@v18.14.1 packages/tui/src/overlays/bordered-loader.ts): no `cancellable`
- * flag and no stop method, only the `signal` getter that Escape aborts through, and a describe tree with
- * the loader's spinner and a hints row. Its Cancel is Escape.
+ * OMP's BorderedLoader (oh-my-pi@v18.14.1 packages/tui/src/overlays/bordered-loader.ts) as the shipped binary
+ * has it: the class name is minified (here "Zq"), there is no `cancellable` flag and no stop method, only the
+ * `signal` getter that Escape aborts through, and a describe tree with the loader's spinner and a hints row.
  */
-class BorderedLoader {
+class Zq {
   render(): string[] {
     return [];
   }
@@ -135,14 +135,27 @@ class BorderedLoader {
   }
 }
 
-describe("infoPanelAdapter: OMP's BorderedLoader is a cancellable progress wait", () => {
+describe("infoPanelAdapter: OMP's minified BorderedLoader is a cancellable progress wait", () => {
   it("reads its spinner label as progress, not the hints row, and Cancel sends Escape", () => {
-    const component = new BorderedLoader();
+    const component = new Zq();
     const { ctx, keys } = ctxFor(undefined, "omp");
     const model = infoPanelAdapter.read(component, ctx);
     expect(model).toEqual({ kind: "progress", text: "Sharing session...", cancellable: true });
     expect(infoPanelAdapter.act(component, { type: "cancel" }, ctx)).toBe(true);
     expect(keys).toEqual(["esc"]);
+  });
+  it("does not call a loader-role card without an AbortSignal a cancellable wait", () => {
+    class Yk {
+      render(): string[] {
+        return [];
+      }
+      handleInput(): void {}
+      describe() {
+        return { k: "card", p: { role: "omp.hook.loader" }, c: [{ k: "spinner", p: { label: [{ t: "Sharing session..." }] } }] };
+      }
+    }
+    const { ctx } = ctxFor(undefined, "omp");
+    expect(infoPanelAdapter.read(new Yk(), ctx).kind).not.toBe("progress");
   });
 });
 

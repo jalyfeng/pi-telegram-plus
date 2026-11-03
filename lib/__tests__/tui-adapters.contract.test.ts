@@ -225,7 +225,7 @@ describe("a dialog nothing can model", () => {
 
     const model = adapter.read(component, ctx);
     if (model.kind !== "unsupported") throw new Error(`expected an unsupported model, got ${model.kind}`);
-    expect(model.what).toBe("Object");
+    expect(model.what).toBe("unknown dialog");
     // The frame is never read: nothing rendered reaches the model.
     expect(JSON.stringify(model)).not.toContain("alpha");
 

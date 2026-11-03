@@ -12,11 +12,10 @@
  * decision 47).
  */
 import type { AdapterContext, DialogAdapter, DialogModel } from "../model.ts";
-import { isReadOnlyPanel } from "../find-shape.ts";
+import { isCancelOnlyLoader, isReadOnlyPanel } from "../find-shape.ts";
 import { actionKeys, describedText, withoutLeadingTitle, type DescribedAction, type DescribedText } from "../describe-text.ts";
 import { contentHtml } from "../output.ts";
 import { describableChild, describesDialog, describesLoginSheet, describeTree, tspText, type NativeNodeLike } from "./tsp.ts";
-import { constructorName } from "./utils.ts";
 
 type Describable = object & { handleNativeEvent(event: unknown): unknown };
 
@@ -67,7 +66,7 @@ function undescribedIn(node: NativeNodeLike, depth: number): boolean {
  * reader knows why nothing of the panel was written.
  */
 function unreadableWhat(component: object, ctx: AdapterContext): string {
-  const base = ctx.entry?.method ?? hostTitle(component) ?? describedHead(component) ?? (constructorName(component) || "unknown");
+  const base = ctx.entry?.method ?? hostTitle(component) ?? describedHead(component) ?? "unknown dialog";
   const root = describeTree(component);
   return root !== undefined && undescribedIn(root, 0) ? `${base} (nested component without a description)` : base;
 }
@@ -80,22 +79,13 @@ function liveText(component: object, redact: (text: string) => string): Describe
 }
 
 /**
- * OMP loaders that Escape aborts through their `signal` (oh-my-pi@v18.14.1
- * packages/tui/src/overlays/bordered-loader.ts): they carry no `cancellable` flag.
- */
-const OMP_CANCELLABLE_LOADERS: ReadonlySet<string> = new Set(["BorderedLoader"]);
-
-/**
- * Whether Escape does more than close the view. pi's `BorderedLoader` keeps no
- * stop method: it carries the host's own `cancellable` flag plus an AbortSignal
- * that Escape aborts through, so both shapes count. OMP's `BorderedLoader` has
- * the signal without the flag; its class name is the mark.
+ * Whether Escape does more than close the view: a function that stops the work, or a waiting box that
+ * Escape aborts through (its shape is read in `isCancelOnlyLoader`, shared with the focus rule).
  */
 const cancellable = (component: object): boolean => {
   const record = component as Record<string, unknown>;
   if (["cancel", "stop", "abort"].some((name) => typeof record[name] === "function")) return true;
-  if (!("signal" in record)) return false;
-  return record.cancellable === true || OMP_CANCELLABLE_LOADERS.has(constructorName(component));
+  return isCancelOnlyLoader(component);
 };
 
 /** The text a pi loader keeps: `Loader.message`, or a BorderedLoader's `loader.message`. */
@@ -129,7 +119,7 @@ export const infoPanelAdapter: DialogAdapter = {
 
   detect(component, ctx) {
     if (ctx.entry?.kind === "panel") return true;
-    return isReadOnlyPanel(component);
+    return isReadOnlyPanel(component) || isCancelOnlyLoader(component);
   },
 
   read(component, ctx): DialogModel {

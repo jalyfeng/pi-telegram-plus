@@ -1036,7 +1036,7 @@ describe("who closed a dialog and what they tapped", () => {
 
   it("runs OMP's /share loader as a progress wait: no line when the host ends it, Cancelled when Telegram cancels", async () => {
     // OMP's BorderedLoader shape (bordered-loader.ts): a signal Escape aborts through, and a describe tree.
-    class BorderedLoader {
+    class Zq {
       render(): string[] {
         return [];
       }
@@ -1056,9 +1056,11 @@ describe("who closed a dialog and what they tapped", () => {
       }
     }
     const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
-    focus.openDialog(new BorderedLoader() as unknown as Record<string, unknown>);
+    focus.openDialog(new Zq() as unknown as Record<string, unknown>);
     await settle();
     const session = broker.current();
+    // The minified class name is no clue: the structure selects the panel adapter, which reads the wait.
+    expect(session?.adapter?.id).toBe("info-panel");
     expect(session?.model).toEqual({ kind: "progress", text: "Sharing session...", cancellable: true });
     focus.closeToEditor();
     await settle();
@@ -1067,7 +1069,7 @@ describe("who closed a dialog and what they tapped", () => {
   });
 
   it("says Cancelled when Telegram cancels OMP's /share loader", async () => {
-    class BorderedLoader {
+    class Zq {
       render(): string[] {
         return [];
       }
@@ -1080,7 +1082,7 @@ describe("who closed a dialog and what they tapped", () => {
       }
     }
     const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
-    focus.openDialog(new BorderedLoader() as unknown as Record<string, unknown>);
+    focus.openDialog(new Zq() as unknown as Record<string, unknown>);
     await settle();
     const session = broker.current()!;
     broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "x" });
@@ -1088,6 +1090,17 @@ describe("who closed a dialog and what they tapped", () => {
     focus.closeToEditor();
     await settle();
     expect(lastText(transport)).toContain("✖ Cancelled");
+  });
+
+  it("writes no closing line for an unsupported dialog the terminal closes", async () => {
+    const { transport, focus } = await scripted(
+      { kind: "unsupported", title: "Something new", what: "a panel with no readable content" },
+      () => false,
+    );
+    focus.closeToEditor();
+    await settle();
+
+    expect(transport.edits.filter((entry) => entry.text.includes("Answered in the terminal"))).toEqual([]);
   });
 
   it("writes no closing line when the host ends a progress wait (e.g. /share uploading)", async () => {

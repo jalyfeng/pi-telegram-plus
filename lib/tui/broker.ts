@@ -528,7 +528,8 @@ export class DialogBroker {
       return closedPanelHtml(session.model, session.page, byTelegram ? "✖ Closed" : "Closed in the terminal", redact);
     }
     if (!byTelegram) {
-      if (session.model.kind === "progress" && !answered) return null;
+      // Nothing was asked on a progress wait or an unsupported dialog, so nothing is answered in the terminal.
+      if ((session.model.kind === "progress" || session.model.kind === "unsupported") && !answered) return null;
       return "Answered in the terminal";
     }
     return escapeHtml(redact(this.telegramSummary(session)));
