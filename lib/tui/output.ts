@@ -96,15 +96,25 @@ export function secretChatKey(chatId: number, messageThreadId?: number): string 
   return `${chatId}:${messageThreadId ?? "main"}`;
 }
 
+/**
+ * A host component that updates itself after it is mounted (a `ChatBlock`, which has a public
+ * `isTranscriptBlockFinalized()`). `html` is what it showed when it was captured, used by the
+ * interim renders; the final render reads `block` again with the same reader (`contentHtml`).
+ */
+type LiveBlock = { block: Record<string, unknown>; html: string };
+
+/** One captured piece of output: a fixed text, or a self-updating block. */
+type OutputPart = string | LiveBlock;
+
 type Binding = {
   scope: CommandScope;
   telegram: OutputTelegram;
-  entries: string[];
+  entries: OutputPart[];
   dropped: number;
   /** BashExecutionComponents claimed by a "!" scope (D3b); final render once. */
   bashComponents: Record<string, unknown>[];
-  /** All output collected so far, as Telegram HTML (one entry per component). */
-  outputHtml: string;
+  /** All output collected so far, in order (one part per component). */
+  parts: OutputPart[];
   /** True once the final content was handed to the pager (it no longer fits one message). */
   paged: boolean;
   lastText?: string;
@@ -201,7 +211,7 @@ export class OutputCapture {
       entries: [],
       dropped: 0,
       bashComponents: [],
-      outputHtml: "",
+      parts: [],
       paged: false,
       lastEditAt: 0,
       flushing: false,
@@ -294,10 +304,19 @@ export class OutputCapture {
     for (const child of list) {
       if (!isHostObject(child) || this.presentClaimed.has(child)) continue;
       this.presentClaimed.add(child);
-      const html = contentHtml(child, (raw) => this.redact(raw));
-      this.logCaptured(child, html);
-      if (html) this.push(html);
+      const entry = this.captureOf(child);
+      if (entry) this.push(entry);
     }
+  }
+
+  /** What a claimed component contributes: its text as read now (`contentHtml`). A self-updating
+   * block (it has a public `isTranscriptBlockFinalized`) is kept by reference too, so the final
+   * render reads it again. */
+  private captureOf(child: Record<string, unknown>): OutputPart | undefined {
+    const html = contentHtml(child, (raw) => this.redact(raw));
+    this.logCaptured(child, html);
+    if (!html) return undefined;
+    return typeof child.isTranscriptBlockFinalized === "function" ? { block: child, html } : html;
   }
 
   /** Claim a live panel added to a command's container. Its first terminal method call
@@ -518,10 +537,8 @@ export class OutputCapture {
           this.trackBashComponent(child);
           return;
         }
-        const html = contentHtml(child, (raw) => this.redact(raw));
-        this.logCaptured(child, html);
-        if (!html) return;
-        this.push(html);
+        const entry = this.captureOf(child);
+        if (entry) this.push(entry);
       }, this);
     }
     this.attachCommandChain(state);
@@ -598,14 +615,14 @@ export class OutputCapture {
     }
   }
 
-  private push(html: string): void {
-    outputLog.debug("output push", { length: html.length });
+  private push(entry: OutputPart): void {
+    outputLog.debug("output push", { length: typeof entry === "string" ? entry.length : entry.html.length });
     const binding = this.binding;
     if (!binding || binding.finished) return;
     if (this.origin.active() !== binding.scope || binding.scope.ended) return;
     this.origin.touch(binding.scope);
-    const value = html.trim();
-    if (!value) return;
+    const value = typeof entry === "string" ? entry.trim() : entry;
+    if (value === "") return;
     if (binding.entries[binding.entries.length - 1] === value) return;
     if (binding.entries.length >= MAX_COMPONENTS) {
       binding.dropped += 1;
@@ -639,14 +656,11 @@ export class OutputCapture {
     if (!final && binding.scope.dialogOpen) return;
     binding.flushing = true;
     try {
-      let added = binding.entries.splice(0).join("\n\n").trim();
+      const added = binding.entries.splice(0);
       const dropped = binding.dropped;
       binding.dropped = 0;
-      if (dropped > 0) {
-        const tail = `…${dropped} more output entries; see the terminal`;
-        added = added ? `${added}\n\n${tail}` : tail;
-      }
-      if (added) binding.outputHtml = binding.outputHtml ? `${binding.outputHtml}\n\n${added}` : added;
+      if (dropped > 0) added.push(`…${dropped} more output entries; see the terminal`);
+      binding.parts.push(...added);
       await this.render(binding, final);
     } finally {
       binding.flushing = false;
@@ -657,10 +671,28 @@ export class OutputCapture {
     }
   }
 
+  /** The command output as Telegram HTML. Interim renders use what each block showed when captured.
+   * The final render reads a self-updating block again, and writes it only once it has finished:
+   * a block still running at the end has no final content (its spinner frame is not output). */
+  private outputText(binding: Binding, final: boolean): string {
+    const redact = this.redactFor(binding);
+    return binding.parts
+      .flatMap((part): string[] => {
+        if (typeof part === "string") return [part];
+        if (!final) return [part.html];
+        const block = part.block;
+        const finished = (block.isTranscriptBlockFinalized as () => boolean).call(block);
+        if (!finished) return [];
+        const html = contentHtml(block, redact);
+        return html ? [html] : [];
+      })
+      .join("\n\n");
+  }
+
   private async render(binding: Binding, final: boolean): Promise<void> {
     // Dialog summaries are Telegram HTML already (broker closeSummary): written as they are.
     const summaries = binding.scope.dialogSummaries;
-    const body = [...summaries, binding.outputHtml].filter((part) => part.length > 0).join("\n\n");
+    const body = [...summaries, this.outputText(binding, final)].filter((part) => part.length > 0).join("\n\n");
     const header = binding.telegram.ackHtml;
     const whole = body ? `${header}\n\n${body}` : header;
     if (splitTelegramHtml(whole, 3400).length > 1) {
