@@ -485,17 +485,23 @@ export function createTelegramTransport(
       });
     },
 
-    async editButtons(chatId, messageId, text, rows) {
+    async editButtons(chatId, messageId, text, rows, delivery) {
       const lease = captureSendLease();
       const reply_markup = buildInlineKeyboard(rows);
       const first = splitTelegramHtml(text)[0];
+      // A kept edit is replayed as plain text, which drops the keyboard: only a
+      // keyboard-less edit (the dialog's closing summary) may be kept.
+      const keep = rows.length === 0 ? delivery : undefined;
+      const piece = { chatId, editMessageId: messageId, html: first };
+      const edited = () => { if (delivery?.heldSince === undefined) supersedePendingEdit(chatId, messageId); };
       await callApi("editMessageText", {
         chat_id: chatId,
         message_id: messageId,
         text: first,
         parse_mode: "HTML",
         reply_markup,
-      }, undefined, lease).catch((err) => {
+      }, undefined, lease).then(edited).catch((err) => {
+        if (holdForReconnect(err, keep, [piece])) return;
         if (skipsFallback(err)) return; // swallow; nothing useful to retry
         warnHtmlFallback("editButtons", err, first);
         return callApi("editMessageText", {
@@ -503,7 +509,10 @@ export function createTelegramTransport(
           message_id: messageId,
           text: stripHtml(first),
           reply_markup,
-        }, undefined, lease).catch(apiLog.swallow("debug", "editButtons plain-text fallback failed", { chatId, messageId }));
+        }, undefined, lease).then(edited).catch((plainErr) => {
+          if (holdForReconnect(plainErr, keep, [piece])) return;
+          apiLog.swallow("debug", "editButtons plain-text fallback failed", { chatId, messageId })(plainErr);
+        });
       });
     },
 

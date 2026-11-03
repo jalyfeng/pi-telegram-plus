@@ -42,7 +42,11 @@ export function createActiveTelegramTransport(
                 ? transport.editText(chatId, messageId, text, richMarkdown, delivery)
                 : transport.editText(chatId, messageId, text, richMarkdown)
         )),
-        editButtons: (chatId, messageId, text, rows) => run<void>(undefined, () => transport.editButtons(chatId, messageId, text, rows)),
+        editButtons: (chatId, messageId, text, rows, delivery) => run<void>(undefined, () => (
+            delivery
+                ? transport.editButtons(chatId, messageId, text, rows, delivery)
+                : transport.editButtons(chatId, messageId, text, rows)
+        )),
         answerCallbackQuery: (callbackQueryId, text) => run<void>(undefined, () => transport.answerCallbackQuery(callbackQueryId, text)),
         deleteMessage: (chatId, messageId) => run<void>(undefined, () => transport.deleteMessage(chatId, messageId)),
         sendDocument: (chatId, path, caption, signal, messageThreadId, replyToMessageId) => run<void>(undefined, () => (

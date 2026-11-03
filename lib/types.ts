@@ -239,7 +239,7 @@ export type TelegramTransport = {
   ): Promise<TelegramSentMessage>;
   /** See `sendText` for `richMarkdown`. */
   editText(chatId: number, messageId: number, text: string, richMarkdown?: string, options?: TelegramDelivery): Promise<void>;
-  editButtons(chatId: number, messageId: number, text: string, rows: TelegramButton[][]): Promise<void>;
+  editButtons(chatId: number, messageId: number, text: string, rows: TelegramButton[][], options?: TelegramDelivery): Promise<void>;
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
   deleteMessage(chatId: number, messageId: number): Promise<void>;
   sendDocument(chatId: number, path: string, caption?: string, signal?: AbortSignal, messageThreadId?: number, replyToMessageId?: number): Promise<void>;

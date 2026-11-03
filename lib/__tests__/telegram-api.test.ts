@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { createTelegramTransport, telegramApi, TelegramApiRequestError, __resetRichMessagesForTests } from "../telegram-api.ts";
 import type { TelegramConfig } from "../types.ts";
 import { __drainAndListFiles, __resetSinkForTests, initLogger } from "../logger.ts";
-import { takePendingNotices } from "../pending-notices.ts";
+import { deliverPendingNotices, takePendingNotices } from "../pending-notices.ts";
 
 type FetchImpl = typeof fetch;
 
@@ -531,6 +531,22 @@ describe("createTelegramTransport — must-deliver sends survive an outage (P2-4
     await transport.editText(42, 5, "newer");
 
     expect(takePendingNotices()).toEqual([]);
+  });
+
+  it("a closing editButtons with no keyboard that fails on an outage is sent on reconnect", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await expect(transport.editButtons(42, 5, "<b>closed</b>", [], { mustDeliver: true })).resolves.toBeUndefined();
+
+    const reconnected = vi.fn(async () => telegramResponse(true, true));
+    globalThis.fetch = reconnected as unknown as FetchImpl;
+    await deliverPendingNotices(transport);
+
+    expect(reconnected).toHaveBeenCalledTimes(1);
+    const [url, init] = reconnected.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toMatch(/editMessageText$/);
+    expect(JSON.parse(init.body as string)).toMatchObject({ chat_id: 42, message_id: 5, text: "<b>closed</b>", parse_mode: "HTML" });
   });
 
   it("a replayed edit that fails again keeps the first failure time", async () => {

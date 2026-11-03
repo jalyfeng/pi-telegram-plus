@@ -1251,7 +1251,7 @@ export class DialogBroker {
       // so the summary edit is followed by an explicit strip: a finished dialog
       // must never leave a tappable dead menu behind.
       void this.deps.transport
-        .editButtons(telegram.chatId, telegram.messageId, summary, [])
+        .editButtons(telegram.chatId, telegram.messageId, summary, [], { mustDeliver: true })
         .catch((err) => brokerLog.debug("summary edit failed", { err }))
         .then(() => this.deps.transport.removeInlineKeyboard(telegram.chatId, telegram.messageId))
         .catch(() => undefined);
