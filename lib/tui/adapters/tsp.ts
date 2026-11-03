@@ -488,6 +488,9 @@ const TAB_KEY_PREFIX = "tab:";
 const SCOPE_KEY_PREFIX = "scope:";
 const BAR_KEY_PREFIX = "act:";
 
+/** The extraAction key of the Clear search button: its tap empties the search box and nothing else. */
+const CLEAR_SEARCH_KEY = "clear-search";
+
 /** Action-bar ids the renderer's own cancel row already covers. */
 const BAR_HIDDEN_IDS: Record<string, true> = { close: true, cancel: true };
 
@@ -644,13 +647,17 @@ export const tspPickerAdapter: DialogAdapter = {
         focused: props.selected === item.id,
       };
     });
-    const extraActions = pending
+    const barExtras = pending
       ? [
           ...pickerExtraActions(props).filter((extra) => !extra.key.startsWith(BAR_KEY_PREFIX)),
           { label: "Back", key: PICK_BACK_KEY },
         ]
       : pickerExtraActions(props);
     const search = typeof props.query === "string" ? { query: props.query, ...pickerPlaceholder(props) } : undefined;
+    // A query is cleared by its own button; Cancel clears it too (see `act`).
+    const extraActions = search && search.query !== ""
+      ? [...barExtras, { label: "✖ Clear search", key: CLEAR_SEARCH_KEY }]
+      : barExtras;
     const title = typeof props.title === "string" ? props.title : "Select";
     const subtitle = pending
       ? `${tspText(pending.label) || pending.id}: choose a ${pickerNoun(props)}`
@@ -699,10 +706,21 @@ export const tspPickerAdapter: DialogAdapter = {
     const { owner, keypath, props } = found;
     const confirm = pickerConfirm(props);
     if (confirm) return sendPickerEvent(owner, pickerConfirmEvent(keypath, confirm, action), ctx);
-    if (action.type === "search") {
+    if (action.type === "cancel") {
+      const query = typeof props.query === "string" ? props.query : "";
+      return cancelWithSearch(
+        component,
+        query,
+        () => findPicker(component)?.props.query,
+        () => sendPickerEvent(owner, { type: "action", key: keypath, act: "close", mods: [] }, ctx),
+        ctx,
+      );
+    }
+    if (action.type === "search" || (action.type === "key" && action.name === CLEAR_SEARCH_KEY)) {
       // The picker filters through its own input box: replace its contents
-      // and let the host re-filter the list.
-      if (!setInputValue(component, action.query)) return false;
+      // and let the host re-filter the list. Clear search is the same write, empty.
+      const query = action.type === "search" ? action.query : "";
+      if (!setInputValue(component, query)) return false;
       try {
         ctx.requestRender();
       } catch {
@@ -746,8 +764,6 @@ export const tspPickerAdapter: DialogAdapter = {
       target = { type: "activate", key: keypath, item: action.key };
     } else if (action.type === "key") {
       target = pickerBarEvent(keypath, props, action.name);
-    } else if (action.type === "cancel") {
-      target = { type: "action", key: keypath, act: "close", mods: [] };
     }
     return sendPickerEvent(owner, target, ctx);
   },
@@ -855,6 +871,32 @@ function requestRedraw(ctx: AdapterContext): boolean {
     // A host without a live renderer has nothing to redraw; the mode still changed.
   }
   return true;
+}
+
+/**
+ * Cancel on a panel with a search box (picker, settings page). The host's Esc
+ * clears a non-empty query before it closes, so a Cancel with a query first
+ * clears the box, then sends the close once the box reads back empty. A host
+ * that clears later keeps the panel open: the next Cancel finds the box empty
+ * and closes it. `readQuery` reads the live query back after the clear.
+ */
+function cancelWithSearch(
+  component: object,
+  query: string,
+  readQuery: () => unknown,
+  close: () => boolean,
+  ctx: AdapterContext,
+): boolean {
+  if (query === "") return close();
+  if (!setInputValue(component, "")) return false;
+  try {
+    ctx.requestRender();
+  } catch {
+    // A host without a live renderer has nothing to redraw; the clear landed.
+  }
+  const now = readQuery();
+  if (typeof now === "string" && now !== "") return true;
+  return close();
 }
 
 /**
@@ -1287,6 +1329,16 @@ export const tspPrefsAdapter: DialogAdapter = {
     }
     const submenu = prefsSubmenus.get(owner);
     if (submenu) return prefsSubmenuAct(owner, keypath, props, submenu, action, ctx);
+    if (action.type === "cancel") {
+      const query = typeof props.query === "string" ? props.query : "";
+      return cancelWithSearch(
+        component,
+        query,
+        () => findNode(component, "prefs")?.props.query,
+        () => sendPickerEvent(owner, { type: "action", key: keypath, act: "close", mods: [] }, ctx),
+        ctx,
+      );
+    }
     let target: unknown;
     if (action.type === "submenu" && action.key.startsWith("page:")) {
       const pageId = action.key.slice("page:".length);
@@ -1317,8 +1369,6 @@ export const tspPrefsAdapter: DialogAdapter = {
     } else if (action.type === "cycle") {
       target = prefsChangeEvent(keypath, props, action.key, action.value);
       if (!target) return false;
-    } else if (action.type === "cancel") {
-      target = { type: "action", key: keypath, act: "close", mods: [] };
     } else {
       return false;
     }

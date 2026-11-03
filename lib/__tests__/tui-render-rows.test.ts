@@ -230,3 +230,30 @@ describe("a long page keeps its items inside the message limit (Y-2)", () => {
     expect(text).toContain("alpha — short note");
   });
 });
+
+describe("select pages count the rows it shows, not the list before filtering", () => {
+  const catalogue = (count: number): DialogItem[] => Array.from({ length: count }, (_, index) => ({ key: `k${index}`, label: `item-${index}` }));
+
+  it("pages a filtered list by its three rows and titles it 'of' the full count", () => {
+    const rendered = renderDialog(
+      { kind: "select", title: "Models", items: catalogue(3), total: 39, search: { query: "mock" } },
+      CTX,
+    );
+    expect(rendered.pages).toBe(1);
+    expect(rendered.text).toContain("Page 1/1 · 3 of 39 items · 🔍 mock");
+    expect(texts(rendered.rows).flat()).not.toContain("Next ▶");
+  });
+
+  it("keeps the plain count when nothing is filtered", () => {
+    const rendered = renderDialog({ kind: "select", title: "Models", items: catalogue(39), total: 39, search: { query: "" } }, CTX);
+    expect(rendered.pages).toBe(4);
+    expect(rendered.text).toContain("Page 1/4 · 39 items");
+    expect(texts(rendered.rows).flat()).toContain("Next ▶");
+  });
+
+  it("shows an empty filter as 0 of the full count on one page", () => {
+    const rendered = renderDialog({ kind: "select", title: "Models", items: [], total: 39, notice: "No match", search: { query: "zzz" } }, CTX);
+    expect(rendered.pages).toBe(1);
+    expect(rendered.text).toContain("Page 1/1 · 0 of 39 items");
+  });
+});

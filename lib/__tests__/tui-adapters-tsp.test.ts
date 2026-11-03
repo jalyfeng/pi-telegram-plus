@@ -516,6 +516,99 @@ describe("tsp picker empty state with controls", () => {
   });
 });
 
+describe("tsp search: total, Clear search and Cancel", () => {
+  /** A filtered picker: `order` shows 3 of the 39-item catalogue; `total` is the count before filtering. */
+  const filteredProps = (query: string | null) => ({
+    title: "Models",
+    items: Array.from({ length: 39 }, (_, index) => ({ id: `m${index}`, label: index < 3 ? `mock-${index}` : `model-${index}` })),
+    order: ["m0", "m1", "m2"],
+    total: 39,
+    query,
+  });
+
+  /** A picker whose search box is a string the host keeps: ctrl+u clears it, typing appends. Every call lands in `log`. */
+  function queryPicker(query: string, log: string[]) {
+    const state = { query };
+    return {
+      state,
+      describe: () => ({ k: "picker", p: { ...filteredProps(state.query), query: state.query } }),
+      handleNativeEvent: (event: { type?: string; act?: string }) => {
+        log.push(`event:${event.type}:${event.act ?? ""}`);
+      },
+      handleInput: (data: string) => {
+        log.push(data === "\x15" ? "clear" : `type:${data}`);
+        state.query = data === "\x15" ? "" : state.query + data;
+      },
+    };
+  }
+
+  it("counts the filtered rows against the total before filtering", () => {
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: filteredProps("mock") }), ctxFor()));
+    expect(model.items.map((item) => item.key)).toEqual(["m0", "m1", "m2"]);
+    expect(model.total).toBe(39);
+    expect(model.search).toEqual({ query: "mock" });
+  });
+
+  it("offers Clear search only while the query is non-empty", () => {
+    const filtered = asSelect(tspPickerAdapter.read(queryPicker("mock", []), ctxFor()));
+    expect(filtered.extraActions).toContainEqual({ label: "✖ Clear search", key: "clear-search" });
+    const plain = asSelect(tspPickerAdapter.read(queryPicker("", []), ctxFor()));
+    expect(plain.extraActions ?? []).not.toContainEqual({ label: "✖ Clear search", key: "clear-search" });
+  });
+
+  it("Clear search empties the box and sends no close", () => {
+    const log: string[] = [];
+    const component = queryPicker("mock", log);
+    expect(tspPickerAdapter.act(component, { type: "key", name: "clear-search" }, ctxFor())).toBe(true);
+    expect(component.state.query).toBe("");
+    expect(log).toEqual(["clear"]);
+  });
+
+  it("Cancel with a query clears the box first, then closes", () => {
+    const log: string[] = [];
+    const component = queryPicker("mock", log);
+    expect(tspPickerAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["clear", "event:action:close"]);
+  });
+
+  it("Cancel with an empty box closes at once", () => {
+    const log: string[] = [];
+    expect(tspPickerAdapter.act(queryPicker("", log), { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["event:action:close"]);
+  });
+
+  it("Cancel does not close while the host still shows a query; the next Cancel does", () => {
+    const log: string[] = [];
+    const component = queryPicker("mock", log);
+    // A host that applies the clear later: the box still reads "mock" right after the write.
+    component.handleInput = (data: string) => {
+      log.push(`input:${data}`);
+    };
+    expect(tspPickerAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["input:\x15"]);
+    component.state.query = "";
+    expect(tspPickerAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["input:\x15", "event:action:close"]);
+  });
+
+  it("Cancel on a settings page with a query clears the box first, then closes", () => {
+    const log: string[] = [];
+    const props = { ...structuredClone(prefsProps), query: "think" };
+    const component = {
+      describe: () => ({ k: "prefs", p: props }),
+      handleNativeEvent: (event: { type?: string; act?: string }) => {
+        log.push(`event:${event.type}:${event.act ?? ""}`);
+      },
+      handleInput: (data: string) => {
+        log.push(data === "\x15" ? "clear" : `type:${data}`);
+        props.query = data === "\x15" ? "" : props.query + data;
+      },
+    };
+    expect(tspPrefsAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["clear", "event:action:close"]);
+  });
+});
+
 describe("tsp race hand-off (§4.12)", () => {
   it("declines a picker while the extension dialog race is live", () => {
     const component = makeComponent({ k: "picker", p: pickerProps });

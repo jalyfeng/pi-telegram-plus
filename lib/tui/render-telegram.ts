@@ -190,9 +190,12 @@ function searchHint(search: SearchModel, empty = "(all)"): string {
 }
 
 function renderSelect(model: Extract<DialogModel, { kind: "select" }>, ctx: RenderContext): RenderedDialog {
-  const page = Math.max(0, ctx.page ?? 0);
-  const total = model.total || model.items.length;
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // `items` is what the host shows after its filter, so pages count those rows;
+  // `total` is the list before filtering and only feeds the "of" in the title.
+  const shown = model.items.length;
+  const total = Math.max(model.total || 0, shown);
+  const pages = Math.max(1, Math.ceil(shown / PAGE_SIZE));
+  const page = Math.min(Math.max(0, ctx.page ?? 0), pages - 1);
   const window = model.items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
   const { rows, keyMap } = itemButtons(window, page, ctx, model.multi ? "t" : "c");
   const actions: TelegramButton[] = [];
@@ -211,11 +214,12 @@ function renderSelect(model: Extract<DialogModel, { kind: "select" }>, ctx: Rend
     (extra) => button(shorten(extra.label, MAX_LABEL), ctx, "k", extra.key),
   ));
   actions.push(...cancelRow(ctx));
-  const nav = pageButtons(total, page, ctx);
+  const nav = pageButtons(shown, page, ctx);
   if (nav.length > 0) rows.push(nav);
   rows.push(...chunk(extras));
   rows.push(actions);
-  const pageLine = `Page ${page + 1}/${pages} · ${total} items`;
+  const count = shown < total ? `${shown} of ${total} items` : `${total} items`;
+  const pageLine = `Page ${page + 1}/${pages} · ${count}`;
   const searchLine = model.search ? `${pageLine} · 🔍 ${searchHint(model.search)}` : pageLine;
   return {
     text: listText(
