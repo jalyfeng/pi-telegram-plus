@@ -494,3 +494,78 @@ describe("OMP panels with lists, meters and nested components", () => {
     });
   });
 });
+
+describe("an overlay whose list lives in a nested component (OMP /debug)", () => {
+  // OMP's DebugSelectorComponent: an OverlayPanel root (a card with no native events of its own)
+  // over a spacer and a SelectList, which describes `col(omp.select) > list > item` and takes
+  // select/activate events for its items.
+  const selectList = (events: unknown[]) => ({
+    describe: () => ({
+      k: "col",
+      p: { role: "omp.select" },
+      c: [
+        {
+          k: "list",
+          key: "list",
+          p: { selected: "one", empty: "No items", max: { lines: 7 } },
+          c: [
+            { k: "item", key: "one", p: { label: [{ t: "Heap snapshot" }], detail: [{ t: "write a heap dump", s: "muted" }] } },
+            { k: "item", key: "two", p: { label: [{ t: "Profile CPU" }] } },
+          ],
+        },
+      ],
+    }),
+    handleNativeEvent: vi.fn((event: unknown) => {
+      events.push(event);
+    }),
+  });
+
+  it("is read as a described panel and its list items are buttons", () => {
+    class Spacer {
+      render(): string[] {
+        return [];
+      }
+    }
+    const events: unknown[] = [];
+    const inner = selectList(events);
+    const root = {
+      title: "Debug Tools",
+      describe: () => ({ k: "card", p: { role: "omp.overlay", head: "Debug Tools" }, c: [new Spacer(), inner] }),
+      render: vi.fn(() => ["screen"]),
+    };
+    const { ctx } = ctxFor();
+
+    expect(describedPanelAdapter.detect(root, ctx)).toBe(true);
+    expect(pickAdapter(root, ctx)?.id).toBe("described-panel");
+    const model = describedPanelAdapter.read(root, ctx) as { title: string; text: string; actions: { label: string; key: string }[] };
+    expect(model.title).toBe("Debug Tools");
+    expect(model.text).toContain("Heap snapshot");
+    expect(model.actions.map((action) => action.label)).toEqual(["Heap snapshot", "Profile CPU"]);
+
+    expect(describedPanelAdapter.act(root, { type: "choose", key: model.actions[1]!.key }, ctx)).toBe(true);
+    expect(events).toEqual([{ type: "activate", key: "list", item: "two" }]);
+    expect(root.render).not.toHaveBeenCalled();
+  });
+
+  it("leaves a nested picker to the tsp picker adapter, not to the panel", () => {
+    const nested = {
+      describe: () => ({ k: "col", c: [{ k: "picker", p: { items: [{ id: "a", label: "Alpha" }], title: "Models" } }] }),
+      handleNativeEvent: vi.fn(),
+    };
+    const root = { describe: () => ({ k: "col", c: [nested] }), render: vi.fn(() => ["screen"]) };
+    const { ctx } = ctxFor();
+
+    expect(describedPanelAdapter.detect(root, ctx)).toBe(false);
+    expect(pickAdapter(root, ctx)?.id).toBe("tsp-picker");
+  });
+
+  it("does not take a nested component whose only list is disabled", () => {
+    const nested = {
+      describe: () => ({ k: "list", key: "list", p: { selected: null }, c: [{ k: "item", key: "x", p: { label: "Gone", disabled: true } }] }),
+      handleNativeEvent: vi.fn(),
+    };
+    const root = { describe: () => ({ k: "card", p: { head: "Status" }, c: [nested] }), render: vi.fn(() => ["screen"]) };
+
+    expect(describedPanelAdapter.detect(root, ctxFor().ctx)).toBe(false);
+  });
+});

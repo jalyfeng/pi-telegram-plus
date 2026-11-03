@@ -165,10 +165,65 @@ export const infoPanelAdapter: DialogAdapter = {
  * same rule, so a focused panel is a dialog before any adapter reads it.
  */
 export function isDescribedPanel(component: object): boolean {
-  if (typeof (component as Partial<Describable>).handleNativeEvent !== "function") return false;
   if (cancellable(component)) return false;
   if (describesDialog(component) || describesLoginSheet(component)) return false;
-  return describeTree(component) !== undefined;
+  if (describeTree(component) === undefined) return false;
+  if (typeof (component as Partial<Describable>).handleNativeEvent === "function") return true;
+  // An overlay without native events of its own (OMP's /debug) is a panel when a nested component
+  // that takes them holds a list to press.
+  return nestedAnswers(component, 0, new Set<object>([component]));
+}
+
+/** Nested component levels searched for a list that can be pressed (as OMP's tsp adapters search them). */
+const MAX_NESTED_LEVELS = 4;
+
+/** Whether a component below `component` takes native events and holds an enabled, keyed list item. */
+function nestedAnswers(component: object, level: number, visited: Set<object>): boolean {
+  if (level >= MAX_NESTED_LEVELS) return false;
+  const root = describeTree(component);
+  return root !== undefined && nestedIn(root, level, visited);
+}
+
+function nestedIn(node: NativeNodeLike, level: number, visited: Set<object>): boolean {
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  for (const child of children) {
+    if (typeof child !== "object" || child === null) continue;
+    const nested = describableChild(child);
+    if (nested) {
+      if (visited.has(nested)) continue;
+      visited.add(nested);
+      if (typeof (nested as Partial<Describable>).handleNativeEvent === "function" && hasPressableList(nested)) return true;
+      if (nestedAnswers(nested, level + 1, visited)) return true;
+      continue;
+    }
+    if (nestedIn(child as NativeNodeLike, level, visited)) return true;
+  }
+  return false;
+}
+
+/** Whether the component's own tree (not its nested components) has a list with an enabled, keyed item. */
+function hasPressableList(component: object): boolean {
+  const root = describeTree(component);
+  return root !== undefined && listIn(root, 0);
+}
+
+function listIn(node: NativeNodeLike, depth: number): boolean {
+  if (depth > 12) return false;
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  if (node.k === "list") {
+    const enabled = children.some((child) => {
+      if (typeof child !== "object" || child === null) return false;
+      const item = child as NativeNodeLike;
+      const props = typeof item.p === "object" && item.p !== null ? (item.p as Record<string, unknown>) : {};
+      return item.k === "item" && props.disabled !== true && item.key !== undefined;
+    });
+    if (enabled) return true;
+  }
+  for (const child of children) {
+    if (typeof child !== "object" || child === null || describableChild(child)) continue;
+    if (listIn(child as NativeNodeLike, depth + 1)) return true;
+  }
+  return false;
 }
 
 export const describedPanelAdapter: DialogAdapter = {

@@ -358,3 +358,35 @@ describe("describedText lists, meters and nested components (OMP panels)", () =>
     expect(result.html).not.toContain("█");
   });
 });
+
+describe("describedText badges and native-owned lists", () => {
+  it("writes a badge as bracketed text on the line it sits in", () => {
+    const tree: N = { k: "row", c: [text("gpt-x"), { k: "badge", p: { text: "shadowed" } }] };
+    expect(describedText(tree as never, identity, owner).html).toBe("gpt-x [shadowed]");
+  });
+
+  it("makes the enabled items of a list buttons when the owner takes native events, even without list actions", () => {
+    const nativeOwner = { handleNativeEvent: () => undefined };
+    const tree: N = {
+      k: "col",
+      p: { role: "omp.select" },
+      c: [
+        {
+          k: "list",
+          key: "list",
+          p: { selected: "a", empty: "No items" },
+          c: [
+            { k: "item", key: "a", p: { label: "Alpha" } },
+            { k: "item", key: "b", p: { label: "Beta", disabled: true } },
+          ],
+        },
+      ],
+    };
+    const { actions } = describedText(tree as never, identity, nativeOwner);
+
+    expect(actions.map((action) => [action.label, action.act, action.keypath, action.item])).toEqual([
+      ["Alpha", "activate", "list", "a"],
+    ]);
+    expect(actions[0]!.owner).toBe(nativeOwner);
+  });
+});

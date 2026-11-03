@@ -137,13 +137,15 @@ function renderMeter(props: Props, walk: Walk): string {
 /**
  * A list's text: one line per item (`label — value`), its detail on the next line, indented. A
  * disabled item is shown but takes no button. The list's `empty` text stands in for no items.
- * When the list is selectable (`click` selects, `dblclick` activates), each enabled item is a button
- * that replays as an `activate` event for that item on the list.
+ * When the list is selectable (`click` selects, `dblclick` activates), or its owner takes native events,
+ * each enabled item is a button that replays as an `activate` event for that item on the list.
  */
 function renderList(node: NativeNodeLike, keypath: string, owner: object, walk: Walk): string | null {
   const props: Props = isObject(node.p) ? node.p : {};
   const actions: Props = isObject(props.actions) ? props.actions : {};
   const selectable = actions.click === "select" || actions.dblclick === "activate";
+  // A component that takes native events can select and activate its own items, selectable or not.
+  const ownerAnswers = typeof (owner as { handleNativeEvent?: unknown }).handleNativeEvent === "function";
   const items = (Array.isArray(node.c) ? (node.c as unknown[]) : []).filter((child): child is NativeNodeLike => isObject(child) && child.k === "item");
   if (items.length === 0) {
     const empty = tspText(props.empty);
@@ -160,7 +162,7 @@ function renderList(node: NativeNodeLike, keypath: string, owner: object, walk: 
     if (detail !== "") lines.push(`  ${escapeHtml(detail)}`);
     const itemActions: Props = isObject(itemProps.actions) ? itemProps.actions : {};
     const clickable = selectable || typeof itemActions.click === "string" || typeof itemActions.dblclick === "string";
-    if (clickable && itemProps.disabled !== true && item.key !== undefined) {
+    if ((clickable || ownerAnswers) && itemProps.disabled !== true && item.key !== undefined) {
       const buttonLabelText = walk.redact(buttonText(itemProps.label)) || label;
       walk.actions.push({ label: buttonLabelText, act: "activate", keypath, owner, item: String(item.key) });
     }
@@ -243,6 +245,10 @@ function renderNode(node: NativeNodeLike, keypath: string, owner: object, walk: 
       return escapeHtml(walk.redact(meterText(props)));
     case "list":
       return renderList(node, keypath, owner, walk);
+    case "badge": {
+      const badge = tspText(props.text);
+      return badge === "" ? null : `[${escapeHtml(walk.redact(badge))}]`;
+    }
     case "rule":
       return "";
     case "spacer":
