@@ -8,6 +8,7 @@
  * "> <value>" line in its children, and no model may carry it out.
  */
 import { describe, expect, it } from "vitest";
+import { drainDesktopLaunches } from "./_desktop-guard.ts";
 import { LoginDialogComponent } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/login-dialog.js";
 import { initTheme } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { pickAdapter } from "../tui/adapters/index.ts";
@@ -77,6 +78,7 @@ describe("piLoginAdapter read", () => {
   it("models the OAuth URL step as closable info carrying the link", () => {
     const { dialog, ctx } = loginHarness();
     dialog.showAuth("https://acme.example/auth", "Open this URL to sign in");
+    expect(drainDesktopLaunches()).toHaveLength(1); // the browser open is expected here, and nothing started
     const model = piLoginAdapter.read(dialog, ctx);
     expect(model.kind).toBe("info");
     if (model.kind !== "info") return;
@@ -191,6 +193,7 @@ describe("piLoginAdapter read: the OAuth link step keeps its link and its lines"
   function oauthCodeStep() {
     const harness = loginHarness();
     harness.dialog.showAuth(url, instructions);
+    drainDesktopLaunches(); // the browser open is expected here; the guard started nothing
     void harness.dialog.showManualInput(prompt);
     return harness;
   }
@@ -220,5 +223,14 @@ describe("piLoginAdapter read: the OAuth link step keeps its link and its lines"
     expect(rendered.text).not.toContain("<pre>");
     expect(rendered.text).toContain(instructions);
     expect(rendered.text).toContain(prompt);
+  });
+});
+
+describe("the desktop guard: showAuth asks for a browser but never starts one", () => {
+  it("records the open call and starts no process", () => {
+    const { dialog } = loginHarness();
+    const target = "https://acme.example/auth?state=guard";
+    dialog.showAuth(target, "Open this URL to sign in");
+    expect(drainDesktopLaunches()).toEqual([{ api: "spawn", program: "open", args: ["open", [target], expect.any(Object)] }]);
   });
 });
