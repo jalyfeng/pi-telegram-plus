@@ -1,6 +1,7 @@
 import { getCurrentTelegramTurn } from "../turn-context.ts";
 import { queuePendingNotice } from "../pending-notices.ts";
 import { hostCommandName } from "../session-capture.ts";
+import { currentCommandScope } from "../tui/command-context.ts";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { CommandRegistry } from "./register.ts";
 
@@ -26,13 +27,28 @@ export function registerLifecycleCommands(registry: CommandRegistry): void {
       // "Reloading…" line is only for the terminal, which is where a local reload is.
       const turn = getCurrentTelegramTurn();
       if (turn) {
-        queuePendingNotice({
-          chatId: turn.chatId,
-          messageThreadId: turn.messageThreadId,
-          replyTo: turn.sourceMessageId,
-          html: "✅ Reloaded.",
-          createdAt: Date.now(),
-        });
+        // The result line is the command's only message. OMP prints its own "Reloaded ..." line
+        // into the ack, so the plugin adds none there. pi prints nothing for a reload started
+        // from Telegram (its status line is terminal-only), so the line is written onto the ack
+        // message; a command with no ack has no message to write on, so it is sent on its own.
+        if (hostCommandName() !== "omp") {
+          const ackMessageId = currentCommandScope()?.telegramMessageId;
+          queuePendingNotice(ackMessageId !== undefined
+            ? {
+              chatId: turn.chatId,
+              messageThreadId: turn.messageThreadId,
+              editMessageId: ackMessageId,
+              html: "<b>▶️ /reload</b>\n\n✅ Reloaded.",
+              createdAt: Date.now(),
+            }
+            : {
+              chatId: turn.chatId,
+              messageThreadId: turn.messageThreadId,
+              replyTo: turn.sourceMessageId,
+              html: "✅ Reloaded.",
+              createdAt: Date.now(),
+            });
+        }
       } else {
         ui.notify("Reloading…", "info");
       }
