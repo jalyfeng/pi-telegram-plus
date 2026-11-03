@@ -1,7 +1,7 @@
 # Refactor technical plan: using all TUI commands equivalently from Telegram
 
 > Status: v8 (2026-10-28): the goal is in §0.0, the rules in force are in §0.2; on conflict, §0.0 > §0.2 > §0.1 > body text
-> Target hosts: pi (`@earendil-works/pi-coding-agent` `1.4.0`, upstream `earendil-works/pi` tag `v1.4.0`), OMP (`18.12.5`, upstream `can1357/oh-my-pi` tag `v18.12.5`, installed as a compiled single file)
+> Target hosts: pi (`@earendil-works/pi-coding-agent` `1.4.0`, upstream `earendil-works/pi` tag `v1.4.0`), OMP (`18.14.x`, upstream `can1357/oh-my-pi` tag `v18.14.1`, installed as a compiled single file)
 > Supersedes: **principle 1** of `docs/telegram-interactions-plan.md` ("dialogs initiated from Telegram go only to Telegram and do not pop up in the TUI"). Principle 2 of that document (status UI is written back to the TUI), principle 3 (do not touch the local editor during a Telegram turn) and principle 4 (never hang) remain in force.
 > Reader: the engineer or model doing the implementation. This document is self-contained and does not depend on earlier conversation.
 > Citation convention: plugin code is always located by **function name or constant name** (line numbers drift); host code is cited as "upstream repo@tag + package-relative file + function name" (for example `pi@v1.4.0 packages/coding-agent/src/modes/interactive/interactive-mode.ts`, `setupEditorSubmitHandler`).
@@ -35,8 +35,8 @@ Command logic is no longer rewritten inside Telegram, and terminal screen text i
 
 ### 0.1 v6 rules in force (2026-10-24, take precedence over conflicting content elsewhere in this document)
 
-1. **Only one host version is supported**: pi `1.4.0`, OMP `18.12.x`. When the version does not match or cannot be read, the plugin errors out at startup (status bar + Telegram notice), with no degradation or compatibility. `peerDependencies` is pinned to pi `1.4.0`; the multi-version test matrix is no longer maintained.
-2. **The host source is authoritative**: pi `earendil-works/pi` tag `v1.4.0` and OMP `can1357/oh-my-pi` tag `v18.12.5`. Host fields, methods and behaviour are taken from that source; citations name the upstream file and function, not line numbers.
+1. **Only one host version is supported**: pi `1.4.0`, OMP `18.14.x`. When the version does not match or cannot be read, the plugin errors out at startup (status bar + Telegram notice), with no degradation or compatibility. `peerDependencies` is pinned to pi `1.4.0`; the multi-version test matrix is no longer maintained.
+2. **The host source is authoritative**: pi `earendil-works/pi` tag `v1.4.0` and OMP `can1357/oh-my-pi` tag `v18.14.1`. Host fields, methods and behaviour are taken from that source; citations name the upstream file and function, not line numbers.
 3. **No degradation, only one way**: a dialog that cannot be recognized does not get a screenshot plus arrow keys and is not handed back to screen mirroring. Instead Telegram says clearly "There is a dialog in the terminal that Telegram cannot handle (<type>), please handle it in the terminal" and offers only a "Cancel" button (sends Esc). When the bridge is unavailable (the host runs in RPC/print mode, or a hook fails), the plugin errors out at startup and does not fall back to the plugin's native implementation.
 4. **Delete old paths immediately** (tasks D1–D4, before the later migration): the `off` mode and the `tuiBridge` config item, the old screen mirroring (`runTuiCommand`, `tui-selector.ts`, the `tgplus:tui:` callback), the native implementations where the plugin redoes host functionality (the matching parts of model/session/settings/auth etc. in `lib/commands/`, the matching native dialog flows in `telegram-ui.ts`, `custom-dialogs.ts`), and snapshot arrow keys. The plugin's own management functions (`pluginOnly` commands such as the `/tg` menu, `/stop`, `/pair`) are kept.
 5. **E2E "to be migrated" list**: after the old paths are deleted, commands not yet migrated to the new architecture temporarily have no output or interaction on Telegram. The E2E suite maintains a "to be migrated" list: a failure of a step on the list is an expected result and is listed separately; a failure of a step off the list is a regression. Each time a migration is completed, remove the matching step from the list.
@@ -249,6 +249,8 @@ Rules:
 3. The tick starts after the mode is captured and exists as long as the plugin is running; its cost is only a few reference comparisons.
 
 #### 4.1.2 Hook point table
+
+> Source locations in this table were verified against 18.12.5; the supported range is now 18.14.x. They have not been re-verified against 18.14.1.
 
 | Purpose | pi 1.4.0 (`packages/coding-agent/src/modes/interactive/interactive-mode.ts`) | OMP 18.12.5 | Method |
 |---|---|---|---|
@@ -816,7 +818,7 @@ Conditions of use (use only if all hold, otherwise fall back to `SnapshotAdapter
 - Only for OMP dialogs that have an entry record (`EntryInfo`). The question, title and option text are **always taken from the entry arguments**.
 - The rendered frame (`render(80)` with colors stripped) is used for only two things: determining the currently highlighted row and determining the rows visible on the screen. Option text or any state value **must not** be read from the frame (except the key legend of `approve` below).
 - All operations send keys through `F.handleInput`. Re-render before the keys, confirm the target row is still in the visible rows, and compute the step count by the visible rows; if they do not match, refuse the operation and redraw the Telegram message.
-- Bound to the OMP version range `18.12.x` (written in an adapter constant); when the version is outside the range or cannot be determined, fall back to snapshot.
+- Bound to the OMP version range `18.14.x` (written in an adapter constant); when the version is outside the range or cannot be determined, fall back to snapshot.
 - The contract test always uses the real frames of OMP 18.12.5 (`conclusions.dialogFrames` of `docs/host-probe/omp-18.12.5.json`); when an OMP upgrade changes the frame format, the test fails first.
 - The only text allowed to be read from the frame: the key legend in the footer of the OMP `approve` dialog (§4.6.5 #10), used to determine which options can be pressed; it is subject to the same version limit.
 - **Must not** be used for OMP built-in selectors (components opened by `show*Selector` such as `/model`, `/settings`, `/resume`, `/tree`, `/login`), which still go through snapshot per §9 decision 18. Lists the plugin itself pops up through `ui.select` (for example Telegram's `/model` on OMP, handled by `lib/commands/model.ts`) are entry dialogs and fall under this exception.
@@ -975,8 +977,8 @@ Replaced by the §4.12 extension UI race (decision 53). S22 proved collab works,
 
 #### 4.11.4 Version constraint: fail on mismatch, no degradation
 
-- collab and TSP are both OMP internal interfaces, and the structured channel supports only OMP `18.12.x` (the version is taken from `VERSION` of `@oh-my-pi/pi-utils`).
-- **When the version does not match or cannot be read: fail directly, and do not fall back to any other approach** (no screen reading, no mirroring, no simulated keys). At startup the plugin says clearly in the status bar and in Telegram "Unsupported OMP version <x>, 18.12.x is required", and OMP dialogs are not bridged to Telegram (decided by the user on 2026-10-24: "if the version is wrong just fail, don't do multiple sets").
+- collab and TSP are both OMP internal interfaces, and the structured channel supports only OMP `18.14.x` (the version is taken from `VERSION` of `@oh-my-pi/pi-utils`).
+- **When the version does not match or cannot be read: fail directly, and do not fall back to any other approach** (no screen reading, no mirroring, no simulated keys). At startup the plugin says clearly in the status bar and in Telegram "Unsupported OMP version <x>; requires 18.14.x", and OMP dialogs are not bridged to Telegram (decided by the user on 2026-10-24: "if the version is wrong just fail, don't do multiple sets").
 - To support a new version: pull the OMP source of the matching tag to check the interfaces, get the dialogs and commands suites passing, and only then widen the version range.
 
 #### 4.11.5 What is superseded
@@ -989,7 +991,7 @@ Replaced by the §4.12 extension UI race (decision 53). S22 proved collab works,
 
 Basis: measurements in S25 (OMP, pi) and S25b (pi), and `ExtensionUIDialogOptions.signal` in pi 1.4.0 `core/extensions/types.ts` ("AbortSignal to programmatically dismiss the dialog"). After the host receives an abort it closes its own dialog and the original call ends with `undefined`.
 
-- **Methods that support the race**: in pi 1.4.0 these are `select`, `confirm`, `input` (`editor` does not accept `opts`); in OMP 18.12.x they are `select`, `confirm`, `input`, `editor`, `askDialog`, `approve`. Methods that do not accept a signal (pi's `editor`, and `custom` on both hosts) do not race and are handled by the existing adapters (`custom` is reported clearly per §4.6.5, with pi-goal taking exception 1).
+- **Methods that support the race**: in pi 1.4.0 these are `select`, `confirm`, `input` (`editor` does not accept `opts`); in OMP (list verified on 18.12.5, not re-checked on 18.14.x) they are `select`, `confirm`, `input`, `editor`, `askDialog`, `approve`. Methods that do not accept a signal (pi's `editor`, and `custom` on both hosts) do not race and are handled by the existing adapters (`custom` is reported clearly per §4.6.5, with pi-goal taking exception 1).
 - **Interception point**: the UI context object the extension actually gets (`extensionRunner.getUIContext()`, where FocusTracker's `attachEntryHooks` already hooks the entries).
 - **Ownership**: follows the broker's ownership rules (§4.3): only dialogs inside a Telegram-initiated command scope or Telegram turn are sent to Telegram (whoever initiates, displays; decision 42 is kept).
 - **Flow**:
@@ -1161,7 +1163,7 @@ Keep the existing Bot API contract check (`scripts/e2e/telegram-contract.mjs`).
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| A host upgrade changes private fields or method names | Adapter recognition fails | Support only fixed versions (pi `1.4.0`, OMP `18.12.x`), and error out at startup when the version does not match; before upgrading, read the new version's source, get the contract tests and E2E passing, and only then open the version (§0.1) |
+| A host upgrade changes private fields or method names | Adapter recognition fails | Support only fixed versions (pi `1.4.0`, OMP `18.14.x`), and error out at startup when the version does not match; before upgrading, read the new version's source, get the contract tests and E2E passing, and only then open the version (§0.1) |
 | OMP's actual structure differs from expectation | Some OMP dialogs degrade to snapshots | Stage 0 has probed it: OMP's built-in model/settings/session/tree/oauth components have no readable fields, so stage 3 implements them by snapshot first; the extension entry arguments still provide a structured model (§4.6.5) |
 | Both sides operate at the same time | Race | A host modal dialog takes effect only once; the Broker validates focus before operating; callbacks carry sessionId + generation; locate by key |
 | When a command is submitted from Telegram the terminal has a dialog open or the previous command has not ended | The command cannot land in the editor | The Gateway rejects it and shows a notice (§4.2.3) |

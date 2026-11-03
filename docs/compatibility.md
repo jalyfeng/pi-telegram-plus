@@ -1,7 +1,7 @@
 # Compatibility
 
 - **Supported hosts:** pi coding agent `1.4.0` (`@earendil-works/pi-coding-agent`, pinned in
-  `package.json`) and OMP `18.12.x` (`@oh-my-pi/pi-coding-agent`).
+  `package.json`) and OMP `18.14.x` (`@oh-my-pi/pi-coding-agent`).
 - **Requires:** Node.js `>=22.19.0`.
 - **Any other version is refused.** At startup the extension reads the host version (pi:
   `VERSION` from `@earendil-works/pi-coding-agent`; OMP: `VERSION` from `@oh-my-pi/pi-utils`).
@@ -66,7 +66,7 @@ identically.
 
 How a dialog raised by a Telegram-started command or turn reaches the chat. "Structured" means the plugin reads the dialog's data from the host (call arguments, component fields, or the semantic description) and answers through the host's own input or event path; it never parses screen text to decide what to show.
 
-| Dialog | pi 1.4.0 | OMP 18.12.x |
+| Dialog | pi 1.4.0 | OMP 18.14.x |
 |---|---|---|
 | Extension `select` / `confirm` / `input` | Structured (race: the answer goes to the waiting call, the host's copy is closed by its cancel signal) | Structured (race) |
 | Extension `editor` | Structured (component fields, answered through the host input) | Structured (race) |
@@ -93,7 +93,7 @@ Values typed into secret prompts (the plugin's own and the host's login prompts)
 | Typecheck | `tsc --noEmit` over the package | `npm run typecheck` |
 | Unit / regression | Module and contract tests | `npm test` |
 | Round trip | pi in `tmux` + mock Telegram Bot API + mock OpenAI provider: `getMe`, the `getUpdates` loop, a real turn, the reply sent back, and the update-cursor rewind after restart | `npm run test:e2e` |
-| OMP round trip | The same for OMP `18.12.x`, plus `/new` confirmation staying on Telegram | `npm run test:e2e:omp` |
+| OMP round trip | The same for OMP `18.14.x`, plus `/new` confirmation staying on Telegram | `npm run test:e2e:omp` |
 | TUI bridge | Host command catalog, dialogs reaching Telegram, `!`/`!!` paths on both hosts | `npm run test:e2e:tui-bridge` |
 | Command acceptance | Every advertised command and the `/tg` menu levels on both hosts | `npm run test:e2e:commands` |
 | Dialog round trip | Extension `select` / `confirm` / `input` / secret input / `custom` and the `ask` tool, answered from Telegram and from the terminal, asserting the value the host actually resolved | `npm run test:e2e:dialogs` |

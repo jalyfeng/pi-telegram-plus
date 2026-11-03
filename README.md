@@ -12,7 +12,7 @@
 
 - Requires Node.js `>=22.19.0`.
 - Supports exactly one version of each host: **pi coding agent `1.4.0`** and **OMP
-  `18.12.x`**. On any other version, or when the version cannot be read, the extension
+  `18.14.x`**. On any other version, or when the version cannot be read, the extension
   refuses to start and says so in the status bar and in Telegram. There is no fallback
   mode and no multi-version support; a new host version is enabled only after its source
   has been reviewed and the E2E suites pass on it.
@@ -257,7 +257,7 @@ Common issues and diagnostic steps. The extension writes a structured JSON Lines
 - Check the log at `PI_TELEGRAM_PLUS_LOG_LEVEL=debug`: `tui-broker` lines show which adapter claimed the dialog and who owned it.
 
 ### The bot says the host version is not supported
-- The plugin only runs on pi `1.4.0` and OMP `18.12.x` and stops on anything else (see **Compatibility**). Install a supported host version.
+- The plugin only runs on pi `1.4.0` and OMP `18.14.x` and stops on anything else (see **Compatibility**). Install a supported host version.
 
 ### `/tg` is missing
 - The extension must be registered as a pi package. Re-run `pi install npm:pi-telegram-plus` (or `pi packages add .` from source) and restart pi.

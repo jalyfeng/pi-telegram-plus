@@ -22,10 +22,12 @@ reimplementation and several settings, so read **Breaking changes** before upgra
 
 ### Breaking changes
 
-- **Only pi `1.4.0` and OMP `18.12.x` are supported.** On any other version, or when the version cannot be
+- **Only pi `1.4.0` and OMP `18.14.x` are supported.** On any other version, or when the version cannot be
   read, the extension refuses to start, shows the reason in the status line, and answers Telegram
   messages with it. The multi-version compatibility matrix (`test:pi-versions`, `compat:gen`,
   `compat:check`, `docs/compat-results.json`) is gone.
+- **The supported OMP version changed from `18.12.x` to `18.14.x`.** An OMP `18.12.x` install is refused at
+  startup with the same explicit message; upgrade OMP to `18.14.x` to use the plugin.
 - **The `tuiBridge` setting is removed.** There is one mode: the host draws its own dialogs and the plugin
   brings them to Telegram. An old `tuiBridge` value in a config file is ignored with a warning.
 - **The flat `/tg-*` commands are removed.** Everything lives in the `/tg` menu; typing an old `/tg-*`
