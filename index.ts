@@ -8,10 +8,10 @@ import { createTelegramController, saveIncomingAttachment, type TelegramCommandH
 import { escapeHtml } from "./lib/html.ts";
 import { createHeartbeat } from "./lib/heartbeat.ts";
 import { replayTelegramHistory, type TelegramHistoryEntry } from "./lib/history-replay.ts";
-import { TelegramInstanceCoordinator, failoverHasOtherLiveInstances, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
+import { TelegramInstanceCoordinator, isGenuineFailover, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
 import { mainOnlyEvents } from "./lib/main-only-pi.ts";
 import { registerTelegramRenderer } from "./lib/renderer.ts";
-import { getActiveSession, installAgentSessionCapture, isOmpHost } from "./lib/session-capture.ts";
+import { getActiveSession, hostCommandName, installAgentSessionCapture, isOmpHost } from "./lib/session-capture.ts";
 import { createTelegramTransport, downloadTelegramFile, getTelegramBotUsername, getTelegramFile } from "./lib/telegram-api.ts";
 import { createTelegramUiRuntime } from "./lib/telegram-ui.ts";
 import { formatTelegramStatusLine, clearTelegramStatus, TELEGRAM_STATUS_KEY } from "./lib/status.ts";
@@ -91,6 +91,8 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
   let lastStatusError: string | undefined;
   // Collapses a retry storm into one outage notice + one recovery notice.
   const pollingNotices = new PollingNoticeGate();
+  /** True from a polling failure until the next successful poll (see the polling onSuccess). */
+  let pollingFailing = false;
 
   const setConfig = (nextConfig: TelegramConfig) => {
     const routingChanged = config.botToken !== nextConfig.botToken
@@ -426,6 +428,11 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     },
     onSuccess: () => {
       if (lastStatusError !== undefined) { lastStatusError = undefined; refreshStatus(); }
+      // The first successful poll after a failure means the link is back: replay what an outage kept.
+      if (pollingFailing) {
+        pollingFailing = false;
+        void deliverPendingNotices(transport, controller.showPaged);
+      }
       if (!pollingNotices.success()) return;
       const turn = getCurrentActiveTurn();
       const chatId = turn?.chatId ?? config.activeChatId;
@@ -449,6 +456,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
       // One notice per outage (after the debounce), not one per retry. The
       // cause is included because "polling failed" alone is not actionable.
       const { kind, label } = classifyPollingError(error, context === "processing");
+      if (context !== "processing") pollingFailing = true;
       if (!pollingNotices.failure(kind, Date.now())) return;
 
       const heading = kind === "processing"
@@ -633,18 +641,21 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
 
     if (snapshot.active.reason === "failover") {
       const notifiedByToken = runtimeState.notifiedFailoverByToken!;
-      // Only announce a failover when another live instance is registered besides
-      // self — a genuine multi-instance handoff. A single-instance restart (self
-      // alone) must not spam a "failover" notice on every pi start.
-      if (failoverHasOtherLiveInstances(snapshot, currentCoordinator.instanceId)
+      // Only announce a takeover from another instance: the replaced active record
+      // must name a different instance. A single-instance restart must not spam a
+      // "failover" notice on every pi start.
+      if (isGenuineFailover(snapshot.active, currentCoordinator.instanceId)
         && (notifiedByToken[tokenHash] ?? 0) < snapshot.active.generation
         && config.activeChatId !== undefined) {
         const chatId = config.activeChatId;
         const previousGeneration = notifiedByToken[tokenHash] ?? 0;
         notifiedByToken[tokenHash] = snapshot.active.generation;
+        const host = hostCommandName();
+        const previousName = snapshot.active.previousLabel ? ` (${escapeHtml(snapshot.active.previousLabel)})` : "";
+        const selfName = snapshot.active.label ? ` (${escapeHtml(snapshot.active.label)})` : "";
         void transport.sendText(
           chatId,
-          `⚠️ <b>Telegram instance failover</b>\nThe previous active pi instance went offline. This instance is now active.`,
+          `⚠️ <b>Telegram instance failover</b>\nThe previous active ${host} instance${previousName} went offline. This instance${selfName} is now active.`,
         ).then((sent) => {
           if (sent.length === 0 && notifiedByToken[tokenHash] === snapshot.active.generation) {
             notifiedByToken[tokenHash] = previousGeneration;
@@ -677,7 +688,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     // own transport drops them once the lease changes, so this active runtime
     // sends them with its own transport. The take inside drains the queue, so a
     // later reconcile never repeats a delivery.
-    deliverPendingNotices(transport, controller.showPaged);
+    void deliverPendingNotices(transport, controller.showPaged);
     refreshStatus();
   };
 

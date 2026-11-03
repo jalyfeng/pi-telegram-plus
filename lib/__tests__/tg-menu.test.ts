@@ -19,7 +19,7 @@ vi.mock("../pairing.ts", async (importOriginal) => {
   return { ...actual, createTelegramPairingCode: pairingMocks.createTelegramPairingCode };
 });
 
-import { buildConfigMenuOptions, registerTgMenuCommand, type SwitchInstanceDeps } from "../commands/tg-menu.ts";
+import { buildConfigMenuOptions, formatInstanceChoices, registerTgMenuCommand, type SwitchInstanceDeps } from "../commands/tg-menu.ts";
 import { configModeFlow, configToolFlow } from "../commands/tg-config.ts";
 import type { TelegramCommandDeps, TelegramConnectionState } from "../commands/telegram-commands.ts";
 import type { TgConfigDeps } from "../commands/register.ts";
@@ -881,5 +881,32 @@ describe("leaf flows called outside /tg", () => {
     const ui = { notify: vi.fn(), select: vi.fn(async () => undefined), input: vi.fn(), confirm: vi.fn() };
     await expect(configToolFlow(ui, deps)).resolves.toBeUndefined();
     expect(persistConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe("Switch instance choice labels", () => {
+  const STAMP = "2026-11-03T00:00:00.000Z";
+  const inst = (id: string, cwd: string, sessionId: string, model = "mock/mock-model") => ({
+    id, pid: 1, startedAt: STAMP, heartbeatAt: STAMP, cwd, sessionId, model,
+  });
+
+  it("names each instance by project and model, marking the active one", () => {
+    const labels = formatInstanceChoices([
+      inst("01a19d1c-0000-4000-8000-000000000001", "/tmp/pitg-human/project", "4d10a8a9-0000-4000-8000-000000000001"),
+      inst("01a19d1c-0000-4000-8000-000000000002", "/tmp/pitg-human/project2", "9e2f0b7c-0000-4000-8000-000000000002"),
+    ], "01a19d1c-0000-4000-8000-000000000001");
+    expect(labels).toEqual(["✓ project · mock/mock-model", "  project2 · mock/mock-model"]);
+    for (const label of labels) expect(label).not.toMatch(/[0-9a-f]{8}.*[0-9a-f]{8}/);
+  });
+
+  it("adds the session id prefix only when two instances share a project name", () => {
+    const labels = formatInstanceChoices([
+      inst("01a19d1c-0000-4000-8000-000000000001", "/tmp/a/app", "4d10a8a9-0000-4000-8000-000000000001"),
+      inst("01a19d1c-0000-4000-8000-000000000002", "/tmp/b/app", "9e2f0b7c-0000-4000-8000-000000000002"),
+    ], "01a19d1c-0000-4000-8000-000000000002");
+    expect(labels).toEqual([
+      "  app · mock/mock-model · 4d10a8a9",
+      "✓ app · mock/mock-model · 9e2f0b7c",
+    ]);
   });
 });

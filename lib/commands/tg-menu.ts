@@ -28,13 +28,21 @@ import {
   unbindProjectFlow,
 } from "./telegram-commands.ts";
 
-/** Format a live instance for display in the switch selector. */
-export function formatInstanceChoice(instance: TelegramInstanceMetadata, activeId: string): string {
-  const marker = instance.id === activeId ? "✓" : " ";
-  const project = (basename(instance.cwd) || instance.cwd).slice(0, 28);
-  const session = (instance.sessionName || instance.sessionId?.slice(0, 8) || "session").slice(0, 24);
-  const model = (instance.model || "no-model").slice(0, 36);
-  return `${marker} ${project} · ${session} · ${model} · ${instance.id.slice(0, 8)}`;
+/** Button labels for the instance picker, in the same order as `instances`.
+ *  Project name and model read at a glance; the session id prefix is added only
+ *  when two instances share a project name, so the buttons can still be told apart. */
+export function formatInstanceChoices(instances: TelegramInstanceMetadata[], activeId: string): string[] {
+  const projectOf = (instance: TelegramInstanceMetadata) => (basename(instance.cwd) || instance.cwd).slice(0, 28);
+  const counts = new Map<string, number>();
+  for (const instance of instances) counts.set(projectOf(instance), (counts.get(projectOf(instance)) ?? 0) + 1);
+  return instances.map((instance) => {
+    const marker = instance.id === activeId ? "✓" : " ";
+    const model = (instance.model || "no-model").slice(0, 36);
+    const session = (counts.get(projectOf(instance)) ?? 0) > 1 && instance.sessionId
+      ? ` · ${instance.sessionId.slice(0, 8)}`
+      : "";
+    return `${marker} ${projectOf(instance)} · ${model}${session}`;
+  });
 }
 
 // ── Menu option labels ─────────────────────────────────────────────────────
@@ -531,7 +539,7 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
     return true; // back to main
   }
 
-  const choices = instances.map((instance) => formatInstanceChoice(instance, active.instanceId));
+  const choices = formatInstanceChoices(instances, active.instanceId);
   const selected = await pickMenu(ui, `Switch Telegram ${hostCommandName()} instance`, [...choices, BACK_LABEL]);
   if (selected === BACK_LABEL) return true; // back to main
 

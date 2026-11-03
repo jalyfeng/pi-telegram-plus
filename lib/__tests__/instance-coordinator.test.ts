@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TelegramInstanceCoordinator, failoverHasOtherLiveInstances, isLockContentionError, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata, type TelegramInstanceSnapshot } from "../instance-coordinator.ts";
+import { TelegramInstanceCoordinator, isGenuineFailover, isLockContentionError, telegramTokenHash, type TelegramActiveInstance } from "../instance-coordinator.ts";
 
 const TOKEN = "123456:very-secret-token";
 const STARTED_AT = "2026-01-01T00:00:00.000Z";
@@ -101,7 +101,14 @@ describe("TelegramInstanceCoordinator", () => {
         expect(first.isActive()).toBe(false);
         const snapshot = await second.reconcile(heartbeat("/workspace/b"));
 
-        expect(snapshot.active).toMatchObject({ instanceId: "instance-b", generation: 2, reason: "failover" });
+        expect(snapshot.active).toMatchObject({
+            instanceId: "instance-b",
+            generation: 2,
+            reason: "failover",
+            previousInstanceId: "instance-a",
+            previousLabel: "a",
+            label: "b",
+        });
         expect(snapshot.instances.map((instance) => instance.id)).toEqual(["instance-b"]);
     });
 
@@ -304,30 +311,26 @@ describe("TelegramInstanceCoordinator", () => {
         });
     });
 
-    describe("failoverHasOtherLiveInstances", () => {
-        const activeOf = (instanceId: string, generation: number): TelegramActiveInstance => ({
-            instanceId, generation, updatedAt: STARTED_AT, reason: "failover",
-        });
-        const inst = (id: string): TelegramInstanceMetadata => ({
-            id, pid: 1, startedAt: STARTED_AT, heartbeatAt: STARTED_AT, cwd: `/w/${id}`,
+    describe("isGenuineFailover", () => {
+        const activeOf = (overrides: Partial<TelegramActiveInstance>): TelegramActiveInstance => ({
+            instanceId: "instance-b", generation: 2, updatedAt: STARTED_AT, reason: "failover", ...overrides,
         });
 
-        it("returns false when only the active self is live (single-instance restart)", () => {
-            const snapshot: TelegramInstanceSnapshot = {
-                active: activeOf("instance-b", 2),
-                instances: [inst("instance-b")],
-                changed: true,
-            };
-            expect(failoverHasOtherLiveInstances(snapshot, "instance-b")).toBe(false);
+        it("is true when the previous active instance was another instance that is gone", () => {
+            expect(isGenuineFailover(activeOf({ previousInstanceId: "instance-a" }), "instance-b")).toBe(true);
         });
 
-        it("returns true when another live instance is registered (genuine handoff)", () => {
-            const snapshot: TelegramInstanceSnapshot = {
-                active: activeOf("instance-b", 2),
-                instances: [inst("instance-b"), inst("instance-c")],
-                changed: true,
-            };
-            expect(failoverHasOtherLiveInstances(snapshot, "instance-b")).toBe(true);
+        it("is false when the previous active instance was self (single-instance restart)", () => {
+            expect(isGenuineFailover(activeOf({ previousInstanceId: "instance-b" }), "instance-b")).toBe(false);
+        });
+
+        it("is false when there was no previous active instance", () => {
+            expect(isGenuineFailover(activeOf({ reason: "initial" }), "instance-b")).toBe(false);
+            expect(isGenuineFailover(activeOf({}), "instance-b")).toBe(false);
+        });
+
+        it("is false for an explicit switch, even when a previous instance is recorded", () => {
+            expect(isGenuineFailover(activeOf({ reason: "explicit", previousInstanceId: "instance-a" }), "instance-b")).toBe(false);
         });
     });
 
