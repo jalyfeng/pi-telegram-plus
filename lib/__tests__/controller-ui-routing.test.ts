@@ -973,4 +973,59 @@ class Pi085RunnerDouble {
     await toolSession.getToolContext().ui.confirm("Local prelude", "local?");
     expect(tuiConfirm).toHaveBeenCalledWith("Local prelude", "local?");
   });
+
+  it("reads ui.theme and spreads ui without recursing while another Telegram turn is running (host mode)", async () => {
+    const sent: Array<{ chatId: number; text: string }> = [];
+    const transport = createTransport(sent);
+    const theme = { fg: (_color: string, text: string) => text };
+    const tuiUi = { notify: async () => undefined, theme };
+    let currentUi: unknown = tuiUi;
+    let activeMode = "tui";
+    const session = {
+      extensionRunner: {
+        getUIContext: () => currentUi,
+        setUIContext: (ui: unknown, mode?: string) => { currentUi = ui; if (mode) activeMode = mode; },
+        getCommand: () => undefined,
+        createCommandContext: () => makeCommandContext(() => currentUi, () => activeMode),
+      },
+    } as unknown as CapturedAgentSession;
+    const uiRuntime = createTelegramUiRuntime({ getSession: () => session, transport });
+    const hold = defer();
+    const commands = new Map<string, (args: string, ctx: any) => Promise<void>>([
+      ["status", async (_args, ctx) => {
+        await ctx.ui.notify("turn running");
+        await hold.promise;
+      }],
+      // Shape of /tg's menu entry: it spreads the UI it is handed (closeOnCancel)
+      // and reads the theme while the other chat's turn owns the swap.
+      ["tg", async (_args, ctx) => {
+        const copy = { ...ctx.ui };
+        await ctx.ui.notify(`theme:${typeof ctx.ui.theme?.fg} spread:${typeof copy.notify}`);
+      }],
+    ]);
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport,
+      ui: uiRuntime,
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: commands,
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+      tuiBridge: availableBridge(),
+    });
+
+    await controller.handleMessage({ message_id: 1, chat: { id: 111 }, from: { id: 1 }, text: "/status" });
+    await vi.waitFor(() => expect(sent.some((item) => item.text.includes("turn running"))).toBe(true));
+    await controller.handleMessage({ message_id: 2, chat: { id: 222 }, from: { id: 1 }, text: "/tg" });
+    await vi.waitFor(() => expect(sent.some((item) => item.chatId === 222)).toBe(true));
+    hold.resolve();
+
+    const probe = sent.find((item) => item.chatId === 222)!;
+    expect(probe.text).not.toContain("Maximum call stack");
+    expect(probe.text).toContain("theme:function");
+    expect(probe.text).toContain("spread:function");
+  });
 });

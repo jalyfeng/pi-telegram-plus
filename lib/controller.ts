@@ -375,7 +375,7 @@ function createRoutedTelegramUi(baseUi: unknown, telegramUi: ExtensionUIContext,
       // land on the real object even while a Telegram swap is installed.
       if (prop === "__piTelegramPlusRoutedBaseUi") return baseUi;
       const target = getTarget();
-      const value = Reflect.get(target ?? {}, prop, receiver);
+      const value = Reflect.get(target ?? {}, prop);
       return typeof value === "function" ? value.bind(target) : value;
     },
     set(_target, prop, value, receiver) {
@@ -421,7 +421,7 @@ function createDispatchTelegramUi(state: TelegramUiStackState): ExtensionUIConte
       if (prop === "__piTelegramPlusRoutedUi") return true;
       if (prop === "__piTelegramPlusRoutedBaseUi") return state.baseUi;
       const target = getTarget();
-      const value = Reflect.get(target, prop, receiver);
+      const value = Reflect.get(target, prop);
       return typeof value === "function" ? value.bind(target) : value;
     },
     set(_target, prop, value, receiver) {
@@ -595,7 +595,7 @@ function createHostPromptUi(baseUi: unknown, telegramUi: ExtensionUIContext): Ex
       if (prop === "__piTelegramPlusRoutedUi") return true;
       if (prop === "__piTelegramPlusRoutedBaseUi") return baseUi;
       const target = baseUi ?? {};
-      const value = Reflect.get(target as object, prop, receiver);
+      const value = Reflect.get(target as object, prop);
       if (typeof value !== "function") {
         // A plugin-only affordance - the nested `menu` keyboard the management screens
         // walk - has no host twin, so the plugin's own implementation keeps serving it

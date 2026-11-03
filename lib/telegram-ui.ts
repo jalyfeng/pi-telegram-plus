@@ -2,6 +2,7 @@ import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { routeCommandNotice } from "./tui/command-context.ts";
 import { encodeUiCallback } from "./callback-protocol.ts";
 import { escapeHtml } from "./html.ts";
+import { hostUiBehindRouted } from "./pi-compat.ts";
 import type { SecretStore } from "./tui/secrets.ts";
 import type { CapturedAgentSession, PendingInputResolver, TelegramTransport } from "./types.ts";
 
@@ -125,7 +126,9 @@ export function createTelegramUiRuntime(deps: {
       // swaps the UI context, so this is the genuine TUI context). We forward persistent
       // /stateful methods to base so the TUI stays accurate even when the trigger came
       // from Telegram. Interactive modals stay Telegram-only; editor ops are no-ops.
-      const base = deps.getSession()?.extensionRunner.getUIContext?.() as ExtensionUIContext | undefined;
+      // While another Telegram turn holds the swap, getUIContext() returns that turn's
+      // dispatch wrapper, not the TUI: unwrap it so reads of `base` never route back here.
+      const base = hostUiBehindRouted(deps.getSession()?.extensionRunner.getUIContext?.()) as ExtensionUIContext | undefined;
       const target = targetKey(chatId, messageThreadId);
       // Caller-provided text is redacted BEFORE HTML escaping: a secret this
       // chat typed must never leak through plugin notices or prompts (§4.7.4).
