@@ -105,3 +105,12 @@ describe("infoPanelAdapter read", () => {
     expect(keys).toEqual(["esc"]);
   });
 });
+
+describe("infoPanelAdapter title", () => {
+  it("takes the host's own title for a text panel the entry leaves untitled", () => {
+    const component = { title: "Recent Changes", children: [{ text: "1.2.0 fixed the thing" }], handleInput: () => {}, render: () => ["screen"] };
+    const { ctx } = ctxFor({ kind: "panel", source: "pi" });
+
+    expect(infoPanelAdapter.read(component, ctx)).toMatchObject({ kind: "info", title: "Recent Changes" });
+  });
+});

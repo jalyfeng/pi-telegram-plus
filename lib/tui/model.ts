@@ -163,6 +163,8 @@ export type AdapterContext = {
   /** Root component; only used to find titles/entry info, never for identity. */
   root?: object;
   entry?: EntryInfo;
+  /** The Telegram command whose run opened this dialog (`/changelog`); names a panel the host gave no title. */
+  commandName?: string;
   /**
    * Secret redaction for the dialog's chat (§4.7.4): adapters that build text from raw
    * host data apply it to each text run before converting or escaping it. Absent when

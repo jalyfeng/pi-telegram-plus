@@ -455,13 +455,37 @@ function renderProgress(model: Extract<DialogModel, { kind: "progress" }>, ctx: 
 /** Bytes of HTML one info message carries; the rest of the message is buttons and header. */
 const INFO_PAGE_BYTES = 3400;
 
+/** The title of a read-only panel that the host did not name, on every message it is drawn on. */
+export const PANEL_TITLE = "Panel";
+
+/** A panel's text cut into pages (HTML split at block boundaries so no tag is cut). */
+function infoPages(model: Extract<DialogModel, { kind: "info" }>): string[] {
+  return model.html === true ? splitTelegramHtml(model.text, INFO_PAGE_BYTES) : [`<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>`];
+}
+
 /**
- * A read-only panel: the text (one page of it for HTML, split at block
- * boundaries so no tag is cut), the panel's own action buttons, paging, and
+ * What a read-only panel leaves on its message when it closes: its title and the page the user last
+ * saw (`page`, clamped), then one status line. No buttons. `redact` is applied to the text before it
+ * is cut, as `renderDialog` does for a live draw.
+ */
+export function closedPanelHtml(
+  model: Extract<DialogModel, { kind: "info" }>,
+  page: number,
+  status: string,
+  redact?: (text: string) => string,
+): string {
+  const shown = redact ? redactModel(model, redact) : model;
+  const pages = infoPages(shown);
+  const body = pages[Math.min(Math.max(0, page), pages.length - 1)] ?? "";
+  return `${header(shown.title ?? PANEL_TITLE, undefined, [`${body}\n`])}\n\n${escapeHtml(status)}`;
+}
+
+/**
+ * A read-only panel: the text (one page of it for HTML), the panel's own action buttons, paging, and
  * the renderer's Close when the panel has none of its own.
  */
 function renderInfo(model: Extract<DialogModel, { kind: "info" }>, ctx: RenderContext): RenderedDialog {
-  const pages = model.html === true ? splitTelegramHtml(model.text, INFO_PAGE_BYTES) : [`<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>`];
+  const pages = infoPages(model);
   const count = Math.max(1, pages.length);
   const page = Math.min(Math.max(0, ctx.page ?? 0), count - 1);
   const body = `${pages[page] ?? ""}\n`;
@@ -474,7 +498,7 @@ function renderInfo(model: Extract<DialogModel, { kind: "info" }>, ctx: RenderCo
   if (nav.length > 0) rows.push(nav);
   if (model.closable) rows.push(cancelRow(ctx, "Close"));
   return {
-    text: header(model.title ?? "Terminal", count > 1 ? `Page ${page + 1}/${count}` : undefined, [body]),
+    text: header(model.title ?? PANEL_TITLE, count > 1 ? `Page ${page + 1}/${count}` : undefined, [body]),
     rows: fitRows(rows),
     keyMap,
     page,

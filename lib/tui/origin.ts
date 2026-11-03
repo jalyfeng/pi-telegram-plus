@@ -46,7 +46,7 @@ export type CommandScope = {
   telegramMessageId?: number;
   /** True while a dialog owns the command message; OutputCapture leaves that message alone. */
   dialogOpen?: boolean;
-  /** One line per dialog that closed on the command message; written with the output when the scope ends. */
+  /** One entry per dialog that closed on the command message, as Telegram HTML; written with the output when the scope ends. */
   dialogSummaries: string[];
   ended: boolean;
   endReason?: ScopeEndReason;

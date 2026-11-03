@@ -20,6 +20,26 @@ import { constructorName } from "./utils.ts";
 
 type Describable = object & { handleNativeEvent(event: unknown): unknown };
 
+/**
+ * The title the host gave its own panel: the `nativeOverlay.head` a report carries (OMP's
+ * `ReportPanel`), else the panel's own `title`. Undefined when it gave none.
+ */
+function hostTitle(component: object): string | undefined {
+  const record = component as Record<string, unknown>;
+  const overlay = record.nativeOverlay;
+  const head = overlay && typeof overlay === "object" ? tspText((overlay as Record<string, unknown>).head).trim() : "";
+  if (head !== "") return head;
+  return typeof record.title === "string" && record.title.trim() !== "" ? record.title.trim() : undefined;
+}
+
+/**
+ * A read-only panel's title, in order: the entry's, the host's own, the first heading its tree
+ * shows, then the command that opened it. Undefined only when none of them exists.
+ */
+function panelTitle(component: object, ctx: AdapterContext, treeTitle?: string): string | undefined {
+  return ctx.entry?.title ?? hostTitle(component) ?? treeTitle ?? ctx.commandName;
+}
+
 /** The panel as it is described right now (live tree, not a snapshot), redacted per run. */
 function liveText(component: object, redact: (text: string) => string): DescribedText | undefined {
   const root = describeTree(component);
@@ -82,14 +102,14 @@ export const infoPanelAdapter: DialogAdapter = {
     }
     if (root) {
       const described = describedText(root, redact, component);
-      if (described.html) return { kind: "info", title: ctx.entry?.title, text: described.html, html: true, closable: true };
+      if (described.html) return { kind: "info", title: panelTitle(component, ctx, described.title), text: described.html, html: true, closable: true };
     }
     const message = loaderMessage(component);
     if (message !== undefined && message.trim() !== "") {
-      return { kind: "info", title: ctx.entry?.title, text: redact(message).trim(), closable: true };
+      return { kind: "info", title: panelTitle(component, ctx), text: redact(message).trim(), closable: true };
     }
     const html = contentHtml(component as Record<string, unknown>, redact);
-    if (html) return { kind: "info", title: ctx.entry?.title, text: html, html: true, closable: true };
+    if (html) return { kind: "info", title: panelTitle(component, ctx), text: html, html: true, closable: true };
     // Nothing readable: name the panel, never mirror a frame (plan v8 §0.0).
     const what = ctx.entry?.method ?? (constructorName(component) || "unknown");
     return { kind: "unsupported", title: ctx.entry?.title, what };
@@ -136,7 +156,7 @@ export const describedPanelAdapter: DialogAdapter = {
     const hasClose = actions.some((action) => action.act === "close");
     return {
       kind: "info",
-      title: ctx.entry?.title ?? described?.title,
+      title: panelTitle(component, ctx, described?.title),
       text: described?.html ?? "",
       html: true,
       closable: !hasClose,

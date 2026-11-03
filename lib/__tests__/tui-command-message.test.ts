@@ -213,6 +213,29 @@ describe("one command, one message", () => {
     t.gateway.dispose();
   });
 
+  it("ends a read-only panel on the command's message with its page and a Closed line", async () => {
+    vi.useFakeTimers();
+    const t = setup({ kind: "panel", source: "pi" });
+    await t.run("changelog");
+    // The panel's Escape closes it, as the host's own close does.
+    const panel = { title: "Recent Changes", children: [{ text: "1.2.0 fixed the thing" }], handleInput: () => t.focus.closeToEditor() };
+    t.focus.openDialog(panel);
+    await settle();
+    const session = t.broker.current();
+    t.broker.handleCallback(7, undefined, { sessionId: session?.id ?? "", generation: 0, op: "x" });
+    await settle();
+    await vi.advanceTimersByTimeAsync(IDLE_MS + 1500);
+
+    const final = t.telegram.edits.at(-1);
+    expect(final?.messageId).toBe(1);
+    expect(final?.text).toContain("▶️ /changelog");
+    expect(final?.text).toContain("Recent Changes");
+    expect(final?.text).toContain("1.2.0 fixed the thing");
+    expect(final?.text).toContain("✖ Closed");
+    expect(final?.text).not.toContain("✓ Done");
+    t.gateway.dispose();
+  });
+
   it("reuses the same message for two dialogs in one scope", async () => {
     vi.useFakeTimers();
     const t = setup(ENTRY);

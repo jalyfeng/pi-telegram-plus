@@ -1182,3 +1182,94 @@ describe("who closed a dialog and what they tapped", () => {
     expect(lastText(transport)).not.toContain("Cancel");
   });
 });
+
+describe("a read-only panel that closes keeps the page it showed", () => {
+  const panelModel: DialogModel = {
+    kind: "info",
+    title: "Recent Changes",
+    text: "<b>1.2.0</b> fixed the thing",
+    html: true,
+    closable: false,
+    actions: [{ label: "Close", key: "close" }],
+  };
+
+  /** A panel drawn on the chat, with its own Close button mapped to the key the renderer would use. */
+  async function openedPanel(model: DialogModel) {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: (_component, action) => {
+        if (action.type === "choose" || action.type === "cancel") focus.closeToEditor();
+        return true;
+      },
+    };
+    session.model = model;
+    session.keyMap.set(session.generation, new Map([["close", "close"]]));
+    return { broker, transport, focus, session };
+  }
+
+  const lastEdit = (transport: { edits: Array<{ text: string; rows: unknown[][] }> }) => transport.edits.at(-1);
+
+  it("keeps the page and ends with a Closed line when Telegram closes it", async () => {
+    const { broker, transport, session } = await openedPanel(panelModel);
+
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "c", arg: "close" });
+    await settle();
+
+    const edit = lastEdit(transport);
+    expect(edit?.text).toContain("Recent Changes");
+    expect(edit?.text).toContain("<b>1.2.0</b> fixed the thing");
+    expect(edit?.text).toContain("✖ Closed");
+    expect(edit?.text).not.toContain("✅");
+    expect(edit?.text).not.toContain("Answered in the terminal");
+    expect(edit?.rows).toEqual([]);
+  });
+
+  it("keeps the page and says it was closed in the terminal when the terminal closes it", async () => {
+    const { transport, focus } = await openedPanel(panelModel);
+
+    focus.closeToEditor();
+    await settle();
+
+    const edit = lastEdit(transport);
+    expect(edit?.text).toContain("<b>1.2.0</b> fixed the thing");
+    expect(edit?.text).toContain("Closed in the terminal");
+    expect(edit?.text).not.toContain("Answered in the terminal");
+    expect(edit?.rows).toEqual([]);
+  });
+
+  it("keeps the page that was on screen, not the first one", async () => {
+    const paged: DialogModel = {
+      kind: "info",
+      title: "Long",
+      text: Array.from({ length: 400 }, (_, index) => `line ${index} ${"x".repeat(20)}`).join("\n\n"),
+      html: true,
+      closable: true,
+    };
+    const { broker, transport, session } = await openedPanel(paged);
+    session.page = 1;
+    session.model = paged;
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "x" });
+    await settle();
+
+    const edit = lastEdit(transport);
+    expect(edit?.text).toContain("✖ Closed");
+    expect(edit?.text).not.toContain("line 0 ");
+  });
+
+  it("still ends a choice with its answer rather than the panel status", async () => {
+    const choice: DialogModel = { kind: "select", title: "Pick", items: [{ key: "a", label: "alpha" }], total: 1 };
+    const { broker, transport, session } = await openedPanel(choice);
+    session.keyMap.set(session.generation, new Map([["a", "a"]]));
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "c", arg: "a" });
+    await settle();
+
+    expect(lastEdit(transport)?.text).toContain("✅ alpha");
+    expect(lastEdit(transport)?.text).not.toContain("Closed");
+  });
+});

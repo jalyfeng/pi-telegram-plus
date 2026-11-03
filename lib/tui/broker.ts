@@ -42,7 +42,8 @@ import type {
 } from "./model.ts";
 import type { CommandScope, OriginTracker } from "./origin.ts";
 import type { SecretStore } from "./secrets.ts";
-import { renderDialog, type RenderedDialog } from "./render-telegram.ts";
+import { closedPanelHtml, renderDialog, type RenderedDialog } from "./render-telegram.ts";
+import { escapeHtml } from "../html.ts";
 import { queuePendingNotice } from "../pending-notices.ts";
 
 const brokerLog = log.child("tui-broker");
@@ -494,8 +495,21 @@ export class DialogBroker {
     }
 
     session.closedBy = byTelegram ? "telegram" : "terminal";
-    this.publish(session, byTelegram ? this.telegramSummary(session) : "Answered in the terminal");
+    this.publish(session, this.closeSummary(session, byTelegram));
     return session.closedBy;
+  }
+
+  /**
+   * What a closed dialog leaves on its message, as Telegram HTML (rules 4.2/4.3). A read-only panel
+   * keeps the page the user last saw and says how it ended; a dialog with answers gets its one line.
+   */
+  private closeSummary(session: DialogSession, byTelegram: boolean): string {
+    const redact = (text: string) => this.redact(session, text);
+    if (session.model.kind === "info") {
+      return closedPanelHtml(session.model, session.page, byTelegram ? "✖ Closed" : "Closed in the terminal", redact);
+    }
+    if (!byTelegram) return "Answered in the terminal";
+    return escapeHtml(redact(this.telegramSummary(session)));
   }
 
   /** The one-line result of a dialog that Telegram answered (rule 4.2). */
@@ -524,7 +538,7 @@ export class DialogBroker {
     if (answered && !this.detached.has(session)) {
       // Through publish, so a command's own message gets the summary and an ordinary dialog
       // message is handed over (see `handingOver`).
-      this.publish(session, this.telegramSummary(session));
+      this.publish(session, this.closeSummary(session, true));
       return;
     }
     // Nothing answered it, or it is a paged output: the message keeps the dialog's text without
@@ -1080,6 +1094,7 @@ export class DialogBroker {
       host: state.host === "omp" ? "omp" : "pi",
       root: info.root,
       entry,
+      commandName: info.commandScope?.commandText.trim().split(/\s+/)[0] || undefined,
       redact: (text: string) => this.redactForTarget(text),
       sendKey: (name: string) => sendKeyTo(component, name),
       sendText: (text: string) => sendNativeText(text),
@@ -1219,7 +1234,7 @@ export class DialogBroker {
     });
   }
 
-  /** The one-line replacement for a finished dialog (rules 4.2/4.3). */
+  /** The replacement for a finished dialog (rules 4.2/4.3); `summary` is Telegram HTML, already redacted. */
   private publish(session: DialogSession, summary: string): void {
     const telegram = session.telegram;
     if (!telegram) return;
@@ -1235,7 +1250,7 @@ export class DialogBroker {
       // OutputCapture writes (header, summaries, output). While the scope runs the
       // summary is only recorded; once it has ended, the message is redrawn now.
       scope.dialogOpen = false;
-      scope.dialogSummaries.push(this.redact(session, summary));
+      scope.dialogSummaries.push(summary);
       if (scope.ended) this.deps.settleScope?.(scope);
       this.rate(telegram, () => {
         void this.deps.transport.removeInlineKeyboard(telegram.chatId, telegram.messageId).catch(() => undefined);

@@ -658,7 +658,8 @@ export class OutputCapture {
   }
 
   private async render(binding: Binding, final: boolean): Promise<void> {
-    const summaries = binding.scope.dialogSummaries.map((line) => escapeHtml(line));
+    // Dialog summaries are Telegram HTML already (broker closeSummary): written as they are.
+    const summaries = binding.scope.dialogSummaries;
     const body = [...summaries, binding.outputHtml].filter((part) => part.length > 0).join("\n\n");
     const header = binding.telegram.ackHtml;
     const whole = body ? `${header}\n\n${body}` : header;

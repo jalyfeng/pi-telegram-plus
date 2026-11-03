@@ -350,3 +350,31 @@ describe("long described panels", () => {
     expect(transport.sendButtons).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("describedPanelAdapter title", () => {
+  it("takes the host's own title for a panel whose tree names none", () => {
+    const { component } = panel(reportTree());
+    Object.assign(component, { nativeOverlay: { head: "Recent Changes" } });
+    expect(describedPanelAdapter.read(component, ctxFor().ctx)).toMatchObject({ title: "Recent Changes" });
+  });
+
+  it("takes the panel's own title when it has no overlay head", () => {
+    const { component } = panel(reportTree());
+    Object.assign(component, { title: "Available Tools" });
+    expect(describedPanelAdapter.read(component, ctxFor().ctx)).toMatchObject({ title: "Available Tools" });
+  });
+
+  it("names the panel after its command when the host gave no title", () => {
+    const { component } = panel(reportTree());
+    const { ctx } = ctxFor();
+    ctx.commandName = "/changelog";
+    expect(describedPanelAdapter.read(component, ctx)).toMatchObject({ title: "/changelog" });
+  });
+
+  it("keeps the entry's title over the host's own", () => {
+    const { component } = panel(reportTree());
+    Object.assign(component, { nativeOverlay: { head: "Recent Changes" } });
+    const { ctx } = ctxFor("omp", { kind: "panel", source: "omp", title: "Usage" });
+    expect(describedPanelAdapter.read(component, ctx)).toMatchObject({ title: "Usage" });
+  });
+});
