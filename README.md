@@ -125,6 +125,12 @@ A new command from the same chat while one of its dialogs is open closes that di
 - Reports saved paths back to the user
 - Handles name sanitization and deduplication
 
+### 🚧 Not yet supported
+- **OMP `/tree`** — adding a label to an entry is not available from Telegram yet. Use the terminal.
+- **OMP `/setup`** — the setup wizard is not available from Telegram yet. Run it in the terminal.
+- **OMP `/branch`** — stepping back through earlier points is not available from Telegram yet; only the current point can be chosen. Use the terminal to pick an earlier point.
+- **OMP `/extensions`** — an entry that is disabled by a master switch still shows a button on Telegram, but the host ignores the tap. Turn it on from the terminal.
+
 ---
 
 ## Usage Guide
@@ -255,6 +261,7 @@ Common issues and diagnostic steps. The extension writes a structured JSON Lines
 - A dialog the plugin cannot model arrives as a plain "please answer it in the terminal" notice with a Cancel button. That is expected; answer it in the terminal.
 - Inline keyboards are removed once the dialog is answered on either side or cancelled with `/stop`. Re-run the command to get a fresh keyboard.
 - Check the log at `PI_TELEGRAM_PLUS_LOG_LEVEL=debug`: `tui-broker` lines show which adapter claimed the dialog and who owned it.
+- See **Not yet supported** for dialogs Telegram cannot drive yet.
 
 ### The bot says the host version is not supported
 - The plugin only runs on pi `1.4.0` and OMP `18.14.x` and stops on anything else (see **Compatibility**). Install a supported host version.
