@@ -13,7 +13,7 @@
  */
 import type { AdapterContext, DialogAdapter, DialogModel } from "../model.ts";
 import { isReadOnlyPanel } from "../find-shape.ts";
-import { actionKeys, describedText, type DescribedAction, type DescribedText } from "../describe-text.ts";
+import { actionKeys, describedText, withoutLeadingTitle, type DescribedAction, type DescribedText } from "../describe-text.ts";
 import { contentHtml } from "../output.ts";
 import { describableChild, describesDialog, describesLoginSheet, describeTree, tspText, type NativeNodeLike } from "./tsp.ts";
 import { constructorName } from "./utils.ts";
@@ -240,10 +240,12 @@ export const describedPanelAdapter: DialogAdapter = {
     const keys = actionKeys(actions);
     // A close button of the panel is the way out; no second Close is added.
     const hasClose = actions.some((action) => action.act === "close");
+    const title = panelTitle(component, ctx, described?.title);
     return {
       kind: "info",
-      title: panelTitle(component, ctx, described?.title),
-      text: described?.html ?? "",
+      title,
+      // The title is the message header already; the body does not repeat it on its first lines.
+      text: withoutLeadingTitle(described?.html ?? "", title),
       html: true,
       closable: !hasClose,
       actions: actions.map((action, index) => ({ label: action.label, key: keys[index] })),

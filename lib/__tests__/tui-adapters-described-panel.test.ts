@@ -569,3 +569,78 @@ describe("an overlay whose list lives in a nested component (OMP /debug)", () =>
     expect(describedPanelAdapter.detect(root, ctxFor().ctx)).toBe(false);
   });
 });
+
+describe("a /context drill-down, pressed through the viewer's own entry actions", () => {
+  it("reads the entries as text and an entry press sends its open action on the entry's keypath", () => {
+    const entry = (id: string, name: string): N => ({
+      k: "col",
+      p: { gap: "none", actions: { click: "select-entry", dblclick: "open-entry" } },
+      key: id,
+      c: [
+        { k: "text", key: "head", p: { spans: [{ t: "[", s: "dim" }, { t: name, s: "warning strong" }, { t: "] 631 tokens", s: "dim" }] } },
+        { k: "text", key: "preview", p: { spans: [{ t: `builtin · <builtin:${name}>`, s: "dim" }] } },
+      ],
+    });
+    const events: unknown[] = [];
+    const component = {
+      describe: () => ({
+        k: "col",
+        p: { role: "omp.context" },
+        c: [
+          {
+            k: "list",
+            key: "entries",
+            c: [{ k: "row", key: "content", c: [{ k: "col", key: "list", c: [entry("built-in-tools/0", "read")] }] }],
+          },
+          { k: "row", p: { role: "omp.actions" }, c: [button("Back", "back")] },
+        ],
+      }),
+      handleNativeEvent: vi.fn((event: unknown) => {
+        events.push(event);
+      }),
+      render: vi.fn(() => ["screen"]),
+    };
+    const { ctx } = ctxFor("omp", { kind: "panel", source: "omp", title: "Context · Built-in Tools" });
+
+    const model = describedPanelAdapter.read(component, ctx) as { text: string; actions: { label: string; key: string }[] };
+    expect(model.text).toContain("[read] 631 tokens");
+    expect(model.text).toContain("builtin · &lt;builtin:read&gt;");
+    expect(model.actions.map((action) => action.label)).toEqual(["[read] 631 tokens", "Back"]);
+
+    expect(describedPanelAdapter.act(component, { type: "choose", key: model.actions[0]!.key }, ctx)).toBe(true);
+    expect(events).toEqual([{ type: "action", key: "entries/content/list/built-in-tools/0", act: "open-entry", mods: [] }]);
+    expect(component.render).not.toHaveBeenCalled();
+  });
+});
+
+describe("a panel title the body repeats", () => {
+  it("shows the overlay's title once when the nested component opens with the same heading", () => {
+    const events: unknown[] = [];
+    const inner = {
+      describe: () => ({
+        k: "section",
+        p: { head: "Debug Tools" },
+        c: [{ k: "col", p: { role: "omp.select" }, c: [{ k: "list", key: "list", p: { selected: "one" }, c: [{ k: "item", key: "one", p: { label: "Heap snapshot" } }] }] }],
+      }),
+      handleNativeEvent: vi.fn((event: unknown) => {
+        events.push(event);
+      }),
+    };
+    class Spacer {
+      render(): string[] {
+        return [];
+      }
+    }
+    const root = {
+      title: "Debug Tools",
+      describe: () => ({ k: "card", p: { role: "omp.overlay", head: "Debug Tools" }, c: [new Spacer(), inner] }),
+      render: vi.fn(() => ["screen"]),
+    };
+    const { ctx } = ctxFor();
+    const model = describedPanelAdapter.read(root, ctx) as { title: string; text: string; actions: { label: string }[] };
+
+    expect(model.title).toBe("Debug Tools");
+    expect(model.text).not.toContain("Debug Tools");
+    expect(model.text).toContain("Heap snapshot");
+  });
+});

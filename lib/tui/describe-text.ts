@@ -27,6 +27,8 @@ export type DescribedAction = {
   value?: string;
   /** The key of the list item this button selects and activates. */
   item?: string;
+  /** A node of a list pressed as a whole (its own `actions`, e.g. an entry's open): its `act` goes to its keypath. */
+  node?: boolean;
   /** The component whose `handleNativeEvent` takes the event (a child component, or the root). */
   owner: object;
 };
@@ -42,10 +44,12 @@ export type DescribedAction = {
 export function actionKeys(actions: readonly DescribedAction[]): string[] {
   const counts = new Map<string, number>();
   for (const action of actions) {
-    if (action.item === undefined) counts.set(action.act, (counts.get(action.act) ?? 0) + 1);
+    if (action.item === undefined && !action.node) counts.set(action.act, (counts.get(action.act) ?? 0) + 1);
   }
   const bases = actions.map((action) => {
     if (action.item !== undefined) return `${action.keypath}|${action.item}`;
+    // A node's keypath names it alone; its act is not needed in the key (keeps the callback under 64 bytes).
+    if (action.node) return action.keypath;
     return (counts.get(action.act) ?? 0) > 1 ? `${action.keypath}|${action.act}` : action.act;
   });
   const seen = new Map<string, number>();
@@ -134,40 +138,92 @@ function renderMeter(props: Props, walk: Walk): string {
   return lines.join("\n");
 }
 
+/** One item's lines: `label — value`, its detail indented under it. A pressable item is also a button. */
+function itemLines(item: NativeNodeLike, keypath: string, owner: object, walk: Walk, pressable: boolean): string[] {
+  const props: Props = isObject(item.p) ? item.p : {};
+  if (props.hidden === true) return [];
+  const label = walk.redact(tspText(props.label));
+  const value = walk.redact(tspText(props.value));
+  const detail = walk.redact(tspText(props.detail));
+  const lines = [value === "" ? escapeHtml(label) : `${escapeHtml(label)} — ${escapeHtml(value)}`];
+  if (detail !== "") lines.push(`  ${escapeHtml(detail)}`);
+  const itemActions: Props = isObject(props.actions) ? props.actions : {};
+  const clickable = pressable || typeof itemActions.click === "string" || typeof itemActions.dblclick === "string";
+  if (clickable && props.disabled !== true && item.key !== undefined) {
+    const buttonLabelText = walk.redact(buttonText(props.label)) || label;
+    walk.actions.push({ label: buttonLabelText, act: "activate", keypath, owner, item: String(item.key) });
+  }
+  return lines;
+}
+
 /**
- * A list's text: one line per item (`label — value`), its detail on the next line, indented. A
- * disabled item is shown but takes no button. The list's `empty` text stands in for no items.
- * When the list is selectable (`click` selects, `dblclick` activates), or its owner takes native events,
- * each enabled item is a button that replays as an `activate` event for that item on the list.
+ * A list's text: its items one line each (`label — value`, the detail indented under it, a disabled
+ * item shown without a button), and its other children written as blocks, one blank line apart. The
+ * list's `empty` text stands in when it writes nothing. A selectable list (`click` selects,
+ * `dblclick` activates), or one whose owner takes native events, makes each enabled item a button
+ * that replays as an `activate` event for that item on the list.
  */
-function renderList(node: NativeNodeLike, keypath: string, owner: object, walk: Walk): string | null {
+function renderList(node: NativeNodeLike, keypath: string, owner: object, walk: Walk, depth: number): string | null {
   const props: Props = isObject(node.p) ? node.p : {};
   const actions: Props = isObject(props.actions) ? props.actions : {};
   const selectable = actions.click === "select" || actions.dblclick === "activate";
   // A component that takes native events can select and activate its own items, selectable or not.
   const ownerAnswers = typeof (owner as { handleNativeEvent?: unknown }).handleNativeEvent === "function";
-  const items = (Array.isArray(node.c) ? (node.c as unknown[]) : []).filter((child): child is NativeNodeLike => isObject(child) && child.k === "item");
-  if (items.length === 0) {
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  const blocks: string[] = [];
+  let run: string[] = [];
+  const flush = (): void => {
+    if (run.length > 0) blocks.push(run.join("\n"));
+    run = [];
+  };
+  children.forEach((child, index) => {
+    if (!isObject(child)) return;
+    if (child.k === "item") {
+      run.push(...itemLines(child as NativeNodeLike, keypath, owner, walk, selectable || ownerAnswers));
+      return;
+    }
+    flush();
+    walk.lists += 1;
+    const text = renderNode(child as NativeNodeLike, childKeypath(keypath, child as NativeNodeLike, index), owner, walk, depth + 1);
+    walk.lists -= 1;
+    if (text !== null && text.trim() !== "") blocks.push(text);
+  });
+  flush();
+  if (blocks.length === 0) {
     const empty = tspText(props.empty);
     return empty === "" ? null : escapeHtml(walk.redact(empty));
   }
-  const lines: string[] = [];
-  for (const item of items) {
-    const itemProps: Props = isObject(item.p) ? item.p : {};
-    if (itemProps.hidden === true) continue;
-    const label = walk.redact(tspText(itemProps.label));
-    const value = walk.redact(tspText(itemProps.value));
-    const detail = walk.redact(tspText(itemProps.detail));
-    lines.push(value === "" ? escapeHtml(label) : `${escapeHtml(label)} — ${escapeHtml(value)}`);
-    if (detail !== "") lines.push(`  ${escapeHtml(detail)}`);
-    const itemActions: Props = isObject(itemProps.actions) ? itemProps.actions : {};
-    const clickable = selectable || typeof itemActions.click === "string" || typeof itemActions.dblclick === "string";
-    if ((clickable || ownerAnswers) && itemProps.disabled !== true && item.key !== undefined) {
-      const buttonLabelText = walk.redact(buttonText(itemProps.label)) || label;
-      walk.actions.push({ label: buttonLabelText, act: "activate", keypath, owner, item: String(item.key) });
-    }
+  return blocks.join("\n\n");
+}
+
+/** The act a node of a list is pressed with: its double-click (opens it), else its click. */
+function nodeAct(node: NativeNodeLike): string | undefined {
+  if (!isObject(node.p) || !isObject(node.p.actions)) return undefined;
+  const actions = node.p.actions;
+  if (typeof actions.dblclick === "string") return actions.dblclick;
+  return typeof actions.click === "string" ? actions.click : undefined;
+}
+
+/** The first line of the text in a node's subtree (the heading of an entry), plain. */
+function firstLine(node: NativeNodeLike, depth = 0): string {
+  if (depth > MAX_DEPTH || !isObject(node.p)) return "";
+  if (node.k === "text") {
+    const line = ownText(node.p).split("\n").map((part) => part.trim()).find((part) => part !== "");
+    if (line !== undefined) return line;
   }
-  return lines.length > 0 ? lines.join("\n") : null;
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  for (const child of children) {
+    if (!isObject(child) || describableChild(child)) continue;
+    const line = firstLine(child as NativeNodeLike, depth + 1);
+    if (line !== "") return line;
+  }
+  return "";
+}
+
+/** Whether a text node is a terminal key hint: keyed `hint`, with an accent-styled span (`⏎ View Content`). */
+function isKeyHint(node: NativeNodeLike): boolean {
+  if (node.k !== "text" || node.key !== "hint" || !isObject(node.p) || !Array.isArray(node.p.spans)) return false;
+  return (node.p.spans as unknown[]).some((span) => isObject(span) && typeof span.s === "string" && span.s.split(" ").includes("accent"));
 }
 
 /**
@@ -200,6 +256,8 @@ type Walk = {
   visited: Set<object>;
   /** Component boundaries currently open around the node being read. */
   components: number;
+  /** Lists currently open around the node being read: their nodes with `actions` are buttons. */
+  lists: number;
 };
 
 /** Text of one node (HTML), or `null` when it contributes nothing. */
@@ -209,12 +267,19 @@ function renderNode(node: NativeNodeLike, keypath: string, owner: object, walk: 
   if (isObject(node.p) && node.p.hidden === true) return null;
 
   if (isObject(node.p) && node.p.role === QR_ROLE) return qrLink(node, walk);
+  if (isKeyHint(node)) return null;
 
   const button = buttonAct(node);
   if (button) {
     const label = walk.redact(buttonLabel(node)) || button.act;
     walk.actions.push({ label, act: button.act, keypath, owner, ...(button.value !== undefined ? { value: button.value } : {}) });
     return null;
+  }
+
+  // Inside a list, a node with its own actions is a button too: its first line names it.
+  const entryAction = walk.lists > 0 ? nodeAct(node) : undefined;
+  if (entryAction !== undefined) {
+    walk.actions.push({ label: walk.redact(firstLine(node)) || entryAction, act: entryAction, keypath, owner, node: true });
   }
 
   const props: Props = isObject(node.p) ? node.p : {};
@@ -244,7 +309,7 @@ function renderNode(node: NativeNodeLike, keypath: string, owner: object, walk: 
     case "progress":
       return escapeHtml(walk.redact(meterText(props)));
     case "list":
-      return renderList(node, keypath, owner, walk);
+      return renderList(node, keypath, owner, walk, depth);
     case "badge": {
       const badge = tspText(props.text);
       return badge === "" ? null : `[${escapeHtml(walk.redact(badge))}]`;
@@ -298,10 +363,29 @@ function children(node: NativeNodeLike, keypath: string, owner: object, walk: Wa
       if (text !== null && text !== "") parts.push(text);
       return;
     }
-    const text = renderNode(child as NativeNodeLike, childKeypath(keypath, child as NativeNodeLike, index), owner, walk, depth + 1);
+    const childNode = child as NativeNodeLike;
+    const text = renderNode(childNode, childKeypath(keypath, childNode, index), owner, walk, depth + 1);
+    if (walk.lists > 0) {
+      // Inside a list a whitespace-only run is dropped, and an entry (a node with its own actions) is set apart by a blank line.
+      if (text === null || text.trim() === "") return;
+      parts.push(nodeAct(childNode) !== undefined ? `\n${text}` : text);
+      return;
+    }
     if (text !== null && text !== "") parts.push(text);
   });
   return parts.join(separator);
+}
+
+/**
+ * `html` without the heading lines at its start that repeat `title` exactly: a panel's title is already
+ * its message header, so the body does not write it again.
+ */
+export function withoutLeadingTitle(html: string, title: string | undefined): string {
+  if (title === undefined || title.trim() === "") return html;
+  const heading = `<b>${escapeHtml(title.trim())}</b>`;
+  let rest = html;
+  while (rest === heading || rest.startsWith(`${heading}\n`)) rest = rest.slice(heading.length).replace(/^\n+/, "");
+  return rest;
 }
 
 /**
@@ -310,7 +394,7 @@ function children(node: NativeNodeLike, keypath: string, owner: object, walk: Wa
  */
 export function describedText(root: NativeNodeLike, redact: (text: string) => string, owner: object): DescribedText {
   // The owner is already being read: a child that is the owner itself is not read again.
-  const walk: Walk = { redact, actions: [], visited: new Set<object>([owner]), components: 0 };
+  const walk: Walk = { redact, actions: [], visited: new Set<object>([owner]), components: 0, lists: 0 };
   const html = renderNode(root, "", owner, walk, 0) ?? "";
   return {
     html: html.replace(/\n{3,}/g, "\n\n").trim(),

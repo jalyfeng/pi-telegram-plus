@@ -390,3 +390,70 @@ describe("describedText badges and native-owned lists", () => {
     expect(actions[0]!.owner).toBe(nativeOwner);
   });
 });
+
+describe("describedText context drill-down (OMP context viewer entries)", () => {
+  // /context > Built-in Tools, from OMP 18.14.1: the list's children are rows and columns, not items.
+  // Each entry is a column with its own actions (click select-entry, dblclick open-entry), keyed by its id.
+  const entry = (id: string, name: string, tokens: string, hint: boolean): N => ({
+    k: "col",
+    p: { gap: "none", actions: { click: "select-entry", dblclick: "open-entry" } },
+    key: id,
+    c: [
+      { k: "text", key: "head", p: { wrap: "word", lines: 1, spans: [{ t: "[", s: "dim" }, { t: name, s: "warning strong" }, { t: `] ${tokens} tokens`, s: "dim" }] } },
+      { k: "text", key: "preview", p: { wrap: "word", spans: [{ t: `builtin · <builtin:${name}>`, s: "dim" }, { t: `\n  ${name}\n  Use it.`, s: "dim" }] } },
+      ...(hint ? [{ k: "text", key: "hint", p: { wrap: "word", lines: 1, spans: [{ t: "  … more · ", s: "dim" }, { t: "⏎ View Content", s: "accent" }] } }] : []),
+    ],
+  });
+  const drill = (): N => ({
+    k: "col",
+    p: { role: "omp.context" },
+    c: [drillList()],
+  });
+  const drillList = (): N => ({
+    k: "list",
+    key: "entries",
+    p: { grow: 1, max: { lines: 46 } },
+    c: [
+      {
+        k: "row",
+        key: "content",
+        p: { gap: "none", align: "start" },
+        c: [
+          { k: "spacer", key: "gutter", p: { grow: 0 } },
+          {
+            k: "col",
+            key: "list",
+            p: { grow: 1, gap: "none" },
+            c: [entry("built-in-tools/0", "read", "631", true), { k: "text", key: "separator-0", p: { wrap: "none", text: " " } }, entry("built-in-tools/1", "bash", "361", false)],
+          },
+        ],
+      },
+    ],
+  });
+
+  it("writes each entry's heading and preview, and no terminal key hint", () => {
+    const { html } = describedText(drill() as never, identity, owner);
+
+    expect(html).toContain("[read] 631 tokens");
+    expect(html).toContain("builtin · &lt;builtin:read&gt;");
+    expect(html).toContain("[bash] 361 tokens");
+    expect(html).not.toContain("View Content");
+  });
+
+  it("separates the entries by a blank line", () => {
+    const { html } = describedText(drill() as never, identity, owner);
+    expect(html.indexOf("[bash] 361 tokens")).toBeGreaterThan(html.indexOf("Use it.") + 1);
+    expect(html).toMatch(/Use it\.\n\n\[bash\]/);
+  });
+
+  it("makes each entry a button that opens it, labelled by its first line, keyed by its keypath", () => {
+    const nativeOwner = { handleNativeEvent: () => undefined };
+    const { actions } = describedText(drill() as never, identity, nativeOwner);
+
+    expect(actions.map((action) => [action.label, action.act, action.keypath, action.item])).toEqual([
+      ["[read] 631 tokens", "open-entry", "entries/content/list/built-in-tools/0", undefined],
+      ["[bash] 361 tokens", "open-entry", "entries/content/list/built-in-tools/1", undefined],
+    ]);
+    expect(actions[0]!.owner).toBe(nativeOwner);
+  });
+});
