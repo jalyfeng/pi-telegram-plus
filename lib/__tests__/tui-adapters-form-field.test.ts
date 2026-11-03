@@ -54,6 +54,49 @@ describe("TextFormField shape", () => {
   });
 });
 
+/**
+ * OMP's rename dialog as the picker holds it: the field sits inside an
+ * OverlayPanel-shaped ancestor whose public `title` getter is "Rename Session".
+ */
+function titledRenameSelector(field: object, outer?: { title: string }) {
+  const overlay = { title: "Rename Session", children: [field] };
+  const panel = outer ? { ...outer, children: [overlay] } : { children: [overlay] };
+  return {
+    children: [{ children: [panel] }],
+    describe: () => ({ k: "card", p: { role: "omp.overlay.sessions" } }),
+    handleNativeEvent: vi.fn(),
+  };
+}
+
+describe("tsp picker rename field title", () => {
+  it("takes the nearest titled ancestor as the input title", () => {
+    const field = makeField("old title");
+    expect(tspPickerAdapter.read(titledRenameSelector(field), ctxFor())).toEqual({
+      kind: "input",
+      title: "Rename Session",
+      placeholder: "old title",
+      secret: false,
+    });
+  });
+
+  it("prefers the ancestor closest to the field over an outer title", () => {
+    const field = makeField("old title");
+    const model = tspPickerAdapter.read(titledRenameSelector(field, { title: "Sessions" }), ctxFor());
+    expect(model).toMatchObject({ kind: "input", title: "Rename Session" });
+  });
+
+  it("ignores a blank title and keeps the generic one when no ancestor has a title", () => {
+    const field = makeField("old title");
+    const blank = { children: [{ title: "   ", children: [field] }] };
+    const selector = {
+      children: [blank],
+      describe: () => ({ k: "card", p: { role: "omp.overlay.sessions" } }),
+      handleNativeEvent: vi.fn(),
+    };
+    expect(tspPickerAdapter.read(selector, ctxFor())).toMatchObject({ kind: "input", title: "Input" });
+  });
+});
+
 describe("tsp picker with a nested rename field", () => {
   it("reads the field as an input model, offering the current value as the placeholder", () => {
     const field = makeField("old title");
