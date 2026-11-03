@@ -378,3 +378,119 @@ describe("describedPanelAdapter title", () => {
     expect(describedPanelAdapter.read(component, ctx)).toMatchObject({ title: "Usage" });
   });
 });
+
+describe("OMP panels with lists, meters and nested components", () => {
+  // Shapes copied from OMP 18.14.1 dumps: `/marketplace` is a SelectList root with an empty-list item;
+  // `/context` is a described root with a meter (parts + marks) and a selectable category list.
+  const marketplaceTree = (): N => ({
+    k: "col",
+    p: { role: "omp.select" },
+    c: [
+      {
+        k: "list",
+        key: "list",
+        p: { selected: "__empty__", empty: "No items", max: { lines: 1 } },
+        c: [
+          {
+            k: "item",
+            key: "__empty__",
+            p: {
+              label: [{ t: "No plugins available" }],
+              detail: [{ t: "Add a marketplace first: /marketplace add <source>", s: "muted" }],
+              disabled: true,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  const contextTree = (): N => ({
+    k: "col",
+    p: { role: "omp.context", grow: 1 },
+    c: [
+      {
+        k: "meter",
+        key: "bar",
+        p: {
+          value: 0.039,
+          style: "bar",
+          parts: [
+            { value: 0.0156, token: "accent", label: "System Prompt (excluding Skills) · 3.1K tokens (1.6%)" },
+            { value: 0.811, token: "track", label: "Free space · 162K tokens (81.1%)" },
+          ],
+          marks: [{ at: 0.85, tone: "warning", title: "Auto-compaction at 85% · 170K tokens" }],
+        },
+      },
+      {
+        k: "col",
+        key: "overview",
+        c: [
+          {
+            k: "list",
+            key: "categories",
+            p: { selected: "system-prompt", actions: { click: "select", dblclick: "activate" } },
+            c: [
+              { k: "item", key: "system-prompt", p: { label: [{ t: "■ ", s: "accent" }, { t: "System Prompt (excluding Skills)", s: "accent strong" }], value: [{ t: "3.1K · 1.6%", s: "accent" }] } },
+              { k: "item", key: "skills", p: { label: [{ t: "■ ", s: "success" }, { t: "Skills" }], value: "0 · 0.0%" } },
+            ],
+          },
+        ],
+      },
+      { k: "row", p: { role: "omp.actions" }, c: [button("Close", "close")] },
+    ],
+  });
+
+  it("reads the empty marketplace list as its text instead of an empty body", () => {
+    const { component } = panel(marketplaceTree());
+    const model = describedPanelAdapter.read(component, ctxFor("omp", { kind: "panel", source: "omp", title: "/marketplace" }).ctx);
+
+    expect(model).toMatchObject({ kind: "info", title: "/marketplace", closable: true, actions: [] });
+    expect((model as { text: string }).text).toContain("No plugins available");
+    expect((model as { text: string }).text).toContain("Add a marketplace first");
+  });
+
+  it("writes every context category and each meter part label into the text", () => {
+    const { component } = panel(contextTree());
+    const model = describedPanelAdapter.read(component, ctxFor().ctx) as { text: string; actions: { label: string }[] };
+
+    expect(model.text).toContain("System Prompt (excluding Skills) · 3.1K tokens (1.6%)");
+    expect(model.text).toContain("Free space · 162K tokens (81.1%)");
+    expect(model.text).toContain("Auto-compaction at 85% · 170K tokens");
+    expect(model.text).toContain("Skills");
+    expect(model.actions.map((action) => action.label)).toEqual(["System Prompt (excluding Skills)", "Skills", "Close"]);
+  });
+
+  it("answers a press on a context category with an activate event for that item", () => {
+    const { component, events } = panel(contextTree());
+    const { ctx } = ctxFor();
+    const model = describedPanelAdapter.read(component, ctx) as { actions: { label: string; key: string }[] };
+    const skills = model.actions.find((action) => action.label === "Skills")!;
+
+    expect(describedPanelAdapter.act(component, { type: "choose", key: skills.key }, ctx)).toBe(true);
+    expect(events).toEqual([{ type: "activate", key: "overview/categories", item: "skills" }]);
+  });
+
+  it("names an overlay the adapters cannot read by its title and its undescribed nested component", () => {
+    class Spacer {
+      render(): string[] {
+        return [];
+      }
+    }
+    // OMP's /debug: an overlay card (no native events of its own) over a spacer and a list.
+    const component = {
+      title: "Debug Tools",
+      describe: () => ({ k: "card", p: { role: "omp.overlay", head: "Debug Tools" }, c: [new Spacer()] }),
+      render: () => ["screen"],
+    };
+    const { ctx } = ctxFor();
+    const adapter = pickAdapter(component, ctx);
+
+    expect(adapter?.id).toBe("unsupported");
+    expect(adapter?.read(component, ctx)).toEqual({
+      kind: "unsupported",
+      title: undefined,
+      what: "Debug Tools (nested component without a description)",
+    });
+  });
+});

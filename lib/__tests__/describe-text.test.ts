@@ -219,3 +219,142 @@ describe("renderDialog questionnaire progress", () => {
     expect(buttonTexts(rendered.rows)).toContain("Question 1/2");
   });
 });
+
+describe("describedText lists, meters and nested components (OMP panels)", () => {
+  // Shapes from OMP 18.14.1: SelectList describes `col(omp.select) > list > item`; /context describes
+  // a `meter` with `parts` and `marks`, and a selectable `list` whose items carry spans.
+  const marketplace = (): N => ({
+    k: "col",
+    p: { role: "omp.select" },
+    c: [
+      {
+        k: "list",
+        key: "list",
+        p: { selected: "__empty__", empty: "No items", max: { lines: 1 } },
+        c: [
+          {
+            k: "item",
+            key: "__empty__",
+            p: {
+              label: [{ t: "No plugins available" }],
+              detail: [{ t: "Add a marketplace first: /marketplace add <source>", s: "muted" }],
+              disabled: true,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  it("writes a disabled item and its detail under it, not an empty body", () => {
+    const result = describedText(marketplace() as never, identity, owner);
+
+    expect(result.html).toContain("No plugins available");
+    expect(result.html).toContain("Add a marketplace first: /marketplace add &lt;source&gt;");
+    expect(result.actions).toEqual([]);
+  });
+
+  it("writes the list's empty text when it holds no items", () => {
+    const tree: N = { k: "list", p: { selected: null, empty: "No items" }, c: [] };
+    expect(describedText(tree as never, identity, owner).html).toBe("No items");
+  });
+
+  it("writes every meter part and mark on its own line instead of a percentage", () => {
+    const tree: N = {
+      k: "meter",
+      p: {
+        value: 0.039,
+        style: "bar",
+        parts: [
+          { value: 0.0156, token: "accent", label: "System Prompt (excluding Skills) · 3.1K tokens (1.6%)" },
+          { value: 0.811, token: "track", label: "Free space · 162K tokens (81.1%)" },
+        ],
+        marks: [{ at: 0.85, tone: "warning", title: "Auto-compaction at 85% · 170K tokens" }],
+      },
+    };
+    expect(describedText(tree as never, identity, owner).html).toBe(
+      "System Prompt (excluding Skills) · 3.1K tokens (1.6%)\nFree space · 162K tokens (81.1%)\nAuto-compaction at 85% · 170K tokens",
+    );
+  });
+
+  it("makes the items of a selectable list buttons that send an activate event for the item", () => {
+    const tree: N = {
+      k: "col",
+      c: [
+        {
+          k: "col",
+          key: "overview",
+          c: [
+            {
+              k: "list",
+              key: "categories",
+              p: { selected: "system-prompt", actions: { click: "select", dblclick: "activate" } },
+              c: [
+                { k: "item", key: "system-prompt", p: { label: [{ t: "■ ", s: "accent" }, { t: "System Prompt", s: "accent strong" }], value: [{ t: "3.1K · 1.6%" }] } },
+                { k: "item", key: "skills", p: { label: [{ t: "■ ", s: "success" }, { t: "Skills" }], value: "0 · 0.0%" } },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const { actions, html } = describedText(tree as never, identity, owner);
+
+    expect(actions.map((action) => [action.label, action.act, action.keypath, action.item])).toEqual([
+      ["System Prompt", "activate", "overview/categories", "system-prompt"],
+      ["Skills", "activate", "overview/categories", "skills"],
+    ]);
+    expect(html).toContain("■ Skills — 0 · 0.0%");
+  });
+
+  it("gives no button to a disabled item of a selectable list", () => {
+    const tree: N = {
+      k: "list",
+      key: "categories",
+      p: { actions: { click: "select", dblclick: "activate" } },
+      c: [{ k: "item", key: "gone", p: { label: "Gone", disabled: true } }],
+    };
+    expect(describedText(tree as never, identity, owner).actions).toEqual([]);
+  });
+
+  it("stops describing nested components below six levels", () => {
+    let leaf: object = { describe: () => ({ k: "text", p: { text: "deepest" } }), handleNativeEvent: () => undefined };
+    for (let level = 0; level < 9; level += 1) {
+      const inner = leaf;
+      leaf = {
+        describe: () => ({ k: "col", c: [{ k: "text", p: { text: `level ${level}` } }, inner] }),
+        handleNativeEvent: () => undefined,
+      };
+    }
+    const html = describedText({ k: "col", c: [leaf] } as never, identity, owner).html;
+
+    expect(html).toContain("level 8");
+    expect(html).not.toContain("level 0");
+    expect(html).not.toContain("deepest");
+  });
+
+  it("reads a component that contains itself once", () => {
+    const self: object & { describe: () => N; handleNativeEvent: () => void } = {
+      describe: () => ({ k: "col", c: [{ k: "text", p: { text: "loop" } }, self] }),
+      handleNativeEvent: () => undefined,
+    };
+    const html = describedText({ k: "col", c: [self] } as never, identity, owner).html;
+
+    expect(html.split("loop").length - 1).toBe(1);
+  });
+
+  it("writes a QR code as its link and never as its symbol block", () => {
+    const qr: N = {
+      k: "col",
+      p: { role: "omp.collab.qrcode" },
+      c: [
+        { k: "text", p: { spans: [{ t: "collab.example.test/join/abc", s: "accent link", href: "https://collab.example.test/join/abc" }], wrap: "none" } },
+        { k: "code", p: { text: "█▀█▀█\n▀▀▀▀▀", lang: "text", wrap: false } },
+      ],
+    };
+    const result = describedText({ k: "col", c: [qr] } as never, identity, owner);
+
+    expect(result.html).toBe("https://collab.example.test/join/abc");
+    expect(result.html).not.toContain("█");
+  });
+});

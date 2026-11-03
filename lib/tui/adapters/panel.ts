@@ -15,7 +15,7 @@ import type { AdapterContext, DialogAdapter, DialogModel } from "../model.ts";
 import { isReadOnlyPanel } from "../find-shape.ts";
 import { actionKeys, describedText, type DescribedAction, type DescribedText } from "../describe-text.ts";
 import { contentHtml } from "../output.ts";
-import { describesDialog, describesLoginSheet, describeTree, tspText, type NativeNodeLike } from "./tsp.ts";
+import { describableChild, describesDialog, describesLoginSheet, describeTree, tspText, type NativeNodeLike } from "./tsp.ts";
 import { constructorName } from "./utils.ts";
 
 type Describable = object & { handleNativeEvent(event: unknown): unknown };
@@ -38,6 +38,38 @@ function hostTitle(component: object): string | undefined {
  */
 function panelTitle(component: object, ctx: AdapterContext, treeTitle?: string): string | undefined {
   return ctx.entry?.title ?? hostTitle(component) ?? treeTitle ?? ctx.commandName;
+}
+
+/** The first head a described tree shows at its root (a card's `head`), if any. */
+function describedHead(component: object): string | undefined {
+  const root = describeTree(component);
+  if (!root || typeof root.p !== "object" || root.p === null) return undefined;
+  const head = tspText((root.p as Record<string, unknown>).head).trim();
+  return head === "" ? undefined : head;
+}
+
+/** Whether a child slot of the described tree is a component with no `describe` of its own (only a `render`). */
+function undescribedIn(node: NativeNodeLike, depth: number): boolean {
+  if (depth > 12) return false;
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  for (const child of children) {
+    if (typeof child !== "object" || child === null) continue;
+    if (describableChild(child)) continue;
+    if (typeof (child as Record<string, unknown>).render === "function") return true;
+    if (undescribedIn(child as NativeNodeLike, depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * What an unreadable panel is called in its notice: the entry's method, else the title the host gave
+ * it, else its class name. When a nested component has no description, the notice says so, so a
+ * reader knows why nothing of the panel was written.
+ */
+function unreadableWhat(component: object, ctx: AdapterContext): string {
+  const base = ctx.entry?.method ?? hostTitle(component) ?? describedHead(component) ?? (constructorName(component) || "unknown");
+  const root = describeTree(component);
+  return root !== undefined && undescribedIn(root, 0) ? `${base} (nested component without a description)` : base;
 }
 
 /** The panel as it is described right now (live tree, not a snapshot), redacted per run. */
@@ -111,8 +143,7 @@ export const infoPanelAdapter: DialogAdapter = {
     const html = contentHtml(component as Record<string, unknown>, redact);
     if (html) return { kind: "info", title: panelTitle(component, ctx), text: html, html: true, closable: true };
     // Nothing readable: name the panel, never mirror a frame (plan v8 §0.0).
-    const what = ctx.entry?.method ?? (constructorName(component) || "unknown");
-    return { kind: "unsupported", title: ctx.entry?.title, what };
+    return { kind: "unsupported", title: ctx.entry?.title, what: unreadableWhat(component, ctx) };
   },
 
   act(_component, action, ctx) {
@@ -184,7 +215,11 @@ export const describedPanelAdapter: DialogAdapter = {
 function fire(target: DescribedAction, ctx: AdapterContext): boolean {
   const handle = (target.owner as Partial<Describable>).handleNativeEvent;
   if (typeof handle !== "function") return false;
-  const event = { type: "action", key: target.keypath, act: target.act, ...(target.value !== undefined ? { value: target.value } : {}), mods: [] };
+  // A list item replays as the list's own activate event (as the picker adapter sends it).
+  const event =
+    target.item !== undefined
+      ? { type: "activate", key: target.keypath, item: target.item }
+      : { type: "action", key: target.keypath, act: target.act, ...(target.value !== undefined ? { value: target.value } : {}), mods: [] };
   try {
     handle.call(target.owner, event);
   } catch {
@@ -207,8 +242,7 @@ export const unsupportedAdapter: DialogAdapter = {
 
   read(component, ctx): DialogModel {
     // No frame is read: there is nothing to mirror, only something to name.
-    const what = ctx.entry?.method ?? (constructorName(component) || "unknown");
-    return { kind: "unsupported", title: ctx.entry?.title, what };
+    return { kind: "unsupported", title: ctx.entry?.title, what: unreadableWhat(component, ctx) };
   },
 
   act(_component, action, ctx) {
