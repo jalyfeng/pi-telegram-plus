@@ -159,6 +159,7 @@ export const piLoginAdapter: DialogAdapter = {
   id: "pi-login",
 
   detect(component, ctx) {
+    // pi only: pi ships unminified class names, so the name is a stable mark here. Never copy this to OMP.
     return ctx.host === "pi"
       && constructorName(component) === "LoginDialogComponent"
       && contentChildren(component) !== undefined;

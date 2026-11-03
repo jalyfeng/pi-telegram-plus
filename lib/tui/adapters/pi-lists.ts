@@ -60,6 +60,7 @@ const messageLabel = (item: HostRecord): string => {
   return oneLine.length > MESSAGE_LABEL_MAX ? `${oneLine.slice(0, MESSAGE_LABEL_MAX)}…` : oneLine;
 };
 
+// pi only: keyed by class name, which pi ships unminified. OMP's classes are minified; never key OMP on names.
 const PI_LIST_SPECS: Record<string, PiListSpec> = {
   // `/model`: `filteredModels` rows are `{ provider, id, model }`.
   ModelSelectorComponent: {
@@ -395,6 +396,7 @@ export const piSessionAdapter: DialogAdapter = {
 
   detect(component, ctx) {
     if (ctx.host !== "pi") return false;
+    // pi only: pi ships unminified class names (see PI_LIST_SPECS).
     if (constructorName(component) !== "SessionSelectorComponent") return false;
     const record = component as HostRecord;
     if (record.mode === "rename") return renameInputOf(record) !== undefined;
@@ -507,6 +509,7 @@ export const piTreeAdapter: DialogAdapter = {
 
   detect(component, ctx) {
     if (ctx.host !== "pi") return false;
+    // pi only: pi ships unminified class names (see PI_LIST_SPECS).
     if (constructorName(component) !== "TreeSelectorComponent") return false;
     // Renaming swaps a text input in front of the list; it owns the keys then.
     const labelInput = (component as HostRecord).labelInput;

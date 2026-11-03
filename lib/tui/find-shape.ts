@@ -133,23 +133,25 @@ export function isCancelOnlyLoader(value: unknown): boolean {
   return root?.k === "card" && props?.role === "omp.hook.loader";
 }
 
-/** Panels that bind nothing at all. */
-const INERT_PANELS = new Set(["BtwHistoryPanel", "BackgroundToolsPanel", "CustomMessage", "Container", "Panel"]);
-
 /** Real choice/text controls: a panel must not hide one of these. */
 export const isControlShape = (value: unknown): value is Record<string, unknown> =>
   isSelectList(value) || isInputShape(value) || isEditorShape(value) || isFilteredList(value);
 
+/**
+ * A read-only view: a component that renders, binds no key itself, and holds no key-taking component
+ * nearby. A waiting box is one only while its Escape is the only binding and nothing it wraps takes
+ * input. Callers ask only about components the host gave the keyboard to, so a focused component that
+ * takes no input is a view whatever its class is called (OMP ships minified class names).
+ */
 export function isReadOnlyPanel(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   const o = value as Record<string, unknown>;
   if (!fn(o, "render")) return false;
-  const name = Object.getPrototypeOf(o)?.constructor?.name ?? "";
   if (fn(o, "handleInput")) {
     // Escape-to-cancel is the only binding a loader has, and it is only a
     // panel while nothing it wraps still expects to be typed into.
     return isCancelOnlyLoader(o) && findShape(o, isControlShape, 2) === undefined;
   }
-  // A wrapper around a live control is not a wall of text.
-  return INERT_PANELS.has(name) && findShape(o, isInteractiveShape, 2) === undefined;
+  // A wrapper around a live input is not a wall of text.
+  return findShape(o, isInteractiveShape, 2) === undefined;
 }

@@ -130,6 +130,8 @@ export const infoPanelAdapter: DialogAdapter = {
       const label = (root ? describedLabel(root) : undefined) ?? loaderMessage(component) ?? "";
       return { kind: "progress", text: redact(label).trim(), cancellable: true };
     }
+    // A nested component with no description is content the reader cannot show: say so, do not show a title alone.
+    if (root && undescribedIn(root, 0)) return { kind: "unsupported", title: ctx.entry?.title, what: unreadableWhat(component, ctx) };
     if (root) {
       const described = describedText(root, redact, component);
       if (described.html) return { kind: "info", title: panelTitle(component, ctx, described.title), text: described.html, html: true, closable: true };

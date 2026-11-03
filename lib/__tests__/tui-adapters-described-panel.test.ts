@@ -486,7 +486,8 @@ describe("OMP panels with lists, meters and nested components", () => {
     const { ctx } = ctxFor();
     const adapter = pickAdapter(component, ctx);
 
-    expect(adapter?.id).toBe("unsupported");
+    // A focused view with no key binding is read by the panel adapter, which names it and says nothing else.
+    expect(adapter?.id).toBe("info-panel");
     expect(adapter?.read(component, ctx)).toEqual({
       kind: "unsupported",
       title: undefined,
