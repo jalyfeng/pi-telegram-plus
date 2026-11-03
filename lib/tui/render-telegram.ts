@@ -382,6 +382,37 @@ function renderConfirm(model: Extract<DialogModel, { kind: "confirm" }>, ctx: Re
   return { text: header(model.title, undefined, [body]), rows, keyMap: new Map(), page: 0, pages: 1 };
 }
 
+const DETAIL_BUDGET = 900;
+const HAS_LINK = /https?:\/\//i;
+
+/**
+ * An input's detail as Telegram text. A line with a link is kept whole, however long: a link cut in the
+ * middle is not tappable. The other lines fill the budget that the links leave, in order, and are dropped
+ * from the end once it is spent.
+ */
+function detailBody(detail: string): string {
+  const lines = clean(detail).split("\n");
+  const linkCost = lines.filter((line) => HAS_LINK.test(line)).reduce((sum, line) => sum + line.length + 1, 0);
+  let budget = Math.max(0, DETAIL_BUDGET - linkCost);
+  let room = true;
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (HAS_LINK.test(line)) {
+      kept.push(line);
+      continue;
+    }
+    if (!room) continue;
+    if (line.length + 1 > budget) {
+      room = false;
+      continue;
+    }
+    budget -= line.length + 1;
+    kept.push(line);
+  }
+  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
+  return kept.join("\n");
+}
+
 function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: RenderContext): RenderedDialog {
   // Plain text, not `<pre>`: Telegram makes a bare URL tappable and copyable.
   const steps = model.steps && model.steps.length > 0
@@ -389,9 +420,10 @@ function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: Render
         .map((step) => (step.current ? `<b>${escapeHtml(shorten(step.label, 20))}</b>` : escapeHtml(shorten(step.label, 20))))
         .join(" › ")}\n\n`]
     : [];
+  const detail = model.detail ? detailBody(model.detail) : "";
   const body = [
     ...steps,
-    model.detail ? `${escapeHtml(clean(model.detail).slice(0, 900))}\n` : "",
+    detail ? `${escapeHtml(detail)}\n` : "",
     model.placeholder ? `<pre>${escapeHtml(shorten(model.placeholder, 300))}</pre>\n` : "",
     model.secret ? "<i>Secret input: send a message; the bot will not echo it.</i>\n" : "",
     "Send a message as the input, or tap Cancel.",

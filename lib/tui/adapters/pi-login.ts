@@ -52,19 +52,38 @@ function keyHintIndexes(component: object, children: unknown[]): Set<number> {
 }
 
 /**
+ * The example line `showPrompt(message, placeholder)` adds: "e.g., <placeholder>" is a `Text` directly
+ * before the input, and the message `Text` sits right before it. Without a placeholder the input follows
+ * the message directly, after a Spacer. Found by position, not by matching its words.
+ */
+function hostPlaceholderIndex(component: object, children: unknown[]): number | undefined {
+  const input = (component as HostRecord).input;
+  if (input === undefined) return undefined;
+  const at = children.indexOf(input);
+  if (at < 2) return undefined;
+  return isTextChild(children[at - 1]) && isTextChild(children[at - 2]) ? at - 1 : undefined;
+}
+
+function isTextChild(child: unknown): boolean {
+  const record = child as HostRecord | undefined;
+  return !!record && typeof record === "object" && typeof record.text === "string";
+}
+
+/**
  * Readable lines of the content area: `Text` text (theme colours stripped),
  * and the bare `url` of an `AuthUrlComponent` (or anything else exposing one).
  * Lines starting with "> " are submitted values the host echoed back -
  * possibly API keys - and are skipped here so no model can carry them out.
- * The key hints after an input or its echo are skipped too (see `keyHintIndexes`).
+ * The key hints after an input or its echo are skipped too (see `keyHintIndexes`),
+ * and so is the `skip` child, the host's placeholder line, which is not body.
  */
-function bodyLines(component: object): string[] {
+function bodyLines(component: object, skip?: number): string[] {
   const children = contentChildren(component);
   if (!children) return [];
   const hints = keyHintIndexes(component, children);
   const lines: string[] = [];
   for (const [index, child] of children.entries()) {
-    if (hints.has(index)) continue;
+    if (hints.has(index) || index === skip) continue;
     if (!child || typeof child !== "object") continue;
     const record = child as HostRecord;
     if (typeof record.url === "string" && record.url.length > 0) {
@@ -108,15 +127,22 @@ export const piLoginAdapter: DialogAdapter = {
 
   read(component, _ctx): DialogModel {
     const title = dialogTitle(component);
-    const lines = bodyLines(component);
     if (isAwaitingInput(component)) {
+      // The message, the sign-in link and any instruction are the body (detail); only the host's
+      // own example line is the placeholder.
+      const children = contentChildren(component) ?? [];
+      const example = hostPlaceholderIndex(component, children);
+      const detail = bodyLines(component, example).join("\n");
+      const placeholder = example === undefined ? undefined : stripAnsi(String((children[example] as HostRecord).text)).trim();
       return {
         kind: "input",
         title,
-        placeholder: lines.length > 0 ? lines.join("\n") : undefined,
+        detail: detail.length > 0 ? detail : undefined,
+        placeholder: placeholder || undefined,
         secret: true,
       };
     }
+    const lines = bodyLines(component);
     return { kind: "info", title, text: lines.join("\n") || "Continue in the terminal", closable: true };
   },
 

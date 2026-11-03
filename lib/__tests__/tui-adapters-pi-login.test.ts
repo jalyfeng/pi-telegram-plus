@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { LoginDialogComponent } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/login-dialog.js";
 import { initTheme } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { pickAdapter } from "../tui/adapters/index.ts";
+import { renderDialog } from "../tui/render-telegram.ts";
 import { piLoginAdapter } from "../tui/adapters/pi-login.ts";
 import { sendKeyTo } from "../tui/keys.ts";
 import type { AdapterContext } from "../tui/model.ts";
@@ -69,7 +70,8 @@ describe("piLoginAdapter read", () => {
     if (model.kind !== "input") return;
     expect(model.secret).toBe(true);
     expect(model.title).toBe("Login to acme");
-    expect(model.placeholder).toContain("Paste your API key");
+    expect(model.detail).toBe("Paste your API key");
+    expect(model.placeholder).toBe("e.g., sk-...");
   });
 
   it("models the OAuth URL step as closable info carrying the link", () => {
@@ -146,7 +148,8 @@ describe("piLoginAdapter read: terminal key hints stay off the body", () => {
     expect(model.kind).toBe("input");
     if (model.kind !== "input") return;
     // Only the message is body; "(escape/ctrl+c to cancel ...)" is a key hint.
-    expect(model.placeholder).toBe("Paste your API key");
+    expect(model.detail).toBe("Paste your API key");
+    expect(model.placeholder).toBeUndefined();
   });
 
   it("keeps the example line, drops the key hint, under a prompt with a placeholder", () => {
@@ -154,7 +157,8 @@ describe("piLoginAdapter read: terminal key hints stay off the body", () => {
     void dialog.showPrompt("Paste your API key", "sk-...");
     const model = piLoginAdapter.read(dialog, ctx);
     if (model.kind !== "input") throw new Error(`expected an input model, got ${model.kind}`);
-    expect(model.placeholder).toBe("Paste your API key\ne.g., sk-...");
+    expect(model.detail).toBe("Paste your API key");
+    expect(model.placeholder).toBe("e.g., sk-...");
   });
 
   it("drops the key hint under a manual input as well", () => {
@@ -162,7 +166,8 @@ describe("piLoginAdapter read: terminal key hints stay off the body", () => {
     void dialog.showManualInput("Paste the redirect URL");
     const model = piLoginAdapter.read(dialog, ctx);
     if (model.kind !== "input") throw new Error(`expected an input model, got ${model.kind}`);
-    expect(model.placeholder).toBe("Paste the redirect URL");
+    expect(model.detail).toBe("Paste the redirect URL");
+    expect(model.placeholder).toBeUndefined();
   });
 
   it("keeps every line of an information page, its last line included", () => {
@@ -175,5 +180,45 @@ describe("piLoginAdapter read: terminal key hints stay off the body", () => {
     expect(lines[0]).toBe("Waiting for the browser...");
     expect(lines).toHaveLength(2);
     expect(lines[1]).toContain("to cancel");
+  });
+});
+
+describe("piLoginAdapter read: the OAuth link step keeps its link and its lines", () => {
+  const url = `https://claude.ai/oauth/authorize?code=true&client_id=client-1&scope=${"user%3Afull+".repeat(50)}`;
+  const instructions = "Complete login in your browser, then copy the code Anthropic shows and paste it here.";
+  const prompt = "Paste the code Anthropic shows after you sign in:";
+
+  function oauthCodeStep() {
+    const harness = loginHarness();
+    harness.dialog.showAuth(url, instructions);
+    void harness.dialog.showManualInput(prompt);
+    return harness;
+  }
+
+  it("puts the whole link and both lines in the detail, with no placeholder", () => {
+    const { dialog, ctx } = oauthCodeStep();
+    const model = piLoginAdapter.read(dialog, ctx);
+    if (model.kind !== "input") throw new Error(`expected an input model, got ${model.kind}`);
+    expect(model.secret).toBe(true);
+    expect(model.detail).toContain(url);
+    expect(model.detail).toContain(instructions);
+    expect(model.detail).toContain(prompt);
+    expect(model.placeholder).toBeUndefined();
+  });
+
+  it("leaves out the terminal click and copy hint that rides on the link", () => {
+    const { dialog, ctx } = oauthCodeStep();
+    const model = piLoginAdapter.read(dialog, ctx);
+    if (model.kind !== "input") throw new Error(`expected an input model, got ${model.kind}`);
+    expect(model.detail).not.toMatch(/click to open|to copy/i);
+  });
+
+  it("renders the link whole and as plain text, not inside a <pre>", () => {
+    const { dialog, ctx } = oauthCodeStep();
+    const rendered = renderDialog(piLoginAdapter.read(dialog, ctx), { sessionId: "s1", generation: 1 });
+    expect(rendered.text).toContain(url.replace(/&/g, "&amp;"));
+    expect(rendered.text).not.toContain("<pre>");
+    expect(rendered.text).toContain(instructions);
+    expect(rendered.text).toContain(prompt);
   });
 });
