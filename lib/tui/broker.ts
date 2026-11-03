@@ -48,6 +48,9 @@ import { queuePendingNotice } from "../pending-notices.ts";
 
 const brokerLog = log.child("tui-broker");
 
+/** Action keys that leave a panel without running anything: its Close and Back buttons. */
+const CLOSE_KEYS: ReadonlySet<string> = new Set(["close", "back"]);
+
 /** Models a person can answer; an information page, a progress line or a placeholder is not one. */
 const ANSWERABLE_KINDS: ReadonlySet<DialogModel["kind"]> = new Set(["select", "settings", "questionnaire", "approval", "confirm", "input", "editor"]);
 
@@ -516,7 +519,11 @@ export class DialogBroker {
    */
   private closeSummary(session: DialogSession, byTelegram: boolean): string | null {
     const redact = (text: string) => this.redact(session, text);
-    const answered = session.interactive === true || session.answeredSecret === true;
+    // A panel button the user ran (not Close, which is a cancel tap) is an answer: its line is the
+    // button's label, and the panel's text is not kept.
+    const tapped = session.telegramAction;
+    const ranAction = tapped !== undefined && !tapped.cancelled && !(tapped.key !== undefined && CLOSE_KEYS.has(tapped.key));
+    const answered = session.interactive === true || session.answeredSecret === true || ranAction;
     if (session.model.kind === "info" && !answered) {
       return closedPanelHtml(session.model, session.page, byTelegram ? "✖ Closed" : "Closed in the terminal", redact);
     }
@@ -741,7 +748,8 @@ export class DialogBroker {
     const cancelled = resolved.action.type === "cancel";
     // The baseline (`drawn`) is taken after the act, from the model it leaves behind: what the act
     // itself changes is part of this tap. Until then the marker has no baseline and no draw judges it.
-    session.telegramAction = { cancelled };
+    const buttonKey = resolved.action.type === "key" ? resolved.action.name : resolved.action.type === "choose" ? resolved.action.key : undefined;
+    session.telegramAction = { cancelled, ...(buttonKey !== undefined ? { key: buttonKey } : {}) };
     const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
       session.telegramAction = previousAction;

@@ -274,7 +274,8 @@ export type DialogSession = {
    * changes, the tap has been consumed and it is forgotten. `cancelled` tells a Cancel button from
    * an answer.
    */
-  telegramAction?: { cancelled: boolean; drawn?: string; summary?: string };
+  /** `key`: the button's action key when the tap ran a button (a close or back key is navigation, not an answer). */
+  telegramAction?: { cancelled: boolean; drawn?: string; summary?: string; key?: string };
 };
 
 /**

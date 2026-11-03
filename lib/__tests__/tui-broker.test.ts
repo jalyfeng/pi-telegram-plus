@@ -1351,7 +1351,7 @@ describe("a read-only panel that closes keeps the page it showed", () => {
       },
     };
     session.model = model;
-    session.keyMap.set(session.generation, new Map([["close", "close"]]));
+    session.keyMap.set(session.generation, new Map([["close", "close"], ...(model.kind === "info" ? (model.actions ?? []).map((action) => [action.key, action.key] as [string, string]) : [])]));
     return { broker, transport, focus, session };
   }
 
@@ -1370,6 +1370,40 @@ describe("a read-only panel that closes keeps the page it showed", () => {
     expect(edit?.text).not.toContain("✅");
     expect(edit?.text).not.toContain("Answered in the terminal");
     expect(edit?.rows).toEqual([]);
+  });
+
+  it("says the action a panel button ran, and drops the panel text, when the host closes it", async () => {
+    const actionModel: DialogModel = {
+      kind: "info",
+      title: "Debug",
+      text: "Pick a report to run.",
+      closable: true,
+      actions: [{ key: "view:system", label: "View: system info" }],
+    };
+    const { broker, transport, session } = await openedPanel(actionModel);
+    // The host runs the report and closes the panel inside the tap.
+    expect(broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "c", arg: "view:system" })).toEqual({ handled: true });
+    await settle();
+
+    expect(lastEdit(transport)?.text).toContain("✅ View: system info");
+    expect(lastEdit(transport)?.text).not.toContain("Pick a report");
+    expect(lastEdit(transport)?.text).not.toContain("✖ Closed");
+  });
+
+  it("keeps the panel and says Closed when Telegram taps Close on a panel with action buttons", async () => {
+    const actionModel: DialogModel = {
+      kind: "info",
+      title: "Debug",
+      text: "Pick a report to run.",
+      closable: true,
+      actions: [{ key: "view:system", label: "View: system info" }],
+    };
+    const { broker, transport, session } = await openedPanel(actionModel);
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "x" });
+    await settle();
+
+    expect(lastEdit(transport)?.text).toContain("Pick a report");
+    expect(lastEdit(transport)?.text).toContain("✖ Closed");
   });
 
   it("keeps the page and says it was closed in the terminal when the terminal closes it", async () => {
