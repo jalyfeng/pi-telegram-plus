@@ -91,6 +91,10 @@ type PickerItemLike = {
   disabled?: unknown;
   /** Tags after the label (`TspPickerItem.badges`): a model's `default`, `vision`, … */
   badges?: unknown;
+  /** Status dot (`TspPickerItem.dot`): the host's state tone, e.g. success = enabled, muted = disabled. */
+  dot?: unknown;
+  /** Column values by column id (`TspPickerItem.facts`); the category of an extension row. */
+  facts?: unknown;
 };
 
 /** The picker's action strip: chips the user picks after activating an item. */
@@ -417,6 +421,26 @@ function visibleItems(props: PickerProps): PickerItemLike[] {
 }
 
 /**
+ * The host's status glyph for a row's dot tone, the same glyphs its terminal list draws
+ * (`theme.status` in oh-my-pi@v18.14.1 packages/tui/src/theme/symbols.ts): success ●, muted ⦸,
+ * warning ○, pending ⟳. Other tones have no glyph in the host's status set, so they get none.
+ */
+const STATUS_GLYPH: Record<string, string> = { success: "●", muted: "⦸", warning: "○", pending: "⟳" };
+
+function pickerStatusMark(dot: unknown): string {
+  return typeof dot === "string" && Object.hasOwn(STATUS_GLYPH, dot) ? `${STATUS_GLYPH[dot]} ` : "";
+}
+
+/** The item's facts as message text, `kind: Skills`, in the host's own order. */
+function pickerFacts(facts: unknown): string[] {
+  if (!isObject(facts)) return [];
+  return Object.entries(facts).flatMap(([name, value]) => {
+    const text = typeof value === "number" ? String(value) : tspText(value);
+    return text === "" ? [] : [`${name}: ${text}`];
+  });
+}
+
+/**
  * An item's badges as message text: `text`, with the host's tooltip `title`
  * after it when the title says something more than the text does.
  */
@@ -640,9 +664,10 @@ export const tspPickerAdapter: DialogAdapter = {
     if (pendingAction !== undefined && !pending) pendingRowAction.delete(found.owner);
     const currentIds = Array.isArray(props.current) ? props.current : [];
     const items: DialogItem[] = visibleItems(props).map((item) => {
-      const description = item.detail === undefined ? undefined : tspText(item.detail);
+      const detail = item.detail === undefined ? "" : tspText(item.detail);
+      const description = [detail, ...pickerFacts(item.facts)].filter((part) => part !== "").join(" · ") || undefined;
       const badges = pickerBadges(item.badges);
-      const label = tspText(item.label);
+      const label = `${pickerStatusMark(item.dot)}${tspText(item.label)}`;
       return {
         key: item.id as string,
         label: item.disabled ? `${label} (disabled)` : label,

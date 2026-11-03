@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import { pickAdapter } from "../tui/adapters/index.ts";
 import { describesLoginSheet, describesTextInput, findPicker, tspInputAdapter, tspLoginAdapter, tspPickerAdapter, tspPrefsAdapter } from "../tui/adapters/tsp.ts";
 import type { AdapterContext, DialogModel } from "../tui/model.ts";
+import { renderDialog } from "../tui/render-telegram.ts";
 
 type Node = { k: string; p?: unknown; c?: unknown[]; key?: string };
 
@@ -221,6 +222,44 @@ describe("tsp picker read", () => {
     expect(model.items.map((item) => item.key)).toEqual(["a", "b", "c"]);
     expect(model.items.map((item) => item.label)).toEqual(["alpha (disabled)", "beta (disabled)", "gamma"]);
     expect(model.total).toBe(3);
+  });
+
+  it("shows an extension's status dot and category, from the host's own dot and facts", () => {
+    // The three rows an /extensions picker sends (real OMP 18.14.1 data): enabled, shadowed, disabled.
+    const props = {
+      title: "Extensions",
+      items: [
+        { id: "iw4iz75jiyl7", label: "deskvnc", dot: "muted", tone: "muted", facts: { kind: "Skills" } },
+        {
+          id: "cmqiua1rv6z1",
+          label: "hf-cli",
+          dot: "warning",
+          tone: "warning",
+          badges: [{ text: "shadowed", tone: "warning" }],
+          facts: { kind: "Skills" },
+        },
+        { id: "1i3hwdoo7tpkv", label: "go-add-cleanup", dot: "success", facts: { kind: "Rules" } },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
+    expect(model.items).toEqual([
+      { key: "iw4iz75jiyl7", label: "⦸ deskvnc", description: "kind: Skills", note: "kind: Skills", current: false, focused: false },
+      {
+        key: "cmqiua1rv6z1",
+        label: "○ hf-cli",
+        description: "kind: Skills",
+        note: "kind: Skills",
+        badges: ["shadowed"],
+        current: false,
+        focused: false,
+      },
+      { key: "1i3hwdoo7tpkv", label: "● go-add-cleanup", description: "kind: Rules", note: "kind: Rules", current: false, focused: false },
+    ]);
+    const rendered = renderDialog(model, { sessionId: "s1", generation: 1 });
+    expect(rendered.text).toContain("⦸ deskvnc");
+    expect(rendered.text).toContain("kind: Skills");
+    expect(rendered.text).toContain("● go-add-cleanup");
+    expect(rendered.text).toContain("kind: Rules");
   });
 
   it("lists a disabled agent row so the user can still pick it", () => {
