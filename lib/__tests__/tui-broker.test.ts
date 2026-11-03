@@ -1075,6 +1075,61 @@ describe("who closed a dialog and what they tapped", () => {
     expect(scope.dialogSummaries).toEqual([]);
   });
 
+  it("keeps the line of a dialog Telegram answered when the same command's next dialog replaces it", async () => {
+    const scope = {
+      id: "s4",
+      origin: { chatId: 7, messageThreadId: 3, sourceMessageId: 21 },
+      telegramMessageId: 555,
+      ended: false,
+      dialogSummaries: [] as string[],
+    } as unknown as CommandScope;
+    const { broker, focus } = makeBroker({ scope });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    const model: DialogModel = {
+      kind: "select",
+      title: "Login",
+      items: [{ key: "a", label: "A" }],
+      total: 1,
+      extraActions: [{ label: "Paste code (mock)", key: "act:0" }],
+    };
+    // The host opens the next dialog (OMP's OAuth sheet) inside the tap, as a selector does on Enter.
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: () => {
+        focus.openDialog(selector(focus).component);
+        return true;
+      },
+    };
+    session.model = model;
+    broker.handleCallback(7, 3, { sessionId: session.id, generation: 0, op: "k", arg: "act:0" });
+    await settle();
+
+    expect(scope.dialogSummaries).toEqual(["✅ Paste code (mock)"]);
+  });
+
+  it("writes no line for a dialog nobody answered when the same command's next dialog replaces it", async () => {
+    const scope = {
+      id: "s5",
+      origin: { chatId: 7, messageThreadId: 3, sourceMessageId: 21 },
+      telegramMessageId: 555,
+      ended: false,
+      dialogSummaries: [] as string[],
+    } as unknown as CommandScope;
+    const { broker, focus } = makeBroker({ scope });
+    focus.openDialog(selector(focus).component);
+    await settle();
+    expect(broker.current()).toBeDefined();
+
+    focus.openDialog(selector(focus).component);
+    await settle();
+
+    expect(scope.dialogSummaries).toEqual([]);
+  });
+
   it("writes Cancelled when Telegram cancels a progress wait", async () => {
     const { broker, transport, session } = await scripted(
       { kind: "progress", text: "Sharing session...", cancellable: true },

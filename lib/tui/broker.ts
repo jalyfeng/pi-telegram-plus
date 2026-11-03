@@ -494,6 +494,10 @@ export class DialogBroker {
       && sameTarget(telegram, { chatId: owner.origin.chatId, messageThreadId: owner.origin.messageThreadId });
     if (replaced) {
       session.closedBy = "replaced";
+      // The message is handed to the next dialog, so an answer Telegram already gave must leave its
+      // line in the command's summaries now. A dialog nobody answered leaves none.
+      const scope = this.scopes.get(session);
+      if (byTelegram && scope) scope.dialogSummaries.push(escapeHtml(this.redact(session, this.telegramSummary(session))));
       return session.closedBy;
     }
 
