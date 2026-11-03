@@ -86,7 +86,16 @@ export async function telegramApi<T>(
   } catch (error) {
     throw new Error(`Telegram API request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const json = (await response.json()) as TelegramApiResponse & { result: T };
+  const text = await response.text();
+  let json: TelegramApiResponse & { result: T };
+  try {
+    json = JSON.parse(text) as TelegramApiResponse & { result: T };
+  } catch {
+    // A gateway or proxy answers an outage with a plain-text page ("Bad Gateway").
+    // Keep the HTTP status so the caller can tell it is transient.
+    const snippet = text.replace(/\s+/g, " ").trim().slice(0, 200);
+    throw new TelegramApiRequestError(`${method} failed: HTTP ${response.status}${snippet ? ` ${snippet}` : ""}`, undefined, response.status);
+  }
   if (!json.ok) {
     throw new TelegramApiRequestError(json.description ?? `${method} failed`, json.parameters?.retry_after, response.status);
   }
@@ -139,15 +148,15 @@ export async function downloadTelegramFile(
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
- * True when repeating the same request may succeed: flood control (429), server
- * errors (5xx), and network-level failures (no Telegram answer). Any other
+ * True when repeating the same request may succeed: timeouts (408), flood control
+ * (429), server and gateway errors (5xx), and network-level failures (no Telegram answer). Any other
  * Telegram answer, such as 400 "can't parse entities" or "message is too long",
  * is a deterministic rejection of this payload; repeating it only resends the
  * same rejected message.
  */
 function isTransientSendError(error: unknown): boolean {
   if (!(error instanceof TelegramApiRequestError) || error.status === undefined) return true;
-  return error.status === 429 || error.status >= 500;
+  return error.status === 408 || error.status === 429 || error.status >= 500;
 }
 
 // ── Telegram Rich Messages (Bot API 10.1+) ──────────────────────────────────

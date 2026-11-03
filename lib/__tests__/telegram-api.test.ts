@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { createTelegramTransport, __resetRichMessagesForTests } from "../telegram-api.ts";
+import { createTelegramTransport, telegramApi, TelegramApiRequestError, __resetRichMessagesForTests } from "../telegram-api.ts";
 import type { TelegramConfig } from "../types.ts";
 import { __drainAndListFiles, __resetSinkForTests, initLogger } from "../logger.ts";
 
@@ -275,6 +275,30 @@ describe("createTelegramTransport — retries only transient failures", () => {
     await expect(transport.sendText(1, "hello")).rejects.toThrow(/Bad Gateway/);
 
     expect(stub).toHaveBeenCalledTimes(3);
+  });
+
+  it("a non-JSON 502 answer (proxy outage page) is a TelegramApiRequestError carrying the status", async () => {
+    globalThis.fetch = vi.fn(async () => new Response("Bad Gateway (mock outage)", { status: 502 })) as unknown as FetchImpl;
+
+    const error = await telegramApi("tok", "getUpdates", {}).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(TelegramApiRequestError);
+    expect((error as TelegramApiRequestError).status).toBe(502);
+    expect((error as Error).message).toMatch(/502/);
+    expect((error as Error).message).toMatch(/Bad Gateway \(mock outage\)/);
+  });
+
+  it("retries a non-JSON 502 answer per retryCount and reports it as a 502 TelegramApiRequestError", async () => {
+    const stub = vi.fn(async () => new Response("Bad Gateway (mock outage)", { status: 502 }));
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 2 });
+    const error = await transport.sendText(1, "hello").catch((err: unknown) => err);
+
+    expect(stub).toHaveBeenCalledTimes(3);
+    expect(error).toBeInstanceOf(TelegramApiRequestError);
+    expect((error as TelegramApiRequestError).status).toBe(502);
   });
 
   it("retries a 429 answer per retryCount", async () => {
