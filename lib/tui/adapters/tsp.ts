@@ -327,6 +327,27 @@ export function describesDialog(component: object): boolean {
 }
 
 /**
+ * A described node a person can act on: an input, editor or field; a node with a `click` or `dblclick`
+ * action (a button, a list item, an entry); or a list that holds items. Shape only, as describe-text reads it.
+ */
+function isActionableNode(node: NativeNodeLike): boolean {
+  if (node.k === "input" || node.k === "editor" || node.k === "field") return true;
+  const props = isObject(node.p) ? node.p : undefined;
+  const actions = props && isObject(props.actions) ? props.actions : undefined;
+  if (actions && (typeof actions.click === "string" || typeof actions.dblclick === "string")) return true;
+  return node.k === "list" && Array.isArray(node.c) && node.c.some((child) => isObject(child) && child.k === "item");
+}
+
+/**
+ * True when `component`'s own description, or a component it nests, holds something a person can act on
+ * (see {@link isActionableNode}). Focus uses it on OMP, where the class name tells nothing. A `describe` that
+ * throws describes nothing, so this is false.
+ */
+export function describesActionable(component: object): boolean {
+  return findDescribedNode(component, isActionableNode) !== undefined;
+}
+
+/**
  * True when `component`'s description, or a component it nests, holds an
  * action control whose `actions.click` is `act` (e.g. the wizard's footer
  * `next` button). A `describe` that throws describes nothing.

@@ -17,7 +17,7 @@ import { removeOwnerHooks } from "./hooks.ts";
 import { hookEntryMethods, insideEntryCall, PI_ENTRY_SPECS, UI_CONTEXT_SPECS, OMP_ENTRY_SPECS, type EntrySink } from "./entry.ts";
 import { installRace, takePendingRace } from "./race.ts";
 import { findShape, isControlShape, isEditorShape, isFilteredList, isInputShape, isReadOnlyPanel, isSelectList, isSettingsList } from "./find-shape.ts";
-import { describesDialog, describesLoginSheet } from "./adapters/tsp.ts";
+import { describesActionable, describesDialog, describesLoginSheet } from "./adapters/tsp.ts";
 import { isDescribedPanel } from "./adapters/panel.ts";
 import type { EntryInfo } from "./model.ts";
 import { log } from "../logger.ts";
@@ -595,7 +595,8 @@ export class FocusTracker {
     // input field at all" (§4.1.3), so only the field-less case is progress.
     const carriesSignal = component.signal !== undefined || component.abortController !== undefined;
     const holdsControl = findShape(component, isControlShape, 2) !== undefined;
-    if (name.endsWith("Loader") || (carriesSignal && !holdsControl)) {
+    // pi only: pi ships unminified class names, so a "…Loader" name is a stable mark there. OMP's classes are minified.
+    if ((this.lastState?.host === "pi" && name.endsWith("Loader")) || (carriesSignal && !holdsControl)) {
       return "progress";
     }
     // The host asked the user something and this component receives the keys, so it is a
@@ -605,7 +606,10 @@ export class FocusTracker {
     // purpose: asking costs a claim on the pending entry, and the spinner that merely holds
     // the keyboard so Esc can interrupt must never take it.
     if (this.entryFor(component)) return "dialog";
-    if (DIALOG_NAME.test(name)) return "dialog";
+    // OMP: a described action (a list item, a button, an input) makes it a dialog, whatever its name.
+    if (this.lastState?.host === "omp" && describesActionable(component)) return "dialog";
+    // pi only: pi ships unminified class names, so a dialog's name is a stable mark there. Never on OMP.
+    if (this.lastState?.host === "pi" && DIALOG_NAME.test(name)) return "dialog";
     if (typeof component.options === "string" || Array.isArray(component.options)) return "dialog";
     if (typeof component.selectedIndex === "number") return "dialog";
     // A list or input somewhere inside: the user answers it, so it is a dialog.

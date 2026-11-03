@@ -69,3 +69,63 @@ describe("a focused component with no key binding is a read-only view", () => {
     expect(kinds.at(-1)).toBe("editor");
   });
 });
+
+/** A minified OMP overlay that holds a pressable list in its description, and no known control shape. */
+class Xq {
+  render(): string[] {
+    return [""];
+  }
+  handleInput(): void {}
+  describe() {
+    return {
+      k: "card",
+      p: { role: "omp.overlay" },
+      c: [{ k: "list", p: {}, c: [{ k: "item", p: { actions: { click: "select" } }, c: [{ k: "text", p: { t: "alpha" } }] }] }],
+    };
+  }
+}
+
+/** A minified OMP overlay whose description is text only. */
+class Xr {
+  render(): string[] {
+    return [""];
+  }
+  handleInput(): void {}
+  describe() {
+    return { k: "card", p: { role: "omp.overlay" }, c: [{ k: "text", p: { t: "Hello" } }] };
+  }
+}
+
+/** A class whose name says "Dialog" and that has no description: the name is the only clue. */
+class FooDialog {
+  render(): string[] {
+    return [""];
+  }
+  handleInput(): void {}
+}
+
+describe("a focused OMP component is a dialog when its description holds an action", () => {
+  it("classifies a minified component with an actionable described list as a dialog", () => {
+    const { ui, kinds } = fakeHost("omp");
+    ui.setFocus(new Xq());
+    expect(kinds.at(-1)).toBe("dialog");
+  });
+
+  it("classifies the same component with a text-only description as progress", () => {
+    const { ui, kinds } = fakeHost("omp");
+    ui.setFocus(new Xr());
+    expect(kinds.at(-1)).toBe("progress");
+  });
+
+  it("no longer reads a class name on OMP: a Dialog-named class with no description is progress", () => {
+    const { ui, kinds } = fakeHost("omp");
+    ui.setFocus(new FooDialog());
+    expect(kinds.at(-1)).toBe("progress");
+  });
+
+  it("keeps pi's name fallback: a Dialog-named class is a dialog on pi", () => {
+    const { ui, kinds } = fakeHost("pi");
+    ui.setFocus(new FooDialog());
+    expect(kinds.at(-1)).toBe("dialog");
+  });
+});
