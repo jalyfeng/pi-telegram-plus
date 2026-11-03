@@ -1034,6 +1034,62 @@ describe("who closed a dialog and what they tapped", () => {
     }
   });
 
+  it("runs OMP's /share loader as a progress wait: no line when the host ends it, Cancelled when Telegram cancels", async () => {
+    // OMP's BorderedLoader shape (bordered-loader.ts): a signal Escape aborts through, and a describe tree.
+    class BorderedLoader {
+      render(): string[] {
+        return [];
+      }
+      handleInput(): void {}
+      get signal(): AbortSignal {
+        return new AbortController().signal;
+      }
+      describe() {
+        return {
+          k: "card",
+          p: { role: "omp.hook.loader" },
+          c: [
+            { k: "spinner", p: { style: "starburst", label: [{ t: "Sharing session..." }] } },
+            { k: "row", p: { role: "omp.overlay.hints" }, c: [{ k: "text", p: { text: [{ t: "cancel" }] } }] },
+          ],
+        };
+      }
+    }
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog(new BorderedLoader() as unknown as Record<string, unknown>);
+    await settle();
+    const session = broker.current();
+    expect(session?.model).toEqual({ kind: "progress", text: "Sharing session...", cancellable: true });
+    focus.closeToEditor();
+    await settle();
+    expect(transport.edits.filter((entry) => entry.text.includes("Answered in the terminal"))).toEqual([]);
+    expect(transport.deleted).toHaveLength(1);
+  });
+
+  it("says Cancelled when Telegram cancels OMP's /share loader", async () => {
+    class BorderedLoader {
+      render(): string[] {
+        return [];
+      }
+      handleInput(): void {}
+      get signal(): AbortSignal {
+        return new AbortController().signal;
+      }
+      describe() {
+        return { k: "card", p: { role: "omp.hook.loader" }, c: [{ k: "spinner", p: { label: [{ t: "Sharing session..." }] } }] };
+      }
+    }
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog(new BorderedLoader() as unknown as Record<string, unknown>);
+    await settle();
+    const session = broker.current()!;
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "x" });
+    // The loader's Escape handler aborts it, and the host closes it after the tap.
+    focus.closeToEditor();
+    await settle();
+    expect(lastText(transport)).toContain("✖ Cancelled");
+  });
+
   it("writes no closing line when the host ends a progress wait (e.g. /share uploading)", async () => {
     const { transport, focus, session } = await scripted(
       { kind: "progress", text: "Sharing session...", cancellable: true },

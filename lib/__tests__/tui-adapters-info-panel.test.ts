@@ -106,6 +106,46 @@ describe("infoPanelAdapter read", () => {
   });
 });
 
+/**
+ * OMP's BorderedLoader (oh-my-pi@v18.14.1 packages/tui/src/overlays/bordered-loader.ts): no `cancellable`
+ * flag and no stop method, only the `signal` getter that Escape aborts through, and a describe tree with
+ * the loader's spinner and a hints row. Its Cancel is Escape.
+ */
+class BorderedLoader {
+  render(): string[] {
+    return [];
+  }
+  handleInput(): void {}
+  get signal(): AbortSignal {
+    return new AbortController().signal;
+  }
+  describe() {
+    return {
+      k: "card",
+      p: { role: "omp.hook.loader" },
+      c: [
+        { k: "spinner", p: { style: "starburst", label: [{ t: "Sharing session..." }] } },
+        {
+          k: "row",
+          p: { role: "omp.overlay.hints", gap: "md", wrap: true },
+          c: [{ k: "row", p: { gap: "xs" }, c: [{ k: "kbd", p: { key: "escape" } }, { k: "text", p: { text: [{ t: "cancel" }] } }] }],
+        },
+      ],
+    };
+  }
+}
+
+describe("infoPanelAdapter: OMP's BorderedLoader is a cancellable progress wait", () => {
+  it("reads its spinner label as progress, not the hints row, and Cancel sends Escape", () => {
+    const component = new BorderedLoader();
+    const { ctx, keys } = ctxFor(undefined, "omp");
+    const model = infoPanelAdapter.read(component, ctx);
+    expect(model).toEqual({ kind: "progress", text: "Sharing session...", cancellable: true });
+    expect(infoPanelAdapter.act(component, { type: "cancel" }, ctx)).toBe(true);
+    expect(keys).toEqual(["esc"]);
+  });
+});
+
 describe("infoPanelAdapter title", () => {
   it("takes the host's own title for a text panel the entry leaves untitled", () => {
     const component = { title: "Recent Changes", children: [{ text: "1.2.0 fixed the thing" }], handleInput: () => {}, render: () => ["screen"] };

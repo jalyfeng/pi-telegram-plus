@@ -80,14 +80,22 @@ function liveText(component: object, redact: (text: string) => string): Describe
 }
 
 /**
+ * OMP loaders that Escape aborts through their `signal` (oh-my-pi@v18.14.1
+ * packages/tui/src/overlays/bordered-loader.ts): they carry no `cancellable` flag.
+ */
+const OMP_CANCELLABLE_LOADERS: ReadonlySet<string> = new Set(["BorderedLoader"]);
+
+/**
  * Whether Escape does more than close the view. pi's `BorderedLoader` keeps no
  * stop method: it carries the host's own `cancellable` flag plus an AbortSignal
- * that Escape aborts through, so both shapes count.
+ * that Escape aborts through, so both shapes count. OMP's `BorderedLoader` has
+ * the signal without the flag; its class name is the mark.
  */
 const cancellable = (component: object): boolean => {
   const record = component as Record<string, unknown>;
   if (["cancel", "stop", "abort"].some((name) => typeof record[name] === "function")) return true;
-  return record.cancellable === true && "signal" in record;
+  if (!("signal" in record)) return false;
+  return record.cancellable === true || OMP_CANCELLABLE_LOADERS.has(constructorName(component));
 };
 
 /** The text a pi loader keeps: `Loader.message`, or a BorderedLoader's `loader.message`. */
