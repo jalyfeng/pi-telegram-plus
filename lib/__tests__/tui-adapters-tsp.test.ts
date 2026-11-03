@@ -208,7 +208,7 @@ describe("tsp picker read", () => {
     ]);
   });
 
-  it("skips disabled rows and defaults the title", () => {
+  it("keeps disabled rows listed and marked, and defaults the title", () => {
     const props = {
       items: [
         { id: "a", label: "alpha", disabled: "needs a key" },
@@ -218,8 +218,15 @@ describe("tsp picker read", () => {
     };
     const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
     expect(model.title).toBe("Select");
-    expect(model.items.map((item) => item.key)).toEqual(["c"]);
-    expect(model.total).toBe(1);
+    expect(model.items.map((item) => item.key)).toEqual(["a", "b", "c"]);
+    expect(model.items.map((item) => item.label)).toEqual(["alpha (disabled)", "beta (disabled)", "gamma"]);
+    expect(model.total).toBe(3);
+  });
+
+  it("lists a disabled agent row so the user can still pick it", () => {
+    const props = { title: "Agents", items: [{ id: "reviewer", label: "reviewer", disabled: "Disabled · space to enable" }] };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
+    expect(model.items).toEqual([{ key: "reviewer", label: "reviewer (disabled)", current: false, focused: false }]);
   });
 
   it("follows an open action strip instead of the list", () => {
@@ -264,9 +271,9 @@ describe("tsp picker read", () => {
     const component = makeComponent({ k: "picker", p: { title: "Agents", items: [], empty: "No agents are running." } });
     const model = asInfo(tspPickerAdapter.read(component, ctxFor()));
     expect(model).toEqual({ kind: "info", title: "Agents", text: "No agents are running.", closable: true });
-    // A list that is only disabled rows is invisible too.
-    const disabled = asInfo(tspPickerAdapter.read(makeComponent({ k: "picker", p: { items: [{ id: "a", label: "a", disabled: true }] } }), ctxFor()));
-    expect(disabled.text).toBe("Nothing to show");
+    // Disabled rows are still rows: a picker with only disabled items is a list, not an info card.
+    const disabled = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: { items: [{ id: "a", label: "a", disabled: true }] } }), ctxFor()));
+    expect(disabled.items.map((item) => item.label)).toEqual(["a (disabled)"]);
   });
 
   it("prefers empty over message, flattens span text, and keeps a non-empty list a select", () => {

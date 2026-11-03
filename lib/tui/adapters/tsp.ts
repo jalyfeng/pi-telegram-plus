@@ -392,7 +392,11 @@ function isLoginRole(role: unknown): boolean {
   return typeof role === "string" && (role.startsWith("omp.login.") || role === "omp.overlay.login");
 }
 
-/** The catalogue id list, honouring `order` (string entries that exist) when present. */
+/**
+ * The catalogue id list, honouring `order` (string entries that exist) when present.
+ * Disabled items stay in: the host lists them and still takes select/activate on them
+ * (e.g. `/agents` opens a disabled agent so it can be enabled again).
+ */
 function visibleItems(props: PickerProps): PickerItemLike[] {
   const items = Array.isArray(props.items) ? (props.items as readonly PickerItemLike[]) : [];
   const byId = new Map<string, PickerItemLike>();
@@ -409,7 +413,7 @@ function visibleItems(props: PickerProps): PickerItemLike[] {
   } else {
     ordered.push(...byId.values());
   }
-  return ordered.filter((item) => !item.disabled);
+  return ordered;
 }
 
 /**
@@ -638,9 +642,10 @@ export const tspPickerAdapter: DialogAdapter = {
     const items: DialogItem[] = visibleItems(props).map((item) => {
       const description = item.detail === undefined ? undefined : tspText(item.detail);
       const badges = pickerBadges(item.badges);
+      const label = tspText(item.label);
       return {
         key: item.id as string,
-        label: tspText(item.label),
+        label: item.disabled ? `${label} (disabled)` : label,
         ...(description ? { description, note: description } : {}),
         ...(badges.length > 0 ? { badges } : {}),
         current: currentIds.includes(item.id),
