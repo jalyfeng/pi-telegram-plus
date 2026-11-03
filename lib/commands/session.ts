@@ -73,12 +73,15 @@ export function registerSessionCommands(
       const ui = ctx.ui;
       const confirmed = await ui.confirm("New session", "Start a new session? Current session will be saved.");
       if (!confirmed) return;
+      // OMP prints its own "✔ New session started" into the command's message, so the plugin
+      // adds no notice there (a second line would repeat it). pi does not print one.
+      const started = async () => { if (!isOmpHost()) ui.notify("✅ New session started.", "info"); };
       const result = await ctx.newSession(
         typeof deps.getSession()?.extensionRunner?.setUIContext === "function"
           // pi keeps its pre-existing withSession post-replacement hook.
-          ? { withSession: async () => { ui.notify("✅ New session started.", "info"); } }
+          ? { withSession: started }
           // OMP has no setUIContext() and ignores withSession; it only implements setup.
-          : { setup: async () => { ui.notify("✅ New session started.", "info"); } },
+          : { setup: started },
       );
       if (result.cancelled) ui.notify("Cancelled.", "info");
     },
