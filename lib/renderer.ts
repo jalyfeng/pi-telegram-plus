@@ -491,10 +491,10 @@ export function registerTelegramRenderer(
     return chatIds.length === 0 ? undefined : `default:${chatIds.join(",")}`;
   };
 
-  const sendDefault = async (html: string, richMarkdown?: string) => {
+  const sendDefault = async (html: string, richMarkdown?: string, delivery?: { mustDeliver: boolean }) => {
     const chatIds = defaultChats();
     if (chatIds.length === 0) return [];
-    return [await deps.transport.sendText(chatIds[0], html, undefined, undefined, richMarkdown)];
+    return [await deps.transport.sendText(chatIds[0], html, undefined, undefined, richMarkdown, delivery)];
   };
 
   const sendNewToEventTarget = async (html: string) => {
@@ -506,13 +506,15 @@ export function registerTelegramRenderer(
   /** Sends to the turn's target. Returns the id of the message now holding `html`, when known. */
   const sendToTurn = async (html: string, options: { final?: boolean; richMarkdown?: string } = {}): Promise<number | undefined> => {
     const richMarkdown = options.richMarkdown;
+    // A final reply must reach the chat even across an outage: the transport keeps it for reconnect.
+    const delivery = options.final ? { mustDeliver: true } : undefined;
     const turn = deps.getActiveTurn();
     if (!turn) {
-      const sent = await sendDefault(html, richMarkdown);
+      const sent = await sendDefault(html, richMarkdown, delivery);
       return sent[0]?.[0]?.message_id;
     }
     if (turn.replaceMessageId === undefined) {
-      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown, delivery);
       return sent[0]?.message_id;
     }
     // The placeholder cannot hold an HTML answer that large, but one Rich
@@ -520,18 +522,18 @@ export function registerTelegramRenderer(
     if (options.final && !richMarkdown && Buffer.byteLength(html, "utf8") > EDIT_LIMIT) {
       await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Assistant</b>\n\nFinal answer follows in separate message(s).").catch(renderLog.swallow("warn", "editText final-answer pointer failed", { chatId: turn.chatId, messageId: turn.replaceMessageId }));
       turn.replaceMessageId = undefined;
-      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown, delivery);
       return sent[0]?.message_id;
     }
     const placeholderId = turn.replaceMessageId;
     try {
-      await deps.transport.editText(turn.chatId, placeholderId, html, richMarkdown);
+      await deps.transport.editText(turn.chatId, placeholderId, html, richMarkdown, delivery);
       return placeholderId;
     } catch (err) {
       // Edit failed (message deleted / too many edits). Fall back to a new message.
       renderLog.debug("editText failed; falling back to sendText", { chatId: turn.chatId, messageId: placeholderId, err });
       turn.replaceMessageId = undefined;
-      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown, delivery);
       return sent[0]?.message_id;
     }
   };

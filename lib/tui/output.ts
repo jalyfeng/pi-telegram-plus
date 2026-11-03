@@ -702,7 +702,8 @@ export class OutputCapture {
       });
       return;
     }
-    await this.transport.editText(binding.telegram.chatId, binding.telegram.messageId, text)
+    // The final content is what the user came for: kept across an outage and sent on reconnect.
+    await this.transport.editText(binding.telegram.chatId, binding.telegram.messageId, text, undefined, final ? { mustDeliver: true } : undefined)
       .catch(outputLog.swallow("debug", "edit command output failed", { chatId: binding.telegram.chatId }));
   }
 

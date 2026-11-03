@@ -37,7 +37,11 @@ export function createActiveTelegramTransport(
         sendButtons: (chatId, text, rows, messageThreadId, replyToMessageId) => run<TelegramSentMessage>({ message_id: 0 }, () => (
             transport.sendButtons(chatId, text, rows, messageThreadId, replyToMessageId)
         )),
-        editText: (chatId, messageId, text, richMarkdown) => run<void>(undefined, () => transport.editText(chatId, messageId, text, richMarkdown)),
+        editText: (chatId, messageId, text, richMarkdown, delivery) => run<void>(undefined, () => (
+            delivery
+                ? transport.editText(chatId, messageId, text, richMarkdown, delivery)
+                : transport.editText(chatId, messageId, text, richMarkdown)
+        )),
         editButtons: (chatId, messageId, text, rows) => run<void>(undefined, () => transport.editButtons(chatId, messageId, text, rows)),
         answerCallbackQuery: (callbackQueryId, text) => run<void>(undefined, () => transport.answerCallbackQuery(callbackQueryId, text)),
         deleteMessage: (chatId, messageId) => run<void>(undefined, () => transport.deleteMessage(chatId, messageId)),

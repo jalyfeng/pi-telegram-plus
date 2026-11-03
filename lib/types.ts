@@ -205,6 +205,14 @@ export type TelegramTurn = {
   attachmentsSent?: boolean;
 };
 
+/**
+ * Per-send options. `mustDeliver` marks content the user has to see (a final
+ * reply, a closing edit): when Telegram is unreachable it is kept and sent on
+ * reconnect instead of being dropped. `heldSince` is set only when a kept
+ * notice is replayed, so its lifetime counts from the first failure.
+ */
+export type TelegramDelivery = { maxAttempts?: number; mustDeliver?: boolean; heldSince?: number };
+
 export type TelegramTransport = {
   removeInlineKeyboard(chatId: number, messageId: number): Promise<void>;
   /**
@@ -220,7 +228,7 @@ export type TelegramTransport = {
     messageThreadId?: number,
     replyToMessageId?: number,
     richMarkdown?: string,
-    options?: { maxAttempts?: number },
+    options?: TelegramDelivery,
   ): Promise<TelegramSentMessage[]>;
   sendButtons(
     chatId: number,
@@ -230,7 +238,7 @@ export type TelegramTransport = {
     replyToMessageId?: number,
   ): Promise<TelegramSentMessage>;
   /** See `sendText` for `richMarkdown`. */
-  editText(chatId: number, messageId: number, text: string, richMarkdown?: string): Promise<void>;
+  editText(chatId: number, messageId: number, text: string, richMarkdown?: string, options?: TelegramDelivery): Promise<void>;
   editButtons(chatId: number, messageId: number, text: string, rows: TelegramButton[][]): Promise<void>;
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
   deleteMessage(chatId: number, messageId: number): Promise<void>;

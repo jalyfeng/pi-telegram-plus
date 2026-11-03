@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { createTelegramTransport, telegramApi, TelegramApiRequestError, __resetRichMessagesForTests } from "../telegram-api.ts";
 import type { TelegramConfig } from "../types.ts";
 import { __drainAndListFiles, __resetSinkForTests, initLogger } from "../logger.ts";
+import { takePendingNotices } from "../pending-notices.ts";
 
 type FetchImpl = typeof fetch;
 
@@ -436,5 +437,108 @@ describe("createTelegramTransport — Rich Messages (native Markdown tables)", (
 
     expect(calls.map((call) => call.url.split("/").pop())).toEqual(["editMessageText", "editMessageText"]);
     expect(calls[1].body).toMatchObject({ parse_mode: "HTML", text: "<b>Project</b>" });
+  });
+});
+describe("createTelegramTransport — must-deliver sends survive an outage (P2-43)", () => {
+  let originalFetch: FetchImpl;
+  let logDir: string;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    logDir = freshLogDir();
+    __resetSinkForTests();
+    initLogger({ dir: logDir, level: "debug" });
+    takePendingNotices();
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    takePendingNotices();
+    await rm(logDir, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  const outage = () => new Response("Bad Gateway (mock outage)", { status: 502 });
+
+  it("a must-deliver reply that fails on an outage is queued with its reply target and resolves", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await expect(
+      transport.sendText(42, "<b>reply</b>", 7, 99, undefined, { mustDeliver: true }),
+    ).resolves.toEqual([]);
+
+    const held = takePendingNotices();
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ chatId: 42, messageThreadId: 7, replyTo: 99, html: "<b>reply</b>", mustDeliver: true });
+  });
+
+  it("a send without mustDeliver is not queued and still rejects", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await expect(transport.sendText(42, "progress")).rejects.toThrow(/502/);
+    expect(takePendingNotices()).toEqual([]);
+  });
+
+  it("a non-transient rejection of a must-deliver send is not queued", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ ok: false, description: "Bad Request: message is too long" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    })) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await expect(transport.sendText(42, "x", undefined, undefined, undefined, { mustDeliver: true })).rejects.toThrow(/too long/);
+    expect(takePendingNotices()).toEqual([]);
+  });
+
+  it("only the chunks that were not sent are queued when an outage hits a multi-chunk reply", async () => {
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1;
+      return calls === 1 ? telegramResponse(true, { message_id: 1 }) : outage();
+    }) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+    const text = Array.from({ length: 3 }, (_, i) => `<b>part ${i}</b> ${"x".repeat(3_000)}`).join("\n\n");
+
+    await transport.sendText(42, text, undefined, undefined, undefined, { mustDeliver: true });
+
+    const held = takePendingNotices();
+    expect(held.length).toBeGreaterThanOrEqual(1);
+    expect(held.every((notice) => notice.mustDeliver === true)).toBe(true);
+    expect(held.map((notice) => notice.html).join("")).not.toContain("part 0");
+    expect(held[0].html).toContain("part 1");
+  });
+
+  it("a must-deliver edit that fails on an outage is queued, and a second failed edit replaces it", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await transport.editText(42, 5, "first", undefined, { mustDeliver: true });
+    await transport.editText(42, 5, "second", undefined, { mustDeliver: true });
+
+    const held = takePendingNotices();
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ chatId: 42, editMessageId: 5, html: "second", mustDeliver: true });
+  });
+
+  it("a later successful edit of the same message drops the queued older edit", async () => {
+    let failing = true;
+    globalThis.fetch = vi.fn(async () => (failing ? outage() : telegramResponse(true, true))) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await transport.editText(42, 5, "older", undefined, { mustDeliver: true });
+    failing = false;
+    await transport.editText(42, 5, "newer");
+
+    expect(takePendingNotices()).toEqual([]);
+  });
+
+  it("a replayed edit that fails again keeps the first failure time", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await transport.sendText(42, "again", undefined, undefined, undefined, { mustDeliver: true, heldSince: 1_000 });
+
+    expect(takePendingNotices(1_000)[0]).toMatchObject({ createdAt: 1_000 });
   });
 });
