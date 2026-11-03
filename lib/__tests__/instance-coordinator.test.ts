@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TelegramInstanceCoordinator, isGenuineFailover, isLockContentionError, telegramTokenHash, type TelegramActiveInstance } from "../instance-coordinator.ts";
+import { TelegramInstanceCoordinator, formatFailoverNotice, isGenuineFailover, isLockContentionError, telegramTokenHash, type TelegramActiveInstance } from "../instance-coordinator.ts";
 
 const TOKEN = "123456:very-secret-token";
 const STARTED_AT = "2026-01-01T00:00:00.000Z";
@@ -106,7 +106,9 @@ describe("TelegramInstanceCoordinator", () => {
             generation: 2,
             reason: "failover",
             previousInstanceId: "instance-a",
+            previousCwd: "/workspace/a",
             previousLabel: "a",
+            cwd: "/workspace/b",
             label: "b",
         });
         expect(snapshot.instances.map((instance) => instance.id)).toEqual(["instance-b"]);
@@ -313,24 +315,58 @@ describe("TelegramInstanceCoordinator", () => {
 
     describe("isGenuineFailover", () => {
         const activeOf = (overrides: Partial<TelegramActiveInstance>): TelegramActiveInstance => ({
-            instanceId: "instance-b", generation: 2, updatedAt: STARTED_AT, reason: "failover", ...overrides,
+            instanceId: "instance-b", generation: 2, updatedAt: STARTED_AT, reason: "failover",
+            cwd: "/workspace/b", label: "b",
+            previousInstanceId: "instance-a", previousCwd: "/workspace/a", previousLabel: "a",
+            ...overrides,
         });
 
-        it("is true when the previous active instance was another instance that is gone", () => {
-            expect(isGenuineFailover(activeOf({ previousInstanceId: "instance-a" }), "instance-b")).toBe(true);
+        it("is true when the replaced active instance was another project", () => {
+            expect(isGenuineFailover(activeOf({}), "instance-b")).toBe(true);
         });
 
-        it("is false when the previous active instance was self (single-instance restart)", () => {
+        it("is false when the replaced active instance was self (single-instance restart)", () => {
             expect(isGenuineFailover(activeOf({ previousInstanceId: "instance-b" }), "instance-b")).toBe(false);
         });
 
+        it("is false when the previous active instance had the same working directory (same project restarted)", () => {
+            expect(isGenuineFailover(activeOf({ previousCwd: "/workspace/b" }), "instance-b")).toBe(false);
+        });
+
+        it("is false when the record has no previous cwd (written by an older version)", () => {
+            expect(isGenuineFailover(activeOf({ previousCwd: undefined, previousLabel: undefined }), "instance-b")).toBe(false);
+        });
+
         it("is false when there was no previous active instance", () => {
-            expect(isGenuineFailover(activeOf({ reason: "initial" }), "instance-b")).toBe(false);
-            expect(isGenuineFailover(activeOf({}), "instance-b")).toBe(false);
+            expect(isGenuineFailover(activeOf({ reason: "initial", previousInstanceId: undefined }), "instance-b")).toBe(false);
         });
 
         it("is false for an explicit switch, even when a previous instance is recorded", () => {
-            expect(isGenuineFailover(activeOf({ reason: "explicit", previousInstanceId: "instance-a" }), "instance-b")).toBe(false);
+            expect(isGenuineFailover(activeOf({ reason: "explicit" }), "instance-b")).toBe(false);
+        });
+    });
+
+    describe("formatFailoverNotice", () => {
+        const active: TelegramActiveInstance = {
+            instanceId: "instance-b", generation: 2, updatedAt: STARTED_AT, reason: "failover",
+            cwd: "/workspace/b", label: "project2",
+            previousInstanceId: "instance-a", previousCwd: "/workspace/a", previousLabel: "project",
+        };
+
+        it("names the replaced and the new project, with the host command name", () => {
+            expect(formatFailoverNotice(active, "omp")).toBe(
+                "⚠️ <b>Telegram instance failover</b>\nThe previous active omp instance (project) went offline. This instance (project2) is now active.",
+            );
+        });
+
+        it("omits the bracketed names that were not recorded", () => {
+            expect(formatFailoverNotice({ ...active, previousLabel: undefined, label: undefined }, "pi")).toBe(
+                "⚠️ <b>Telegram instance failover</b>\nThe previous active pi instance went offline. This instance is now active.",
+            );
+        });
+
+        it("escapes the project names", () => {
+            expect(formatFailoverNotice({ ...active, label: "<b>x</b>" }, "omp")).toContain("(&lt;b&gt;x&lt;/b&gt;)");
         });
     });
 

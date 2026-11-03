@@ -23,6 +23,8 @@ export type TelegramUiContext = ExtensionUIContext & {
   menu: (title: string, options: string[], body?: string) => Promise<string | undefined>;
   /** Remove the keyboard from the live menu message (call when the menu exits). */
   closeMenu: () => Promise<void>;
+  /** Id of the live menu message, while its keyboard is still attached. */
+  menuMessageId: () => number | undefined;
 };
 
 export type TelegramUiRuntime = {
@@ -253,6 +255,7 @@ export function createTelegramUiRuntime(deps: {
           }
         },
         closeMenu: async () => { releaseMenu(); },
+        menuMessageId: () => menuMessageId,
         // custom: opaque host components are drawn by the host and presented to
         // this chat by the DialogBroker (§0.1 #4, decision 48). The plugin no longer
         // re-implements them as Telegram buttons (the old custom-dialogs bridge

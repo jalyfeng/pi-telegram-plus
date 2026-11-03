@@ -117,10 +117,80 @@ describe("replayTelegramHistory", () => {
         });
 
         expect(result).toMatchObject({ messageCount: 2, aborted: false });
-        expect(sent[0]).toContain("Switched to demo");
+        expect(sent[0]).toContain("Switched to project");
+        expect(sent[0]).not.toContain("demo");
         expect(sent[1]).toContain("👤 User");
         expect(sent).toContainEqual(expect.stringContaining("🤖 Assistant"));
         expect(sent.at(-1)).toContain("History replay complete");
+    });
+
+    it("edits the switch menu message into the result, with no buttons, instead of a new message", async () => {
+        const sent: string[] = [];
+        const edits: Array<{ messageId: number; text: string }> = [];
+        const transport: TelegramTransport = {
+            removeInlineKeyboard: async () => undefined,
+            sendText: vi.fn(async (_chatId, text) => {
+                sent.push(text);
+                return [{ message_id: sent.length }];
+            }),
+            sendButtons: async () => ({ message_id: 1 }),
+            editText: vi.fn(async (_chatId, messageId, text) => {
+                edits.push({ messageId, text });
+            }),
+            editButtons: async () => undefined,
+            answerCallbackQuery: async () => undefined,
+            deleteMessage: async () => undefined,
+            sendDocument: async () => undefined,
+            sendPhoto: async () => undefined,
+            sendChatAction: async () => undefined,
+        };
+
+        await replayTelegramHistory({
+            entries: entries.slice(0, 2),
+            config: { tool: "hidden", thinking: "hidden" },
+            transport,
+            target: { chatId: 42, messageThreadId: 7, sourceMessageId: 100, menuMessageId: 555 },
+            instance: { cwd: "/workspace/project2", sessionName: "demo", model: "mock/mock-model", instanceId: "instance-b" },
+        });
+
+        expect(edits).toHaveLength(1);
+        expect(edits[0].messageId).toBe(555);
+        expect(edits[0].text).toContain("Switched to project2");
+        expect(edits[0].text).toContain("cwd:");
+        expect(edits[0].text).toContain("<b>model:</b> mock/mock-model");
+        // The result is not sent a second time; only the replayed items and the completion marker are new messages.
+        expect(sent.some((text) => text.includes("Switched to"))).toBe(false);
+        expect(sent.at(-1)).toContain("History replay complete");
+    });
+
+    it("sends the switch result as a message of its own when there is no menu message", async () => {
+        const sent: string[] = [];
+        const transport: TelegramTransport = {
+            removeInlineKeyboard: async () => undefined,
+            sendText: vi.fn(async (_chatId, text) => {
+                sent.push(text);
+                return [{ message_id: sent.length }];
+            }),
+            sendButtons: async () => ({ message_id: 1 }),
+            editText: vi.fn(async () => undefined),
+            editButtons: async () => undefined,
+            answerCallbackQuery: async () => undefined,
+            deleteMessage: async () => undefined,
+            sendDocument: async () => undefined,
+            sendPhoto: async () => undefined,
+            sendChatAction: async () => undefined,
+        };
+
+        await replayTelegramHistory({
+            entries: entries.slice(0, 2),
+            config: { tool: "hidden", thinking: "hidden" },
+            transport,
+            target: { chatId: 42 },
+            instance: { cwd: "/workspace/project", instanceId: "instance-b" },
+        });
+
+        expect(sent[0]).toContain("Switched to project");
+        expect(transport.editText).not.toHaveBeenCalled();
     });
 
     it("carries a Rich Message payload for replayed assistant tables", () => {

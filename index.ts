@@ -8,7 +8,7 @@ import { createTelegramController, saveIncomingAttachment, type TelegramCommandH
 import { escapeHtml } from "./lib/html.ts";
 import { createHeartbeat } from "./lib/heartbeat.ts";
 import { replayTelegramHistory, type TelegramHistoryEntry } from "./lib/history-replay.ts";
-import { TelegramInstanceCoordinator, isGenuineFailover, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
+import { TelegramInstanceCoordinator, formatFailoverNotice, isGenuineFailover, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
 import { mainOnlyEvents } from "./lib/main-only-pi.ts";
 import { registerTelegramRenderer } from "./lib/renderer.ts";
 import { getActiveSession, hostCommandName, installAgentSessionCapture, isOmpHost } from "./lib/session-capture.ts";
@@ -650,12 +650,9 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
         const chatId = config.activeChatId;
         const previousGeneration = notifiedByToken[tokenHash] ?? 0;
         notifiedByToken[tokenHash] = snapshot.active.generation;
-        const host = hostCommandName();
-        const previousName = snapshot.active.previousLabel ? ` (${escapeHtml(snapshot.active.previousLabel)})` : "";
-        const selfName = snapshot.active.label ? ` (${escapeHtml(snapshot.active.label)})` : "";
         void transport.sendText(
           chatId,
-          `⚠️ <b>Telegram instance failover</b>\nThe previous active ${host} instance${previousName} went offline. This instance${selfName} is now active.`,
+          formatFailoverNotice(snapshot.active, hostCommandName()),
         ).then((sent) => {
           if (sent.length === 0 && notifiedByToken[tokenHash] === snapshot.active.generation) {
             notifiedByToken[tokenHash] = previousGeneration;

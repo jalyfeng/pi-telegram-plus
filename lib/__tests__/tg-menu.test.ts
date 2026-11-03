@@ -910,3 +910,51 @@ describe("Switch instance choice labels", () => {
     ]);
   });
 });
+
+describe("Switch instance hands the menu message to the new active instance", () => {
+  const STAMP = "2026-11-03T00:00:00.000Z";
+
+  it("passes the live menu message id with the switch and ends the menu without another page", async () => {
+    const instances = [
+      { id: "inst-a", pid: 1, startedAt: STAMP, heartbeatAt: STAMP, cwd: "/tmp/p/project", model: "mock/mock-model" },
+      { id: "inst-b", pid: 2, startedAt: STAMP, heartbeatAt: STAMP, cwd: "/tmp/p/project2", model: "mock/mock-model" },
+    ];
+    const switchTo = vi.fn(async () => ({}));
+    const coordinator = {
+      isActive: () => true,
+      listInstances: async () => instances,
+      getActive: () => ({ instanceId: "inst-a", generation: 1 }),
+      switchTo,
+    };
+    const switchDeps = {
+      getCoordinator: () => coordinator,
+      getCurrentChatId: () => 42,
+      stopPolling: async () => undefined,
+      startPolling: () => undefined,
+      requestReconcile: () => undefined,
+      getCurrentTurn: () => undefined,
+      pendingHandoffs: new Set<string>(),
+    } as unknown as SwitchInstanceDeps;
+    const commands = new Map<string, (args: string, ctx: any) => Promise<void>>();
+    registerTgMenuCommand(
+      { registerCommand: (name, options) => { commands.set(name, options.handler); } },
+      {} as any,
+      {} as any,
+      switchDeps,
+    );
+
+    const choices = formatInstanceChoices(instances, "inst-a");
+    const { ui, pages } = makeMenuUi(["🔄 Switch instance", choices[1]]);
+    (ui as unknown as { menuMessageId: () => number }).menuMessageId = () => 555;
+    await commands.get("tg")!("", { cwd: "/tmp", ui });
+
+    expect(switchTo).toHaveBeenCalledWith(
+      "inst-b",
+      expect.objectContaining({ chatId: 42, menuMessageId: 555 }),
+      { instanceId: "inst-a", generation: 1 },
+    );
+    // Main menu, then the instance picker; the switch result is the menu message, so no page follows.
+    expect(pages.map((page) => page.title)).toEqual(["Telegram Management", expect.stringContaining("Switch Telegram")]);
+    expect(ui.closeMenu).toHaveBeenCalled();
+  });
+});

@@ -9,6 +9,9 @@ import type { TgConfigDeps, SessionDeps } from "./register.ts";
 import type { BotRecord, BotRegistry, CapturedAgentSession, TelegramConfig } from "../types.ts";
 import { currentHostName } from "../tui/host.ts";
 import type { TuiHost } from "../tui-bridge.ts";
+
+/** The menu UI plus the Telegram-only id of the live menu message (used by the switch flow). */
+type TgMenuUi = MenuUi & { menuMessageId?: () => number | undefined };
 import { configToolFlow, configThinkingFlow, configRetryFlow, configBashFlow, configModeFlow } from "./tg-config.ts";
 import { formatPairingInstructions } from "../pairing.ts";
 import { formatDebugReport } from "./info.ts";
@@ -109,13 +112,14 @@ async function pickMenu(ui: MenuUi, title: string, options: string[], body?: str
  *  select / input here closes the menu at any depth, instead of returning to
  *  the parent level. confirm is left as is: its boolean cannot tell "No" from
  *  a cancel. Terminal calls of the flows never receive this wrapper. */
-function closeOnCancel(ui: MenuUi): MenuUi {
+function closeOnCancel(ui: TgMenuUi): TgMenuUi {
   return {
     ...ui,
     select: async (title, options) => answered(await ui.select(title, options)),
     input: async (title, placeholder) => answered(await ui.input(title, placeholder)),
     ...(ui.inputSecret ? { inputSecret: async (title: string, placeholder?: string) => answered(await ui.inputSecret!(title, placeholder)) } : {}),
     ...(ui.menu ? { menu: async (title: string, options: string[], body?: string) => answered(await ui.menu!(title, options, body)) } : {}),
+    ...(ui.menuMessageId ? { menuMessageId: ui.menuMessageId } : {}),
   };
 }
 
@@ -157,7 +161,7 @@ export function registerTgMenuCommand(
       // MenuUi is the structural subset of ExtensionUIContext the menu flows
       // consume (plus Telegram-only menu/closeMenu hooks injected by the
       // controller's run-with-UI wrapper).
-      ctx.ui as unknown as MenuUi,
+      ctx.ui as unknown as TgMenuUi,
       deps, configDeps, switchDeps, commandDeps, sessionDeps, ctx.cwd || process.cwd(),
     ),
   });
@@ -166,7 +170,7 @@ export function registerTgMenuCommand(
 // ── Menu driver ─────────────────────────────────────────────────────────────
 
 async function runTgMenu(
-  ui: MenuUi,
+  ui: TgMenuUi,
   deps: TelegramCommandDeps,
   configDeps: TgConfigDeps,
   switchDeps: SwitchInstanceDeps,
@@ -184,7 +188,7 @@ async function runTgMenu(
 }
 
 async function mainMenu(
-  ui: MenuUi,
+  ui: TgMenuUi,
   deps: TelegramCommandDeps,
   configDeps: TgConfigDeps,
   switchDeps: SwitchInstanceDeps,
@@ -526,7 +530,7 @@ async function configMenu(ui: MenuUi, configDeps: TgConfigDeps, sessionDeps?: Se
 
 // ── Switch instance submenu ────────────────────────────────────────────────
 
-async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): Promise<boolean> {
+async function switchInstanceMenu(ui: TgMenuUi, switchDeps: SwitchInstanceDeps): Promise<boolean> {
   const coordinator = switchDeps.getCoordinator();
   if (!coordinator || !coordinator.isActive()) {
     ui.notify(`This ${hostCommandName()} instance is not the active Telegram instance.`, "error");
@@ -553,6 +557,9 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
     return true;
   }
 
+  // The new active instance edits this menu message into the switch result (see
+  // replayTelegramHistory). This instance can no longer send once the switch lands.
+  const menuMessageId = ui.menuMessageId?.();
   const handoffId = randomUUID();
   const pendingHandoffs = switchDeps.pendingHandoffs;
   pendingHandoffs.add(handoffId);
@@ -564,6 +571,7 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
         chatId,
         messageThreadId: turn?.messageThreadId,
         sourceMessageId: turn?.sourceMessageId,
+        ...(menuMessageId === undefined ? {} : { menuMessageId }),
       },
       { instanceId: active.instanceId, generation: active.generation },
     );
@@ -574,5 +582,6 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
       switchDeps.startPolling();
     }
   }
-  return true; // back to main
+  // The menu message now shows the switch result: the /tg menu ends here.
+  return false;
 }
