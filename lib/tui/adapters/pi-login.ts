@@ -17,6 +17,31 @@ import { constructorName } from "./utils.ts";
 
 type HostRecord = Record<string, unknown>;
 
+/**
+ * pi's public `keyHint`, resolved once at extension load (top-level await, as status-footer does) so that
+ * `read` can stay synchronous. Under OMP the pi specifier may not load: then this stays undefined, and
+ * `read` fails explicitly instead of guessing the hint text.
+ */
+const hostKeyHint: typeof import("@earendil-works/pi-coding-agent").keyHint | undefined = await import(
+  "@earendil-works/pi-coding-agent",
+).then(
+  (mod) => mod.keyHint,
+  () => undefined,
+);
+
+/**
+ * The exact key-hint lines login-dialog.js prints as their own `Text` (with the outer parentheses), built with
+ * the same `keyHint` calls and arguments. `keyHint` reads the live keybindings of this process, which are the
+ * ones the host dialog read when it drew the line. Colours are stripped before comparing.
+ */
+function hostKeyHintLines(): Set<string> {
+  if (!hostKeyHint) throw new Error("pi keyHint is unavailable: the login dialog's key hints cannot be matched");
+  const cancel = hostKeyHint("tui.select.cancel", "to cancel");
+  const cancelToSubmit = `${hostKeyHint("tui.select.cancel", "to cancel,")} ${hostKeyHint("tui.select.confirm", "to submit")}`;
+  const close = hostKeyHint("tui.select.cancel", "to close");
+  return new Set([`(${cancel})`, `(${cancelToSubmit})`, `(${close})`].map((line) => stripAnsi(line)));
+}
+
 /** The dynamic content area; its children come and go with the auth step. */
 function contentChildren(component: object): unknown[] | undefined {
   const record = component as HostRecord;
@@ -81,6 +106,7 @@ function bodyLines(component: object, skip?: number): string[] {
   const children = contentChildren(component);
   if (!children) return [];
   const hints = keyHintIndexes(component, children);
+  const hintLines = hostKeyHintLines();
   const lines: string[] = [];
   for (const [index, child] of children.entries()) {
     if (hints.has(index) || index === skip) continue;
@@ -91,7 +117,10 @@ function bodyLines(component: object, skip?: number): string[] {
       continue;
     }
     if (typeof record.text !== "string") continue;
-    for (const raw of stripAnsi(record.text).split("\n")) {
+    const plainText = stripAnsi(record.text);
+    // A Text that is exactly one of pi's own key-hint lines (e.g. "(to cancel)" on a waiting page).
+    if (hintLines.has(plainText)) continue;
+    for (const raw of plainText.split("\n")) {
       const line = raw.trim();
       if (line.length === 0 || line.startsWith("> ")) continue;
       lines.push(line);

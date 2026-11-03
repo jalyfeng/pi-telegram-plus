@@ -172,16 +172,39 @@ describe("piLoginAdapter read: terminal key hints stay off the body", () => {
     expect(model.placeholder).toBeUndefined();
   });
 
-  it("keeps every line of an information page, its last line included", () => {
+  it("keeps every body line of an information page and drops only its close hint", () => {
     const { dialog, ctx } = loginHarness();
-    // No input component in the content area: nothing is skipped.
+    dialog.showInfo("Sign-in finished.", [{ label: "Docs", url: "https://acme.example/docs" }], true);
+    const model = piLoginAdapter.read(dialog, ctx);
+    if (model.kind !== "info") throw new Error(`expected an info model, got ${model.kind}`);
+    expect(model.text.split("\n")).toEqual(["Sign-in finished.", "Docs: https://acme.example/docs"]);
+  });
+
+  it("drops the cancel hint from a waiting page, keeping the message", () => {
+    const { dialog, ctx } = loginHarness();
+    // No input component in the content area: the only hint is the Text pi adds after the message.
     dialog.showWaiting("Waiting for the browser...");
     const model = piLoginAdapter.read(dialog, ctx);
     if (model.kind !== "info") throw new Error(`expected an info model, got ${model.kind}`);
-    const lines = model.text.split("\n");
-    expect(lines[0]).toBe("Waiting for the browser...");
-    expect(lines).toHaveLength(2);
-    expect(lines[1]).toContain("to cancel");
+    expect(model.text).toBe("Waiting for the browser...");
+    expect(JSON.stringify(model)).not.toContain("to cancel");
+  });
+
+  it("drops the close hint from an information page without links", () => {
+    const { dialog, ctx } = loginHarness();
+    dialog.showInfo("Sign-in finished.", [], true);
+    const model = piLoginAdapter.read(dialog, ctx);
+    if (model.kind !== "info") throw new Error(`expected an info model, got ${model.kind}`);
+    expect(model.text).toBe("Sign-in finished.");
+  });
+
+  it("keeps body text that only shares words with a hint", () => {
+    const { dialog, ctx } = loginHarness();
+    // Exact match against the host's own hint string, not a word or substring check.
+    dialog.showInfo("Use the window button to close it, then continue to the next step.", [], false);
+    const model = piLoginAdapter.read(dialog, ctx);
+    if (model.kind !== "info") throw new Error(`expected an info model, got ${model.kind}`);
+    expect(model.text).toBe("Use the window button to close it, then continue to the next step.");
   });
 });
 
