@@ -719,6 +719,30 @@ export function registerTelegramRenderer(
     showFinalError(turn, error, false);
   };
 
+  /** OMP's todo reminder: the incomplete items, shown as the terminal shows them (P2-31). */
+  const TODO_REMINDER_LIST_MAX = 10;
+  const onTodoReminder = (event: { todos?: Array<{ content?: unknown }>; attempt?: number; maxAttempts?: number }): void => {
+    const todos = Array.isArray(event.todos) ? event.todos : [];
+    if (todos.length === 0) return;
+    const count = todos.length;
+    const lines = [`⚠️ ${count} incomplete ${count === 1 ? "todo" : "todos"} — reminder ${event.attempt}/${event.maxAttempts}`];
+    for (const todo of todos.slice(0, TODO_REMINDER_LIST_MAX)) {
+      lines.push(`☐ ${firstLine(typeof todo?.content === "string" ? todo.content : "")}`);
+    }
+    if (count > TODO_REMINDER_LIST_MAX) lines.push(`… +${count - TODO_REMINDER_LIST_MAX} more`);
+    void sendInlineEvent(lines.join("\n")).catch(renderLog.swallow("warn", "todo reminder send failed"));
+  };
+
+  /**
+   * Records the first line of a failed tool result on the turn, as the failure line shows it
+   * (P2-30). The host's own warning for the same failure is then not forwarded (controller).
+   */
+  const rememberToolFailure = (turn: TelegramTurn | undefined, result: unknown): void => {
+    if (!turn) return;
+    const line = extractToolResultParts(result).body.split(/\r?\n/).map((text) => text.trim()).find(Boolean);
+    if (line) turn.lastToolFailure = redactFor(turn, line);
+  };
+
   /** Every event of the main session's subscription, in the order the host emits it. */
   const onSessionEvent = (event: any): void => {
     try {
@@ -730,6 +754,7 @@ export function registerTelegramRenderer(
         case "auto_retry_start": onRetryStart(event); break;
         case "auto_retry_end": onRetryEnd(event); break;
         case "agent_end": onRunSettled(event); break;
+        case "todo_reminder": onTodoReminder(event); break;
         default: break;
       }
     } catch (err) { renderLog.warn("render retry event failed", { err }); }
@@ -842,6 +867,7 @@ export function registerTelegramRenderer(
     const args = toolArgs.get(event.toolCallId);
     toolArgs.delete(event.toolCallId);
     if (level === "hidden") return;
+    if (event.isError) rememberToolFailure(deps.getActiveTurn(), event.result);
     const status = event.isError ? "❌ Tool failed" : "✅ Tool finished";
     if (level === "brief") {
       if (!event.isError) return;

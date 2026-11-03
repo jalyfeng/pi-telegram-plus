@@ -336,3 +336,73 @@ describe("Telegram renderer: provider error and auto-retry status (P2-5)", () =>
     });
   });
 });
+
+describe("Telegram renderer: OMP todo reminder and tool failure repeats (P2-30, P2-31)", () => {
+  it("shows a todo_reminder from the session subscription as the terminal does", async () => {
+    const h = createRetryHarness();
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      h.host({
+        type: "todo_reminder",
+        todos: [{ content: "a", status: "in_progress" }, { content: "b", status: "pending" }],
+        attempt: 1,
+        maxAttempts: 3,
+      });
+      await h.flush();
+    });
+
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].text).toContain("2 incomplete todos — reminder 1/3");
+    expect(h.sent[0].text).toContain("☐ a\n");
+    expect(h.sent[0].text).toContain("☐ b");
+  });
+
+  it("lists at most ten todos and counts the rest", async () => {
+    const h = createRetryHarness();
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    const todos = Array.from({ length: 12 }, (_, index) => ({ content: `item ${index + 1}`, status: "pending" }));
+    await runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      h.host({ type: "todo_reminder", todos, attempt: 2, maxAttempts: 3 });
+      await h.flush();
+    });
+
+    expect(h.sent[0].text).toContain("12 incomplete todos — reminder 2/3");
+    expect(h.sent[0].text).toContain("☐ item 10");
+    expect(h.sent[0].text).not.toContain("☐ item 11");
+    expect(h.sent[0].text).toContain("… +2 more");
+  });
+
+  it("does not forward a host warning that repeats a tool failure already shown in the turn", async () => {
+    const h = createRetryHarness();
+    const turn: TelegramTurn = { chatId: 111, sourceMessageId: 7, queuedAttachments: [] };
+    await runWithTelegramTurn(turn, async () => {
+      await h.emit("agent_start");
+      await h.emit("tool_execution_end", {
+        toolCallId: "todo-1",
+        toolName: "todo",
+        isError: true,
+        result: {
+          content: [{ type: "text", text: "Errors: Missing phase name for append operation\nRemaining items (2):\n  - a [in_progress] (P1)" }],
+          details: {},
+        },
+      });
+      await h.flush();
+    });
+    expect(h.sent.some((item) => item.text.includes("❌ todo"))).toBe(true);
+    expect(turn.lastToolFailure).toBe("Errors: Missing phase name for append operation");
+
+    const forwarded: string[] = [];
+    const notice = createTurnNotice(() => [turn], {
+      sendText: async (_chatId, text) => {
+        forwarded.push(text);
+        return [];
+      },
+    });
+    notice.send(notice.turn()!, "⚠️ Todo update failed: Errors: Missing phase name for append operation Remaining items (2): - a [in_progress] (P1)");
+    notice.send(notice.turn()!, "⚠️ compaction: Compaction freed too little context");
+
+    expect(forwarded).toEqual(["⚠️ compaction: Compaction freed too little context"]);
+  });
+});

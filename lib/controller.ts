@@ -44,10 +44,13 @@ const TURN_NOTICE_DEDUPE_MS = 5000;
 
 /** The host's "Retry failed" notice for a provider error the turn already shows (P2-5).
  * The renderer records the failed attempt on the turn before the host emits that notice. */
-function suppressedByShownError(target: NoticeTarget, html: string): boolean {
+function suppressedByShownError(target: NoticeTarget, html: string, turn: TelegramTurn | undefined): boolean {
   if (html.startsWith("❌ Retry failed") && (target.failedAttemptError !== undefined || target.finalErrorShown !== undefined)) return true;
   const shown = target.finalErrorShown;
-  return shown !== undefined && shown.length > 0 && html.includes(escapeHtml(shown));
+  if (shown !== undefined && shown.length > 0 && html.includes(escapeHtml(shown))) return true;
+  // A host warning that repeats the failure line the renderer already showed for this turn (P2-30).
+  const failure = turn?.lastToolFailure;
+  return failure !== undefined && failure.length > 0 && html.includes(escapeHtml(failure));
 }
 
 /** Forwards host notices raised during a Telegram turn to that turn's chat. The newest
@@ -58,17 +61,21 @@ export function createTurnNotice(
   now: () => number = Date.now,
 ): TurnNotice {
   const lastSent = new Map<string, number>();
+  // The turn each target was taken from, so send() can read the turn's live state.
+  const turnOf = new WeakMap<NoticeTarget, TelegramTurn>();
   return {
     turn(): NoticeTarget | undefined {
       const turn = getTurns().at(-1);
       if (!turn) return undefined;
-      return {
+      const target: NoticeTarget = {
         chatId: turn.chatId,
         messageThreadId: turn.messageThreadId,
         sourceMessageId: turn.sourceMessageId,
         get finalErrorShown() { return turn.finalErrorShown; },
         get failedAttemptError() { return turn.failedAttemptError; },
       };
+      turnOf.set(target, turn);
+      return target;
     },
     send(target, html) {
       const current = now();
@@ -78,7 +85,7 @@ export function createTurnNotice(
       }
       if (lastSent.has(key)) return;
       lastSent.set(key, current);
-      if (suppressedByShownError(target, html)) {
+      if (suppressedByShownError(target, html, turnOf.get(target))) {
         ctrlLog.debug("host notice suppressed: its provider error is already shown in the turn");
         return;
       }

@@ -201,6 +201,11 @@ export type TelegramTurn = {
    * is seen (before any retry event). A host "Retry failed" notice after it is ours to hide.
    */
   failedAttemptError?: string;
+  /**
+   * The raw first line of this turn's last failed tool result, redacted, once the renderer has
+   * shown the tool's failure line. A host warning that repeats it is not sent again.
+   */
+  lastToolFailure?: string;
   queuedAttachments: Array<{ path: string; fileName: string }>;
   attachmentsSent?: boolean;
 };
