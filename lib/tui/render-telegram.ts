@@ -350,6 +350,9 @@ function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire"
   return { text: header(model.title, status, [body]), rows, keyMap, page: 0, pages: 1 };
 }
 
+/** What a tool-approval card tells the user about typed text: the buttons answer; a new message comes after Deny. */
+const APPROVAL_HINT = "Answer with the buttons. To deny and give new instructions, tap Deny and send them as a new message.";
+
 function renderApproval(model: Extract<DialogModel, { kind: "approval" }>, ctx: RenderContext): RenderedDialog {
   const body = model.detail ? `<pre>${escapeHtml(clean(model.detail).slice(0, 900))}</pre>\n` : "";
   const buttons: TelegramButton[] = [];
@@ -360,8 +363,9 @@ function renderApproval(model: Extract<DialogModel, { kind: "approval" }>, ctx: 
     buttons.push(built);
     keyMap.set(String(index), option.key);
   });
-  buttons.push(...cancelRow(ctx));
-  return { text: header(model.title, undefined, [body]), rows: chunk(buttons), keyMap, page: 0, pages: 1 };
+  // A Cancel beside a Deny is the same answer twice, and its name says neither what it does nor what it ends.
+  if (!model.options.some((option) => option.key === "deny")) buttons.push(...cancelRow(ctx));
+  return { text: header(model.title, undefined, [body, `${escapeHtml(APPROVAL_HINT)}\n`]), rows: chunk(buttons), keyMap, page: 0, pages: 1 };
 }
 
 function renderConfirm(model: Extract<DialogModel, { kind: "confirm" }>, ctx: RenderContext): RenderedDialog {
