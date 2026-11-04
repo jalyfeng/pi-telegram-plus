@@ -1,7 +1,9 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import { readBotRegistry, readProjectBinding } from "../config.ts";
+import { readBotRegistry, readProjectBinding, updateBot } from "../config.ts";
+import { getTelegramBotUsername } from "../telegram-api.ts";
+import { log } from "../logger.ts";
 import type { TelegramInstanceMetadata } from "../instance-coordinator.ts";
 import type { TelegramInstanceCoordinator } from "../instance-coordinator.ts";
 import type { MenuUi, TelegramCommandDeps, TelegramConnectionState } from "./telegram-commands.ts";
@@ -307,7 +309,23 @@ async function defaultBotMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string
 
 // ── Bot list (object-first: pick a bot → per-bot actions) ──────────────────
 
+const tgMenuLog = log.child("tg-menu");
+
+/** Store the getMe username of registered bots that have none yet (bots added
+ *  before the username was saved). Runs once per list entry, never per render;
+ *  a bot whose getMe fails keeps no username and is tried again on the next entry. */
+async function backfillBotUsernames(): Promise<void> {
+  const registry = await readBotRegistry();
+  for (const bot of registry.bots) {
+    if (bot.botUsername) continue;
+    const botUsername = await getTelegramBotUsername(bot.token, bot.apiBase)
+      .catch(tgMenuLog.swallow("warn", "getTelegramBotUsername failed while backfilling bot username"));
+    if (botUsername) await updateBot(bot.id, { botUsername });
+  }
+}
+
 async function botListMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): Promise<void> {
+  await backfillBotUsernames();
   while (true) {
     const registry = await readBotRegistry();
     if (registry.bots.length === 0) {

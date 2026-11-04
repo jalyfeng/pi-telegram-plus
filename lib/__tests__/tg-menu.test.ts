@@ -122,7 +122,8 @@ describe("/tg multi-level menu", () => {
     resolvedConfig = undefined;
     pollingActive = false;
     mocks.getTelegramBotUsername.mockReset();
-    mocks.getTelegramBotUsername.mockResolvedValue("testbot");
+    // No username by default, so existing labels stay "no username"; tests that need one set it.
+    mocks.getTelegramBotUsername.mockResolvedValue(undefined);
     pairingMocks.createTelegramPairingCode.mockReset().mockReturnValue("654321");
 
     connectionStateValue = "disconnected";
@@ -222,6 +223,21 @@ describe("/tg multi-level menu", () => {
     await commands.get("tg")!("", makeCtx(ui));
     const botListCall = ui.select.mock.calls[2]; // 3rd select = Bot list (after main + Bots submenu)
     expect(botListCall[1]).toContain(botChoiceFull(bot, true));
+  });
+
+  it("Bots → Bot list stores the getMe username of a bot that has none, once", async () => {
+    const bot = makeBot({ name: "legacy", token: "legacy-token" });
+    await addBot(bot);
+    mocks.getTelegramBotUsername.mockResolvedValue("testbot");
+    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back", "⬅️ Back"] });
+    await commands.get("tg")!("", makeCtx(ui));
+
+    const registry = await readBotRegistry();
+    expect(registry.bots[0].botUsername).toBe("testbot");
+    expect(mocks.getTelegramBotUsername).toHaveBeenCalledTimes(1);
+    expect(mocks.getTelegramBotUsername).toHaveBeenCalledWith("legacy-token", undefined);
+    // The label the list shows now carries the stored username.
+    expect(ui.select.mock.calls[2][1]).toContain(botChoiceFull({ ...bot, botUsername: "testbot" }, true));
   });
 
   it("Bots → Add bot → adds bot to registry", async () => {
