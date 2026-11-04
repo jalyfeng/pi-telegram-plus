@@ -12,6 +12,11 @@ function formatFooterLikeTokenCount(value: number): string {
   return `${Math.round(value / 1_000_000)}M`;
 }
 
+/** Context token counts as the status line writes them: "7.8K", "200K", "1.2M". */
+function formatContextTokens(value: number): string {
+  return formatFooterLikeTokenCount(value).toUpperCase();
+}
+
 const STATUS_TEXT_LIMIT = 200;
 
 function truncateStatusText(value: string | undefined): string | undefined {
@@ -60,14 +65,21 @@ export function buildStatusSnapshot(session: CapturedAgentSession): string {
       ? "🟡 queueing"
       : "⚪ idle";
 
-  const contextDisplay = contextPercent === null || contextPercent === undefined
-    ? `?/${contextWindow}`
-    : `${contextPercent.toFixed(1)}%/${contextWindow}`;
+  // <used> / <total> (<percent>), e.g. "7.8K / 200K (3.9%)"; "?" for a part the host did not report.
+  const contextTokens = usage?.tokens;
+  const contextTotal = formatContextTokens(contextWindow);
+  const contextDisplay = typeof contextTokens === "number" && typeof contextPercent === "number"
+    ? `${formatContextTokens(contextTokens)} / ${contextTotal} (${contextPercent.toFixed(1)}%)`
+    : `? / ${contextTotal}`;
 
   // Labels are hard-coded, so escaping is unnecessary; only the value is dynamic.
   const line = (label: string, value: string | number | undefined | null): string =>
     `  <b>${label}</b>  ${escapeHtml(value === undefined || value === null ? "—" : String(value))}`;
 
+  // The queued line is omitted when the host reports no count, rather than showing "undefined".
+  const queuedLines = typeof session.pendingMessageCount === "number"
+    ? [line("queued", String(session.pendingMessageCount))]
+    : [];
   return [
     "<b>🛰 TUI Status</b>",
     "━━━━━━━━━━━━━━━━━━━━",
@@ -80,7 +92,7 @@ export function buildStatusSnapshot(session: CapturedAgentSession): string {
     line("model", model ? `${model.provider}/${model.id}` : "(none)"),
     line("thinking", session.thinkingLevel ?? "off"),
     line("state", stateBadge),
-    line("queued", String(session.pendingMessageCount)),
+    ...queuedLines,
     "",
     "<b>📊 Context &amp; Tokens</b>",
     line("context", contextDisplay),

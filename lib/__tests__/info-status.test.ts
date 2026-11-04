@@ -101,7 +101,7 @@ describe("buildStatusSnapshot", () => {
     const html = buildStatusSnapshot(makeSession({
       contextUsage: { tokens: null, contextWindow: 200000, percent: null },
     }));
-    expect(html).toContain("?/200000");
+    expect(html).toContain("<b>context</b>  ? / 200K");
   });
 
   it("formats token counts using footer-like units", () => {
@@ -351,5 +351,27 @@ describe("formatDebugReport", () => {
     const { registry, handlers } = makeRegistry();
     registerInfoCommands(registry, { getSession: () => undefined });
     expect(handlers.has("debug")).toBe(false);
+  });
+});
+
+describe("buildStatusSnapshot queued and context lines", () => {
+  it("omits the queued line when the host does not report a count", () => {
+    const session = { ...makeSession(), pendingMessageCount: undefined } as unknown as CapturedAgentSession;
+    const html = buildStatusSnapshot(session);
+    expect(html).not.toContain("<b>queued</b>");
+    expect(html).not.toContain("undefined");
+  });
+
+  it("shows the queued count as a number", () => {
+    const html = buildStatusSnapshot(makeSession({ pendingMessageCount: 2 }));
+    expect(html).toContain("<b>queued</b>  2");
+  });
+
+  it("writes context as <used> / <total> (<percent>)", () => {
+    const html = buildStatusSnapshot(makeSession({
+      contextUsage: { tokens: 7800, contextWindow: 200000, percent: 3.9 },
+    }));
+    expect(html).toContain("<b>context</b>  7.8K / 200K (3.9%)");
+    expect(html).not.toContain("3.9%/");
   });
 });
