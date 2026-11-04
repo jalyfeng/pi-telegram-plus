@@ -1552,6 +1552,24 @@ describe("the questionnaire's answers and typed answers in the closing summary (
   }
   const lastText = (transport: { edits: Array<{ text: string }> }) => transport.edits.at(-1)?.text ?? "";
 
+  it("ends a submitted questionnaire with each question and its answer", async () => {
+    const { broker, transport, session } = await questionnaire({
+      kind: "questionnaire",
+      title: "Order",
+      active: 1,
+      canSubmit: true,
+      questions: [
+        { id: "t", prompt: "Pick toppings", multi: true, allowCustom: false, answered: true, answers: ["cheese", "olive"], items: [] },
+        { id: "s", prompt: "Pick a size", multi: false, allowCustom: false, answered: true, answers: ["large"], items: [] },
+      ],
+    });
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "k", arg: "enter" });
+    await settle();
+
+    expect(lastText(transport)).toContain("Pick toppings: cheese, olive");
+    expect(lastText(transport)).toContain("Pick a size: large");
+  });
+
   it("says the message waits for a typed answer once Type an answer is tapped", async () => {
     const { broker, transport, session } = await questionnaire({
       kind: "questionnaire",

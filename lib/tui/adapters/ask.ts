@@ -181,12 +181,14 @@ function readRaced(questions: AskQuestion[], state: AskState, title: string): Di
       // it.
       items.push({ key: `custom:${index}`, label: typed, ...(question.multi === true ? { checked: true } : { current: true }) });
     }
+    const answers = typed === undefined ? chosen : [...chosen, typed];
     return {
       id: question.id,
       prompt: question.question,
       multi: question.multi === true,
       allowCustom: question.allowCustom !== false,
-      answered: chosen.length > 0 || typed !== undefined,
+      answered: answers.length > 0,
+      answers,
       items,
     };
   });
@@ -320,7 +322,9 @@ function readHosted(component: object, questions: AskQuestion[], state: AskState
   const model: Question[] = questions.map((question, index) => {
     const chosen = state.answers.get(question.id) ?? [];
     const isLive = index === live;
-    const typedOnHost = isLive && rows.some((row) => row.checked && !row.key.startsWith("option:"));
+    // The typed answer, when the host shows one on the active list: a checked row that is not an option.
+    const typedOnHost = isLive ? rows.find((row) => row.checked && !row.key.startsWith("option:")) : undefined;
+    const answers = typedOnHost === undefined ? chosen : [...chosen, typedOnHost.label];
     const items: DialogItem[] = question.options.map((option, optionIndex) => ({
       ...optionItemOf(question, index, optionIndex, chosen.includes(option.label)),
       focused: isLive && selected === `option:${optionIndex}`,
@@ -330,7 +334,8 @@ function readHosted(component: object, questions: AskQuestion[], state: AskState
       prompt: question.question,
       multi: question.multi === true,
       allowCustom: question.allowCustom !== false,
-      answered: chosen.length > 0 || typedOnHost,
+      answered: answers.length > 0,
+      answers,
       items,
     };
   });

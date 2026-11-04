@@ -46,6 +46,8 @@ export type Question = {
   /** A free-text answer is accepted for this question. */
   allowCustom: boolean;
   answered: boolean;
+  /** What is answered so far: the chosen option labels, or the typed text. Read from the adapter's own record, not the rows. */
+  answers?: string[];
 };
 
 export type DialogModel =

@@ -169,6 +169,14 @@ function confirmButtonLabel(model: DialogModel, yes: boolean): string {
   return yes ? "Yes" : "No";
 }
 
+/** A questionnaire's answers as summary lines: one `Question: answer, answer` line per answered question. */
+function answerLines(model: DialogModel): string[] {
+  if (model.kind !== "questionnaire") return [];
+  return model.questions
+    .filter((question) => (question.answers?.length ?? 0) > 0)
+    .map((question) => `${question.prompt}: ${(question.answers ?? []).join(", ")}`);
+}
+
 /** A typed answer as the closing summary names it: its text on one line, cut short when it is long. */
 function typedAnswerLabel(text: string): string {
   const line = text.replace(/\s+/g, " ").trim();
@@ -759,7 +767,14 @@ export class DialogBroker {
     // The baseline (`drawn`) is taken after the act, from the model it leaves behind: what the act
     // itself changes is part of this tap. Until then the marker has no baseline and no draw judges it.
     const buttonKey = resolved.action.type === "key" ? resolved.action.name : resolved.action.type === "choose" ? resolved.action.key : undefined;
-    session.telegramAction = { cancelled, ...(buttonKey !== undefined ? { key: buttonKey } : {}) };
+    // A questionnaire's submit names each question and its answer, which the dialog no longer shows once it closes.
+    const submitted = resolved.action.type === "submit" ? answerLines(model) : [];
+    const summary = submitted.length > 0 ? [`✅ ${resolved.label}`, ...submitted].join("\n") : undefined;
+    session.telegramAction = {
+      cancelled,
+      ...(buttonKey !== undefined ? { key: buttonKey } : {}),
+      ...(summary !== undefined ? { summary } : {}),
+    };
     const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
       session.telegramAction = previousAction;
