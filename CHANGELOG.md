@@ -42,8 +42,7 @@ missing or mislabelled cannot be published.
   A tab, scope or row's active marker is not written into the closing summary. Pickers show the preview text of
   the highlighted item (model facts, role chips), and `/resume` shows its title and the pin on pinned sessions.
   Panel text keeps stacked columns apart and drops bare meters (`/session`). The prompt title and the input
-  placeholder show as plain text. The OAuth paste code is secret input. The `/mcp add` name step shows its
-  input rule. `/cleanse` shows its prompt title.
+  placeholder show as plain text. The OAuth paste code is secret input. `/cleanse` shows its prompt title.
 - **Questionnaires and inputs end with their answers.** A submitted questionnaire lists each question's answer.
   A typed answer to `ask` is written as the answer text; a plain input keeps "Sent an answer", and secret input
   stays hidden. A list closed in the terminal after a Telegram answer keeps that answer and adds
