@@ -96,7 +96,7 @@ When a command or turn you started from Telegram makes the host ask something, t
 | pi built-in pickers: models, scoped models, sessions (`/resume`), fork/clone messages, settings (with search and submenus), project trust, login providers | Read from the component's own fields; your choice is applied through the host's input path |
 | pi login prompts (API key, pasted codes) | Always treated as secrets: your reply is deleted from the chat right after it is used and never echoed back. Remembered secrets are masked as `***` in everything the plugin sends afterwards; see [docs/compatibility.md](docs/compatibility.md#secrets) for the limits |
 | OMP built-in pickers and settings (`/model` including the role assignment step, `/settings`, `/login`, `/agents`, …) | Read from the components' semantic description and answered with structured events |
-| OMP text panels and reports (`/session`, `/changelog`, `/hotkeys`, `/jobs`, `/usage`, `/mcp`, …) | Read from the components' semantic description and shown as text with the panel's own buttons |
+| OMP text panels and reports (`/session`, `/changelog`, `/hotkeys`, `/jobs`, `/usage`, …) | Read from the components' semantic description and shown as text with the panel's own buttons |
 | Anything the plugin cannot model | A plain notice — "the terminal shows a dialog Telegram cannot handle, please answer it there" — with a single Cancel button. The plugin never guesses keystrokes or mirrors screen text |
 
 A new command from the same chat while one of its dialogs is open closes that dialog first; `/stop` cancels it.
@@ -128,6 +128,7 @@ A new command from the same chat while one of its dialogs is open closes that di
 ### 🚧 Not yet supported
 - **`/tree`** — not available from Telegram (pi and OMP). Use the terminal.
 - **`/copy`** — not available from Telegram (pi and OMP). Use the terminal.
+- **`/mcp`** — not available from Telegram (pi and OMP). Use the terminal.
 - **OMP `/setup`** — the setup wizard is not available from Telegram yet. Run it in the terminal.
 - **OMP `/branch`** — stepping back through earlier points is not available from Telegram yet; only the current point can be chosen. Use the terminal to pick an earlier point.
 - **OMP `/extensions`** — an entry that is disabled by a master switch still shows a button on Telegram, but the host ignores the tap. Turn it on from the terminal.
