@@ -101,7 +101,7 @@ function itemLabel(item: DialogItem, multi = false): string {
   const current = item.current ? "✓" : "";
   const marker = [checkbox, cursor, current].filter((part) => part !== "").join("");
   const value = item.value ? `: ${shorten(item.value, 18)}` : "";
-  return shorten(`${marker}${marker ? " " : ""}${item.label}${value}`, MAX_LABEL);
+  return shorten(`${marker}${marker ? " " : ""}${item.mark ?? ""}${item.label}${value}`, MAX_LABEL);
 }
 
 /** Item buttons, one per row, labelled with cursor/state markers. */
@@ -263,7 +263,7 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
     const values = item.values ?? [];
     if (item.hasSubmenu) {
       const arg = `${page}.${index}`;
-      const built = button(`▸ ${shorten(`${item.label}${item.value ? `: ${item.value}` : ""}`, MAX_LABEL)}`, ctx, "m", arg);
+      const built = button(`▸ ${shorten(`${item.mark ?? ""}${item.label}${item.value ? `: ${item.value}` : ""}`, MAX_LABEL)}`, ctx, "m", arg);
       if (!built) return;
       rows.push([built]);
       keyMap.set(arg, item.key);

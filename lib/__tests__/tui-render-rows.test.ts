@@ -204,6 +204,13 @@ describe("host detail shown as message text (Y-2)", () => {
     expect(texts(rows)).toEqual([["✅ Yes", "❌ No"]]);
   });
 
+  it("draws an item's mark before its label, on the button and in the body", () => {
+    const model: DialogModel = { kind: "select", title: "Logout", items: [{ key: "a", label: "MockAuth", mark: "● " }], total: 1 };
+    const { rows, text } = renderDialog(model, CTX);
+    expect(texts(rows)).toContainEqual(["● MockAuth"]);
+    expect(text).toContain("● MockAuth");
+  });
+
   it("declines with No when the host names only its confirm button", () => {
     const { rows } = renderDialog({ kind: "confirm", title: "Delete session?", confirmLabel: "Delete" }, CTX);
     expect(texts(rows)).toEqual([["Delete", "No"]]);

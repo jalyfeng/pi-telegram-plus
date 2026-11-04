@@ -13,7 +13,10 @@ import type { RaceHandle } from "./race.ts";
 export type DialogItem = {
   /** Stable inside one adapter: value/id when present, else "index + label". */
   key: string;
+  /** The item's name alone: a closing summary says this, never the row's mark. */
   label: string;
+  /** A glyph or icon the host draws before the label (a status dot, a pin): on the row, never in a summary. */
+  mark?: string;
   description?: string;
   /** Current value of a settings row. */
   value?: string;

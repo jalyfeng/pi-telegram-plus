@@ -1507,6 +1507,17 @@ describe("a read-only panel that closes keeps the page it showed", () => {
     expect(edit?.text).not.toContain("line 0 ");
   });
 
+  it("ends a choice with the item's name, not the mark the row draws before it", async () => {
+    const choice: DialogModel = { kind: "select", title: "Logout", items: [{ key: "a", label: "MockAuth (test only)", mark: "● " }], total: 1 };
+    const { broker, transport, session } = await openedPanel(choice);
+    session.keyMap.set(session.generation, new Map([["a", "a"]]));
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "c", arg: "a" });
+    await settle();
+
+    expect(lastEdit(transport)?.text).toContain("✅ MockAuth (test only)");
+    expect(lastEdit(transport)?.text).not.toContain("●");
+  });
+
   it("still ends a choice with its answer rather than the panel status", async () => {
     const choice: DialogModel = { kind: "select", title: "Pick", items: [{ key: "a", label: "alpha" }], total: 1 };
     const { broker, transport, session } = await openedPanel(choice);
