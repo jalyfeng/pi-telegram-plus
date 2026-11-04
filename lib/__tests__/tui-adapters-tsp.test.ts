@@ -2320,3 +2320,23 @@ describe("tsp settings row warning marker (#35)", () => {
     ]);
   });
 });
+
+describe("tsp picker title from the host's own title field (#37)", () => {
+  it("uses the component's title when the picker describes none (the session picker)", () => {
+    const tree = { k: "picker", p: { items: [{ id: "a", label: "alpha" }], order: ["a"], query: "" } };
+    const component = { ...makeComponent(tree), title: "Resume Session (current folder)" };
+    const model = asSelect(tspPickerAdapter.read(component, ctxFor()));
+    expect(model.title).toBe("Resume Session (current folder)");
+  });
+
+  it("keeps the picker's own title over the component field", () => {
+    const tree = { k: "picker", p: { title: "Models", items: [{ id: "a", label: "alpha" }] } };
+    const component = { ...makeComponent(tree), title: "Something else" };
+    expect(asSelect(tspPickerAdapter.read(component, ctxFor())).title).toBe("Models");
+  });
+
+  it("falls back to Select when neither the picker nor the component names a title", () => {
+    const tree = { k: "picker", p: { items: [{ id: "a", label: "alpha" }] } };
+    expect(asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor())).title).toBe("Select");
+  });
+});

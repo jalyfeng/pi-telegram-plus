@@ -721,7 +721,10 @@ export const tspPickerAdapter: DialogAdapter = {
     const extraActions = search && search.query !== ""
       ? [...barExtras, { label: "✖ Clear search", key: CLEAR_SEARCH_KEY }]
       : barExtras;
-    const title = typeof props.title === "string" ? props.title : "Select";
+    // A picker that names no title of its own (the session picker) takes the
+    // title its component carries: the host's own header, e.g. "Resume Session (current folder)".
+    const ownerTitle = (found.owner as { title?: unknown }).title;
+    const title = typeof props.title === "string" ? props.title : typeof ownerTitle === "string" && ownerTitle !== "" ? ownerTitle : "Select";
     const subtitle = pending
       ? `${tspText(pending.label) || pending.id}: choose a ${pickerNoun(props)}`
       : tspText(props.subtitle) || undefined;
