@@ -45,8 +45,8 @@ missing or mislabelled cannot be published.
   input rule. `/cleanse` shows its prompt title.
 - **Questionnaires and inputs end with their answers.** A submitted questionnaire lists each question's answer.
   A typed answer to `ask` is written as the answer text; a plain input keeps "Sent an answer", and secret input
-  stays hidden. A list closed in the terminal after a Telegram answer ends with "Answered in the terminal"
-  instead of repeating the tap's answer.
+  stays hidden. A list closed in the terminal after a Telegram answer keeps that answer and adds
+  "Answered in the terminal".
 - **Dialog notices stay tidy.** The "A dialog is waiting" notice is removed when its dialog closes. A Telegram
   command's notices no longer print in the terminal. The terminal input no longer keeps the Telegram command's
   text: your draft comes back as soon as the command is taken.
