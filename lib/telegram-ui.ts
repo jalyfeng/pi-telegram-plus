@@ -30,6 +30,8 @@ export type TelegramUiContext = ExtensionUIContext & {
   closeMenu: () => Promise<void>;
   /** Id of the live menu message, while its keyboard is still attached. */
   menuMessageId: () => number | undefined;
+  /** End the live menu page: the question and the answer stay on it, the keyboard goes. */
+  menuEnd: (title: string, body?: string, answer?: string) => Promise<void>;
 };
 
 export type TelegramUiRuntime = {
@@ -338,6 +340,11 @@ export function createTelegramUiRuntime(deps: {
           }
         },
         closeMenu: async () => { releaseMenu(); },
+        menuEnd: async (title, body, answer) => {
+          if (menuMessageId === undefined) return;
+          menuNotices = answer === undefined ? [] : [answer];
+          await drawMenu(redact(title), body === undefined ? undefined : redact(body), []);
+        },
         menuMessageId: () => menuMessageId,
         // custom: opaque host components are drawn by the host and presented to
         // this chat by the DialogBroker (§0.1 #4, decision 48). The plugin no longer

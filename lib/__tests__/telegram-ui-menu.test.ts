@@ -275,6 +275,24 @@ describe("telegram ui inside a live /tg menu", () => {
     expect(transport.sendText).not.toHaveBeenCalled();
   });
 
+  it("menuEnd ends the page with the answer and no keyboard; a later notice keeps that", async () => {
+    const env = setup();
+    const { transport, ui } = env;
+    const first = ui.menu("📁 Project", ["🟢 Connected → Disconnect"]);
+    await press(env, 100, "🟢 Connected → Disconnect");
+    await first;
+
+    await ui.menuEnd!("Disconnect Telegram for this folder?", "Telegram will stop responding.", "✅ Yes");
+    const ended = transport.editButtons.mock.calls.at(-1)!;
+    expect(ended[2]).toBe("<b>Disconnect Telegram for this folder?</b>\n\nTelegram will stop responding.\n\n✅ Yes");
+    expect(ended[3]).toEqual([]);
+
+    ui.notify("Telegram disconnected for this folder.");
+    await vi.waitFor(() => expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("✅ Yes\nTelegram disconnected"));
+    expect(transport.editButtons.mock.calls.at(-1)![3]).toEqual([]);
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+  });
+
   it("a select renders its options on the menu message", async () => {
     const env = setup();
     const { transport, ui, runtime } = env;

@@ -558,10 +558,13 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     connectionStateValue = "connected";
     const { ui, pages } = makeMenuUi(["📁 Project", "🟢 Connected → Disconnect"]);
+    const menuEnd = vi.fn(async () => undefined);
+    (ui as unknown as { menuEnd: typeof menuEnd }).menuEnd = menuEnd;
     ui.confirm.mockResolvedValue(true);
     await commands.get("tg")!("", makeCtx(ui));
 
     expect(ui.confirm).toHaveBeenCalledTimes(1);
+    expect(menuEnd).toHaveBeenCalledWith("Disconnect Telegram for this folder?", "Telegram will stop responding. Reconnect only from the terminal with /tg.", "✅ Yes");
     expect(pages.map((page) => page.title)).toEqual(["Telegram Management", "📁 Project"]);
     expect(ui.closeMenu).toHaveBeenCalled();
   });

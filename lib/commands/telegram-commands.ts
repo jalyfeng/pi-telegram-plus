@@ -44,6 +44,8 @@ export type MenuUi = {
   menu?: (title: string, options: string[], body?: string) => Promise<string | undefined>;
   /** Telegram only: drop the keyboard of the live menu message. */
   closeMenu?: () => Promise<void>;
+  /** Telegram only: end the live menu page with its question and answer, no keyboard left. */
+  menuEnd?: (title: string, body?: string, answer?: string) => Promise<void>;
 };
 
 // ── Reusable flow functions (shared by the /tg menu) ───────────────────────

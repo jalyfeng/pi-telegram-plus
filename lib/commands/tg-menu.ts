@@ -122,6 +122,7 @@ function closeOnCancel(ui: TgMenuUi): TgMenuUi {
     ...(ui.inputSecret ? { inputSecret: async (title: string, placeholder?: string) => answered(await ui.inputSecret!(title, placeholder)) } : {}),
     ...(ui.menu ? { menu: async (title: string, options: string[], body?: string) => answered(await ui.menu!(title, options, body)) } : {}),
     ...(ui.menuMessageId ? { menuMessageId: ui.menuMessageId } : {}),
+    ...(ui.menuEnd ? { menuEnd: ui.menuEnd } : {}),
   };
 }
 
@@ -478,11 +479,12 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
         // flow awaits reconcile, so the next render shows the new state.
         await enableProjectFlow(ui, deps, cwd);
       } else {
-        const ok = await ui.confirm(
-          "Disconnect Telegram for this folder?",
-          "Telegram will stop responding. Reconnect only from the terminal with /tg.",
-        );
+        const question = "Disconnect Telegram for this folder?";
+        const message = "Telegram will stop responding. Reconnect only from the terminal with /tg.";
+        const ok = await ui.confirm(question, message);
         if (ok) {
+          // The question and its answer stay on the menu message, with no keyboard.
+          await ui.menuEnd?.(question, message, "✅ Yes");
           await disableProjectFlow(ui, deps, cwd);
           // Disconnected: the menu ends here. Its message keeps the question, the
           // answer and the disconnect notice, with no keyboard left to press.
