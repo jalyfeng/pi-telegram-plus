@@ -2340,3 +2340,19 @@ describe("tsp picker title from the host's own title field (#37)", () => {
     expect(asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor())).title).toBe("Select");
   });
 });
+
+describe("tsp picker pin marker (#38)", () => {
+  it("shows the pin mark the host puts on a pinned row's icon", () => {
+    const tree = {
+      k: "picker",
+      p: {
+        items: [
+          { id: "a", label: "pinned one", icon: "pin" },
+          { id: "b", label: "plain one" },
+        ],
+      },
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.items.map((item) => item.label)).toEqual(["📌 pinned one", "plain one"]);
+  });
+});

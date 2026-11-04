@@ -97,6 +97,8 @@ type PickerItemLike = {
   dot?: unknown;
   /** Column values by column id (`TspPickerItem.facts`); the category of an extension row. */
   facts?: unknown;
+  /** Leading icon name (`TspPickerItem.icon`); the session picker marks a pinned session `pin`. */
+  icon?: unknown;
 };
 
 /** The picker's action strip: chips the user picks after activating an item. */
@@ -700,7 +702,9 @@ export const tspPickerAdapter: DialogAdapter = {
       const detail = item.detail === undefined ? "" : tspText(item.detail);
       const description = [detail, ...pickerFacts(item.facts, props.columns)].filter((part) => part !== "").join(" · ") || undefined;
       const badges = pickerBadges(item.badges);
-      const label = `${pickerStatusMark(item.dot)}${tspText(item.label)}`;
+      // The pin mark leads the label, as the terminal row draws `📌 <name>`.
+      const pin = item.icon === "pin" ? "📌 " : "";
+      const label = `${pin}${pickerStatusMark(item.dot)}${tspText(item.label)}`;
       return {
         key: item.id as string,
         label: item.disabled ? `${label} (disabled)` : label,
