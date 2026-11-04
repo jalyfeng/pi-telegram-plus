@@ -553,6 +553,19 @@ describe("/tg multi-level menu", () => {
     expect(notifyCalls.some((c) => c.message.includes("Telegram disconnected for this folder"))).toBe(true);
   });
 
+  it("Project → Disconnect → Yes ends the menu: no Project page is drawn after it", async () => {
+    const bot = makeBot({ name: "dc", token: "t-dc" });
+    await addBot(bot);
+    connectionStateValue = "connected";
+    const { ui, pages } = makeMenuUi(["📁 Project", "🟢 Connected → Disconnect"]);
+    ui.confirm.mockResolvedValue(true);
+    await commands.get("tg")!("", makeCtx(ui));
+
+    expect(ui.confirm).toHaveBeenCalledTimes(1);
+    expect(pages.map((page) => page.title)).toEqual(["Telegram Management", "📁 Project"]);
+    expect(ui.closeMenu).toHaveBeenCalled();
+  });
+
   it("Project → Disconnect confirm cancel does not disable", async () => {
     const bot = makeBot({ name: "dis-bot", token: "t-d" });
     await addBot(bot);

@@ -482,7 +482,12 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
           "Disconnect Telegram for this folder?",
           "Telegram will stop responding. Reconnect only from the terminal with /tg.",
         );
-        if (ok) await disableProjectFlow(ui, deps, cwd);
+        if (ok) {
+          await disableProjectFlow(ui, deps, cwd);
+          // Disconnected: the menu ends here. Its message keeps the question, the
+          // answer and the disconnect notice, with no keyboard left to press.
+          return false;
+        }
       }
     }
     // loop re-renders Project (binding + live connection state)
