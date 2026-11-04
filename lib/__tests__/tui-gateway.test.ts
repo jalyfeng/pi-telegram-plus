@@ -7,6 +7,9 @@ import type { CommandScope } from "../tui/origin.ts";
 import { FocusTracker } from "../tui/focus.ts";
 import type { TuiBridgeAdapter } from "../tui-bridge.ts";
 import { takePendingNotices } from "../pending-notices.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 
 afterEach(() => {
@@ -899,31 +902,43 @@ describe("command gateway /new across a runtime replacement", () => {
 });
 
 describe("/restart result (#62)", () => {
-  it("queues the result onto the ack for the replacement runtime", async () => {
-    takePendingNotices();
-    const transport = fakeTransport();
-    const origin = new OriginTracker({ isEditorFocused: () => true, readDraft: () => "", writeDraft: () => true });
-    const focus = new FocusTracker();
-    const gateway = new CommandGateway({
-      bridge: fakeBridge(Promise.resolve()),
-      origin,
-      output: new OutputCapture(transport, origin),
-      focus,
-      isEnabled: () => true,
-      hostName: () => "omp",
-      hostState: () => ({ host: "omp", mode: {}, editor: {} }),
-      readDraft: () => "",
-    });
-    gateway.start();
+  it("survives the runtime's replacement: the notice is persisted and drained by the new process", async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "ptp-restart-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      takePendingNotices();
+      const transport = fakeTransport();
+      const origin = new OriginTracker({ isEditorFocused: () => true, readDraft: () => "", writeDraft: () => true });
+      const gateway = new CommandGateway({
+        bridge: fakeBridge(Promise.resolve()),
+        origin,
+        output: new OutputCapture(transport, origin),
+        focus: new FocusTracker(),
+        isEnabled: () => true,
+        hostName: () => "omp",
+        hostState: () => ({ host: "omp", mode: {}, editor: {} }),
+        readDraft: () => "",
+      });
+      gateway.start();
 
-    await gateway.run({ name: "restart", args: "", origin: { chatId: 7 }, transport });
+      // The real order: /restart re-execs the host, so this runtime is disposed about 1 ms after its submit.
+      await gateway.run({ name: "restart", args: "", origin: { chatId: 7 }, transport });
+      gateway.dispose();
 
-    const notices = takePendingNotices();
-    expect(notices).toEqual([expect.objectContaining({
-      chatId: 7,
-      editMessageId: 1,
-      html: "<b>▶️ /restart</b>\n\n✅ Restarted.",
-    })]);
-    gateway.dispose();
+      // The replacement process starts with empty memory; only the disk record survives.
+      (globalThis as Record<symbol, unknown>)[Symbol.for("pi-telegram-plus.pending-notices")] = [];
+      const notices = takePendingNotices();
+      expect(notices).toEqual([expect.objectContaining({
+        chatId: 7,
+        editMessageId: 1,
+        html: "<b>▶️ /restart</b>\n\n✅ Restarted.",
+      })]);
+      expect(takePendingNotices()).toEqual([]);
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+      rmSync(agentDir, { recursive: true, force: true });
+    }
   });
 });

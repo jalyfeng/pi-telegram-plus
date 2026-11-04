@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getAgentDir } from "./config.ts";
 import { log } from "./logger.ts";
 import type { TelegramDelivery, TelegramTransport } from "./types.ts";
 
@@ -110,7 +113,48 @@ export function supersedePendingEdit(chatId: number, messageId: number): void {
 }
 
 /** Drain the queue, dropping notices older than their TTL. */
+/**
+ * A notice that must reach the chat although the host replaces its own process (`/restart`
+ * re-execs the host: memory is lost). It is recorded on disk, and the replacement process
+ * takes it with the rest of the queue.
+ */
+export function queueDurablePendingNotice(notice: PendingNotice): void {
+  const file = durableNoticePath();
+  const list = readDurableNotices(file);
+  list.push(notice);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(list));
+  noticeLog.debug("durable pending notice recorded", { chatId: notice.chatId, file });
+}
+
+function durableNoticePath(): string {
+  return join(getAgentDir(), "pending-notices.json");
+}
+
+function readDurableNotices(file: string): PendingNotice[] {
+  if (!existsSync(file)) return [];
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    return Array.isArray(parsed) ? parsed as PendingNotice[] : [];
+  } catch (error) {
+    noticeLog.warn("durable pending notices unreadable; dropped", { file, error });
+    return [];
+  }
+}
+
+/** Move the durable record into the queue and remove it, so it is delivered once. */
+function takeDurableNotices(): void {
+  const file = durableNoticePath();
+  if (!existsSync(file)) return;
+  const list = readDurableNotices(file);
+  rmSync(file, { force: true });
+  if (list.length === 0) return;
+  noticeLog.debug("durable pending notices taken", { count: list.length });
+  getPendingNoticeQueue().push(...list);
+}
+
 export function takePendingNotices(now = Date.now()): PendingNotice[] {
+  takeDurableNotices();
   const queue = getPendingNoticeQueue();
   return queue.splice(0, queue.length).filter((notice) => {
     const ttl = isMustDeliver(notice) ? MUST_DELIVER_TTL_MS : PENDING_NOTICE_TTL_MS;

@@ -8,7 +8,7 @@
 import { escapeHtml } from "../html.ts";
 import { log } from "../logger.ts";
 import type { TelegramTransport } from "../types.ts";
-import { queuePendingNotice } from "../pending-notices.ts";
+import { queueDurablePendingNotice, queuePendingNotice } from "../pending-notices.ts";
 import type { TuiBridgeAdapter } from "../tui-bridge.ts";
 import type { Origin, OriginTracker } from "./origin.ts";
 import type { OutputCapture } from "./output.ts";
@@ -159,7 +159,8 @@ export class CommandGateway {
     }
     if (messageId === undefined) return true;
     if (resultOnReplace !== undefined) {
-      queuePendingNotice({
+      // The host replaces its process for this command, so the record must be on disk (#62).
+      queueDurablePendingNotice({
         chatId: origin.chatId,
         messageThreadId: origin.messageThreadId,
         editMessageId: messageId,
