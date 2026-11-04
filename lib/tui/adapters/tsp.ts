@@ -1655,6 +1655,16 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
   }
 }
 
+/** The wizard's constraint under its field (`omp.mcpAdd.note`, a plain text): the terminal draws it in brackets under the field. */
+const WIZARD_NOTE_ROLE = "omp.mcpAdd.note";
+
+/** The field's note, in the brackets the terminal puts round it; the note sits after the field, so the prompt scan does not reach it. */
+function promptNote(component: object): string | undefined {
+  const hit = findDescribedNode(component, (node) => isObject(node.p) && node.p.role === WIZARD_NOTE_ROLE && typeof node.p.text === "string");
+  const text = hit ? nodeText(hit.node).trim() : "";
+  return text === "" ? undefined : `[${text}]`;
+}
+
 function findPrompt(component: object): PromptScan | undefined {
   return scanPromptRoot(component, 0, new Set<object>(), { detail: [], detailSeen: new Set<object>(), loginDepth: 0 });
 }
@@ -1935,13 +1945,14 @@ export const tspInputAdapter: DialogAdapter = {
     const title = found.heading ?? promptTitle(found.label) ?? "Input";
     const secret = ownerMasks(found.input.owner) || SECRET_TITLE.test(title) || secretOAuthField(component, found);
     const placeholder = tspText(found.input.props.placeholder).trim();
+    const detail = [found.detail, promptNote(component)].filter((part): part is string => part !== undefined && part !== "").join("\n");
     // An optional step may be left empty: its footer's label (Continue) or "Skip" answers that.
     const skip = wizardOptional(component) ? [{ label: wizardNextLabel(component) ?? "Skip", key: WIZARD_SKIP_KEY }] : undefined;
     return {
       kind: "input",
       title,
       ...(placeholder ? { placeholder } : {}),
-      ...(found.detail === undefined ? {} : { detail: found.detail }),
+      ...(detail === "" ? {} : { detail }),
       ...(found.steps === undefined ? {} : { steps: found.steps }),
       ...(skip === undefined ? {} : { extraActions: skip }),
       secret,

@@ -2449,3 +2449,26 @@ describe("tsp login field is secret (#71)", () => {
     });
   });
 });
+
+describe("tsp wizard name step note (#67)", () => {
+  it("shows the wizard's input rule under the field, in brackets as the terminal draws it", () => {
+    const field = {
+      describe: () => ({ k: "input", p: { text: "github", placeholder: "github" } }),
+      handleNativeEvent: () => undefined,
+    };
+    const component = makeComponent({
+      k: "col",
+      c: [
+        { k: "text", p: { role: "omp.mcpAdd.lead", text: "A unique name: it labels the server in /mcp." } },
+        { k: "text", p: { role: "omp.mcpAdd.title", text: "Name the server" } },
+        field,
+        { k: "text", p: { role: "omp.mcpAdd.note", text: "Letters, numbers, dash, underscore, dot and colon" } },
+      ],
+    });
+    expect(tspInputAdapter.read(component, ctxFor())).toMatchObject({
+      kind: "input",
+      title: "Name the server",
+      detail: "A unique name: it labels the server in /mcp.\n[Letters, numbers, dash, underscore, dot and colon]",
+    });
+  });
+});
