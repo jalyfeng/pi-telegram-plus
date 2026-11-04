@@ -16,6 +16,11 @@ missing or mislabelled cannot be published.
 
 ## [Unreleased]
 
+### Changed
+
+- **`/tree` and `/copy` are terminal-only.** Neither is available from Telegram on pi or OMP: they are left out of
+  the `/` menu and `/tg`, and sending one from Telegram returns a hint. The plugin's own `/copy` is removed.
+
 ## [0.0.13] — 2026-11-04
 
 Telegram now behaves like the host's own terminal: host commands run in the host, host dialogs appear in
