@@ -77,7 +77,7 @@ describe("telegram ui menu() edit-in-place", () => {
     expect(transport.removeInlineKeyboard).toHaveBeenCalledWith(CHAT, 100);
   });
 
-  it("another prompt releases the menu so the next menu renders as a new message", async () => {
+  it("another prompt stays on the menu message and the next menu edits it", async () => {
     const env = setup();
     const { transport, ui } = env;
 
@@ -86,15 +86,15 @@ describe("telegram ui menu() edit-in-place", () => {
     await first;
 
     const confirmed = ui.confirm("Sure?", "really");
-    expect(transport.removeInlineKeyboard).toHaveBeenCalledWith(CHAT, 100);
-    await press(env, 101, "Yes");
+    await press(env, 100, "Yes");
     expect(await confirmed).toBe(true);
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
 
     const again = ui.menu("Main", ["Remove"]);
-    await vi.waitFor(() => expect(transport.sendButtons).toHaveBeenCalledTimes(3));
-    expect(transport.editButtons).not.toHaveBeenCalled();
-    await press(env, 102, "Remove");
-    await again;
+    await press(env, 100, "Remove");
+    expect(await again).toBe("Remove");
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    expect(transport.removeInlineKeyboard).not.toHaveBeenCalledWith(CHAT, 100);
   });
 
   it("notify does not release the menu", async () => {
@@ -105,8 +105,9 @@ describe("telegram ui menu() edit-in-place", () => {
     await first;
     ui.notify("toggled");
     const second = ui.menu("Main", ["Toggle"]);
-    await vi.waitFor(() => expect(transport.editButtons).toHaveBeenCalledTimes(1));
-    expect(transport.editButtons.mock.calls[0][1]).toBe(100);
+    await vi.waitFor(() => expect(transport.editButtons).toHaveBeenCalledTimes(2));
+    expect(transport.editButtons.mock.calls.every((c) => c[1] === 100)).toBe(true);
+    expect(transport.editButtons.mock.calls[0][2]).toContain("toggled");
     await press(env, 100, "Toggle");
     await second;
   });
@@ -164,5 +165,75 @@ describe("telegram ui notify() without a live menu", () => {
       "❌ Must be a number 0-10",
     ]);
     expect(texts.some((t) => /<b>(info|warning|error)<\/b>/.test(t))).toBe(false);
+  });
+});
+
+describe("telegram ui inside a live /tg menu", () => {
+  it("prompts, a result and the next menu stay on the one menu message", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+
+    const first = ui.menu("🤖 Bots", ["➕ Add bot", "Back"]);
+    await press(env, 100, "➕ Add bot");
+    expect(await first).toBe("➕ Add bot");
+
+    const name = ui.input("Bot name");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    runtime.resolveInput(CHAT, "work-bot");
+    expect(await name).toBe("work-bot");
+
+    const token = ui.inputSecret!("Telegram bot token");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    runtime.resolveInput(CHAT, "123456:ABCDEFGH");
+    expect(await token).toBe("123456:ABCDEFGH");
+
+    ui.notify("Bot added: work-bot");
+    const second = ui.menu("🤖 Bots", ["➕ Add bot", "Back"]);
+    await press(env, 100, "Back");
+    expect(await second).toBe("Back");
+
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    expect(transport.sendText).not.toHaveBeenCalled();
+    expect(transport.editButtons.mock.calls.every((c) => c[1] === 100)).toBe(true);
+    expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("Bot added: work-bot");
+    expect(transport.editButtons.mock.calls.at(-1)![2]).not.toContain("Telegram bot token");
+  });
+
+  it("an invalid answer shown on the menu message keeps the prompt open and clears once answered", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+    const first = ui.menu("🔄 Retry", ["Set"]);
+    await press(env, 100, "Set");
+    await first;
+
+    const answer = ui.input("Retry count (0-10)");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    ui.notify("Must be a number 0-10", "error");
+    await vi.waitFor(() => expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("❌ Must be a number 0-10"));
+    runtime.resolveInput(CHAT, "abc");
+    expect(await answer).toBe("abc");
+
+    const retry = ui.input("Retry count (0-10)");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(transport.editButtons.mock.calls.at(-1)![2]).not.toContain("Must be a number");
+    runtime.resolveInput(CHAT, "5");
+    await retry;
+    expect(transport.sendText).not.toHaveBeenCalled();
+  });
+
+  it("a select renders its options on the menu message", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+    const first = ui.menu("⚙️ Config", ["Tool"]);
+    await press(env, 100, "Tool");
+    await first;
+
+    const pick = ui.select("Tool rendering", ["  hidden", "● brief", "  full"]);
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    const button = env.renders.at(-1)!.flat().find((b) => b.text === "  full")!;
+    runtime.resolveInput(CHAT, decodeUiCallback(button.value), 100, true);
+    expect(await pick).toBe("  full");
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
   });
 });
