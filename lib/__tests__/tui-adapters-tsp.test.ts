@@ -2580,3 +2580,23 @@ describe("tsp prefs submenu opened in the terminal (#34)", () => {
     expect(asSettings(tspPrefsAdapter.read(closed, ctxFor())).submenu).toBeUndefined();
   });
 });
+
+describe("tsp prefs submenu as the host really describes it (#34, real dump)", () => {
+  it("reads an open submenu that the page holds as a bare described component child", () => {
+    const props = { ...pageProps(), focus: "theme" };
+    const submenu = { describe: () => ({ k: "col", c: [{ k: "list", p: { selected: "dark" }, c: [] }] }), handleNativeEvent: () => undefined };
+    const events: unknown[] = [];
+    const host = {
+      events,
+      describe: () => ({ k: "prefs", p: props, c: [submenu, { k: "col", p: { role: "omp.prefs.preview.status" }, c: [] }] }),
+      handleNativeEvent: (event: unknown) => {
+        events.push(event);
+        const change = event as { type?: string; item?: unknown; value?: unknown };
+        if (change.type === "change" && typeof change.item === "string") applyPrefsChange(props, change.item, change.value);
+      },
+    };
+    const model = asSettings(tspPrefsAdapter.read(host, ctxFor()));
+    expect(model.submenu?.itemKey).toBe("theme");
+    expect(model.submenu?.model.kind === "select" ? model.submenu.model.items.map((item) => item.key) : []).toEqual(["dark", "light"]);
+  });
+});

@@ -1166,10 +1166,14 @@ const prefsSubmenus = new WeakMap<object, { rowId: string; kind: PrefsSubmenuKin
 /** Owners whose open submenu state came from the terminal's own editor (not from a Telegram tap). */
 const terminalSubmenus = new WeakSet<object>();
 
-/** Whether the page holds the editor the terminal opened: the host's `omp.prefs.editor` child of the prefs node. */
+/**
+ * Whether the page holds the editor the terminal opened. The host places an open submenu among the page's
+ * children: a component child (a `SelectFormField`, described on its own), or a node with the
+ * `omp.prefs.editor` role for a plain editor. The page's previews are plain nodes with other roles.
+ */
 function prefsEditorOpen(node: NativeNodeLike): boolean {
   const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
-  return children.some((child) => isObject(child) && isObject(child.p) && child.p.role === "omp.prefs.editor");
+  return children.some((child) => isObject(child) && (describableChild(child) !== undefined || (isObject(child.p) && child.p.role === "omp.prefs.editor")));
 }
 
 /** A choice's option detail for its current value, when the host gives one. */
