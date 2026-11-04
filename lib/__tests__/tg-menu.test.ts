@@ -240,6 +240,23 @@ describe("/tg multi-level menu", () => {
     expect(ui.select.mock.calls[2][1]).toContain(botChoiceFull({ ...bot, botUsername: "testbot" }, true));
   });
 
+  it("Bots → Bot list → bot → Update picks the field from four buttons, then asks for its value", async () => {
+    const bot = makeBot({ name: "upd", token: "t-upd" });
+    await addBot(bot);
+    const { ui, notifyCalls } = makeScriptedUi({
+      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Update", "name", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
+      input: ["upd-renamed"],
+    });
+    await commands.get("tg")!("", makeCtx(ui));
+
+    const fieldCall = ui.select.mock.calls.find((call) => call[0] === "Field to update");
+    expect(fieldCall?.[1]).toEqual(["token", "name", "allowedUserId", "apiBase"]);
+    expect(ui.input).toHaveBeenCalledTimes(1);
+    expect(ui.input).toHaveBeenCalledWith("New value for name", undefined);
+    expect((await readBotRegistry()).bots[0].name).toBe("upd-renamed");
+    expect(notifyCalls.some((c) => c.message.includes("Bot updated: upd-renamed"))).toBe(true);
+  });
+
   it("Bots → Add bot → adds bot to registry", async () => {
     const { ui, notifyCalls } = makeScriptedUi({
       select: ["🤖 Bots", "➕ Add bot", "⬅️ Back"],
@@ -391,8 +408,8 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     const botChoice = botChoiceFull(bot, true);
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "Bot list", botChoice, "Update", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
-      input: ["allowedUserId", "99999"],
+      select: ["🤖 Bots", "Bot list", botChoice, "Update", "allowedUserId", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
+      input: ["99999"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     const registry = await readBotRegistry();

@@ -238,7 +238,7 @@ describe("Telegram management flows (bot registry + project binding)", () => {
     const bot = makeBot({ name: "mybot", token: "tok-x" });
     await addBot(bot);
     const ctx = makeCtx();
-    ctx.ui.input.mockResolvedValueOnce("allowedUserId");
+    ctx.ui.select.mockResolvedValueOnce("allowedUserId");
     ctx.ui.input.mockResolvedValueOnce("12345");
 
     await updateBotFlow(ctx.ui, deps, projectDir, bot.id);
@@ -262,7 +262,7 @@ describe("Telegram management flows (bot registry + project binding)", () => {
     const bot: BotRecord = { id: crypto.randomUUID(), name: "mybot", token: "tok-x", allowedUserId: 1 };
     await addBot(bot);
     const ctx = makeCtx();
-    ctx.ui.input.mockResolvedValueOnce("allowedUserId");
+    ctx.ui.select.mockResolvedValueOnce("allowedUserId");
     ctx.ui.input.mockResolvedValueOnce("not-a-number");
 
     await updateBotFlow(ctx.ui, deps, projectDir, bot.id);

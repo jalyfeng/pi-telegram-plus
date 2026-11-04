@@ -186,9 +186,9 @@ export async function updateBotFlow(
     ui.notify(`Bot not found: ${botId.slice(0, 8)}`, "error");
     return;
   }
-  const selectedField = field ?? await ui.input("Field to update (token, name, allowedUserId, apiBase)");
-  if (!selectedField) return;
   const validFields = ["token", "name", "allowedUserId", "apiBase"];
+  const selectedField = field ?? await ui.select("Field to update", validFields);
+  if (!selectedField) return;
   if (!validFields.includes(selectedField)) {
     ui.notify(`Invalid field. Choose from: ${validFields.join(", ")}`, "error");
     return;
