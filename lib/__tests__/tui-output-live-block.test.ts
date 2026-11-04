@@ -101,3 +101,24 @@ describe("OutputCapture with a self-updating transcript block", () => {
     expect(text).not.toContain("⣾");
   });
 });
+
+/** A host user-message bubble (OMP's UserMessageComponent): the echo of a submitted message. */
+class FakeUserBubble {
+  text: string;
+  constructor(text: string) {
+    this.text = text;
+  }
+  /** Defined only by the host's user bubble; the structural mark of the echo. */
+  setReaction(_emoji: string): void {}
+}
+
+describe("a host user-message echo is not command output (#60)", () => {
+  it("leaves the echoed goal text off the command message, keeps the command's own lines", async () => {
+    const { output, edits, add } = await setup();
+    add(new FakeUserBubble("tiny goal"));
+    add(new FakeTextLine("Goal set"));
+    const text = await finalText(output, edits);
+    expect(text).toContain("Goal set");
+    expect(text).not.toContain("tiny goal");
+  });
+});

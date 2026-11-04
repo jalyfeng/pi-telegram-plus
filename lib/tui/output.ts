@@ -48,6 +48,12 @@ const CONTENT_MAX_DEPTH = 3;
  * unminified fast path; both pi's and OMP's bash components expose exactly
  * these four methods, which is the rename-proof identity (3E). */
 const BASH_EXECUTOR_CTORS = /^BashExecutionComponent$/;
+
+/** The host's user-message bubble (OMP tui/src/chat/user-message.ts), recognised by the one
+ * method only that component defines: its own name is not used, since minified builds rename it. */
+function isHostUserBubble(child: object): boolean {
+  return typeof (child as { setReaction?: unknown }).setReaction === "function";
+}
 const BASH_EXECUTOR_METHODS = ["setExpanded", "appendOutput", "setComplete", "getOutput"] as const;
 
 /** Containers the host gives its live panels (/btw, /omfg, /cleanse; oh-my-pi@v18.14.1
@@ -537,6 +543,10 @@ export class OutputCapture {
           this.trackBashComponent(child);
           return;
         }
+        // The host's user bubble is the echo of a message it was given (a `/goal` objective, a
+        // queued prompt), not the command's output. Its structural mark is `setReaction`, which
+        // only the host's user-message component defines (#60).
+        if (isHostUserBubble(child)) return;
         const entry = this.captureOf(child);
         if (entry) this.push(entry);
       }, this);
