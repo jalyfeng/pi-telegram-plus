@@ -119,15 +119,17 @@ export function extractToolResultParts(result: unknown): {
 
 /**
  * The display diff a host's edit result carries in `details.diff` (pi and OMP both
- * do), as a markdown code block. Empty when the host gives none; never computed here.
+ * do), as a Telegram code block. Empty when the host gives none; never computed here.
+ * Built as HTML, not as markdown: the diff is not re-parsed, so a fence or a pipe in the
+ * result text around it cannot change its layout.
  */
-function editDiffMarkdown(result: unknown): string {
+function editDiffHtml(result: unknown, redact: (text: string) => string): string {
   const diff = (result as { details?: { diff?: unknown } } | null | undefined)?.details?.diff;
   if (typeof diff !== "string" || !diff.trim()) return "";
   const truncated = diff.length > EDIT_DIFF_LIMIT;
-  const shown = truncated ? diff.slice(0, EDIT_DIFF_LIMIT) : diff;
-  const fence = shown.includes("```") ? "````" : "```";
-  return `${fence}diff\n${shown}${truncated ? "\n(diff truncated)" : ""}\n${fence}`;
+  const shown = (truncated ? diff.slice(0, EDIT_DIFF_LIMIT) : diff).replace(/\n+$/, "");
+  const text = truncated ? `${shown}\n(diff truncated)` : shown;
+  return `<pre><code class="language-diff">${escapeHtml(redact(text))}\n</code></pre>`;
 }
 
 /**
@@ -907,12 +909,13 @@ export function registerTelegramRenderer(
     // from the "never fold" rule, so long ones use an expandable blockquote.
     const parts = extractToolResultParts(event.result);
     const header = `${event.isError ? "❌" : "✅"} <b>${escapeHtml(event.toolName)}</b>`;
-    const diff = event.toolName === "edit" ? editDiffMarkdown(event.result) : "";
+    const turnForRedaction = deps.getActiveTurn();
     const body = withoutHashlineHeaders(event.toolName, parts.body);
-    const resultSource = [body, diff].filter((text) => text.trim()).join("\n\n");
+    const bodyHtml = body.trim() ? markdownToTelegramHtml(redactFor(turnForRedaction, body)) : "";
+    const diffHtml = event.toolName === "edit" ? editDiffHtml(event.result, (text) => redactFor(turnForRedaction, text)) : "";
+    const rendered = [bodyHtml, diffHtml].filter((html) => html.trim()).join("\n\n");
     let resultHtml: string;
-    if (resultSource.trim()) {
-      const rendered = markdownToTelegramHtml(redactFor(deps.getActiveTurn(), resultSource));
+    if (rendered.trim()) {
       const expandable = rendered.length > 600 || rendered.split("\n").length > 8;
       const tag = expandable ? "<blockquote expandable>" : "<blockquote>";
       resultHtml = `${tag}${header}\n${rendered}</blockquote>`;

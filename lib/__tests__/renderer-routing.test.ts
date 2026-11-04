@@ -559,6 +559,27 @@ describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
     expect(edits.at(-1)!.text).toContain("[two.md#B686]");
   });
 
+  it("renders the edit diff as its own code block even when the result text leaves a fence open", async () => {
+    const { emit, edits } = createFullModeHarness();
+    // An unclosed fence in the result text must not swallow or re-wrap the diff.
+    const diff = "-1|a | b\n+1|a | c\n 2|`";
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "edit-f", toolName: "edit", args: { path: "notes.md" } });
+      await emit("tool_execution_end", {
+        toolCallId: "edit-f",
+        toolName: "edit",
+        isError: false,
+        result: { content: [{ type: "text", text: "Updated notes.md\n```" }], details: { diff } },
+      });
+    });
+
+    const final = edits.at(-1)!.text;
+    expect(final).toContain("<pre><code class=\"language-diff\">-1|a | b\n+1|a | c\n 2|`\n</code></pre>");
+    expect(final).not.toContain("```");
+    expect(final).not.toMatch(/^`$/m);
+  });
+
   it("sends the result as a new message when the start message could not be sent", async () => {
     const { emit, sent, edits } = createFullModeHarness({ failStart: true });
 
