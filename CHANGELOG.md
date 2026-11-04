@@ -101,6 +101,8 @@ reimplementation and several settings, so read **Breaking changes** before upgra
   instead of listing terminal keys.
 - **Pairing page** under `/tg` → Bots → Bot list → <bot> → Pairing: show the pairing code, issue a new
   one, or unpair.
+- **OMP `/mcp add` wizard from Telegram.** Its choice steps (for example the transport) are picked from buttons,
+  optional text steps have a Skip button, and the review step shows the summary with Save and Back.
 - **`npm run test:e2e:state`**: does the same operation once in the terminal and once from Telegram on
   fresh hosts and checks that the resulting host state matches.
 
@@ -116,6 +118,34 @@ reimplementation and several settings, so read **Breaking changes** before upgra
   `/update`, `/upgrade`).
 - **`/tg` → Config → Thinking level is shown on OMP only.** pi has its own `/thinking` picker, which now
   reaches Telegram directly.
+- **Commands are described as Telegram runs them.** The `/` menu and `/tg` drop host source tags such as `[t]`;
+  `/copy`, `/hotkeys` and `/quit` describe what Telegram does, and the `/quit` prompt names the running host.
+  Commands the running host does not have are left out of the menu. Terminal-only commands (`/local`, `/dump`,
+  `/open`, `/stats`, `/trace`, `/record`, `/live`, `/git`) are left out too, and sending one from Telegram returns
+  a hint. On OMP, `/cd` is not offered; typing it gets a hint to use `/move` (#28, #29).
+- **Steer takes effect at once.** A Telegram message sent during a running turn is handed to the host without
+  waiting for the turn to end, so `steer` (the default) steers the running turn immediately (#24). A message the
+  host rejects is retried before the messages behind it.
+- **Each tool call is one readable line.** The line names what the call works on (file, pattern, command or
+  question) instead of showing raw JSON, and each call appears once. In full mode each tool call is one message:
+  it is edited into its result, and an edit shows its diff.
+- **`ask` questions are one message.** A recommended option is tagged `(Recommended)`, a typed answer goes into
+  the host's own Other prompt, a single question has no progress line or switch button, and several questions show
+  `Question 1 of 2 · answered: 0`. A question is not sent again while its first send is pending (#22).
+- **`/settings` has one button per setting.** On pi, a two-valued setting is one button showing its current value,
+  and submenu rows show their values. On OMP, the current page's rows come first on page 1, page switches are one
+  compact block, and a choice with more than two options opens a submenu of its options (#23).
+- **`!` / `!!` confirmation and result share one message.** The confirmation offers Yes and No only (`/stop` still
+  cancels), and a refused command turns it into a cancelled notice.
+- **Incoming files are saved in the project.** They go to `.pi/telegram-attachments/` in the session's working
+  directory under their sanitized names; a repeated name gets ` (2)`, ` (3)` before the extension. The prompt
+  lists each attachment once.
+- **Switching instances stays on the `/tg` menu.** The switch result is written onto the menu message. Switching
+  to an instance for the same project restarts nothing and announces no takeover; switch buttons show the project
+  name and model.
+- **Must-deliver replies survive a Telegram outage.** A final reply, or the closing edit of a finished dialog, that
+  still cannot be sent after retries is kept (up to 30 minutes and 200 messages) and sent in order once Telegram
+  answers again. A queued closing edit is sent as plain text, without its buttons.
 
 ### Fixed
 
@@ -183,6 +213,42 @@ reimplementation and several settings, so read **Breaking changes** before upgra
     previous input is now restored either way; text you type while the command runs is kept.
 - **`sendChatAction` honors a custom Bot API endpoint** (`apiBase` / `PI_TELEGRAM_API_BASE`). The typing
   indicator was always sent to the public endpoint. Thanks to BotoVed (#12).
+- **`/stop` always stops the running turn.** It cancels the open dialog and pending input, stops a running `!`
+  command, and aborts the agent turn, then replies with what it stopped. Cancelling a `/tg` submenu (Cancel,
+  `/stop` or Esc) closes the whole menu; only Back goes one level up. Running a command from `/tg` → Commands
+  closes the menu first, and the command's output gets its own message.
+- **Provider retries show in one message.** While the host retries a failed request, the turn's status message
+  shows `Retrying (n/max)`, then either `Recovered after n retries.` or a single final error. A cancelled retry
+  says `⏹️ Retry cancelled.`, and the host's own "Retry failed" notice is not repeated. This works on pi and OMP.
+- **Long replies break at line ends**, not in the middle of a line. Rich Messages no longer show escaped `&lt;`
+  or `&amp;` inside code spans and fenced code blocks.
+- **Replies quote the message they answer.** A message steered or queued into a running turn is the reply target
+  for its own answer, not the turn's first message. A reply to a bot message, including a Rich Message with a table,
+  gives the agent that message's text (#25).
+- **A Telegram prompt sent right after a command** no longer draws its dialog on the finished command's message (#26).
+- **OMP tool approvals offer every host choice.** `Approve <tool> for this session` and the other choices appear as
+  buttons. A message sent while an approval waits denies that call and gives new instructions, as in the terminal.
+- **Disconnecting Telegram no longer freezes OMP.** A dialog opened in the terminal while Telegram is disconnected
+  used to resend itself in a loop that stopped OMP responding (#31). After an OMP sub-agent or side session has run,
+  dialogs still reach Telegram (#32).
+- **pi `/login` (OAuth) links are whole and tappable.** The sign-in link and its instructions are shown in full, the
+  terminal key hints no longer appear, and the login-method step stays in the command's final message.
+- **OMP panels are read in full.** `/debug` shows its title once and its actions answer the dialog; `/context`
+  entries can be opened; `/extensions` shows each row's status dot and category; disabled `/agents` rows stay listed
+  and marked; `/collab`'s QR code is shown as its link; `/share`'s upload is a wait that Cancel stops, and Cancel says
+  `✖ Cancelled`.
+- **Pickers page and search like the terminal.** OMP pickers page by the rows left after filtering, a search gets a
+  Clear search button, and Cancel clears the search before closing. pi's `/resume` searches, renames and deletes
+  sessions from Telegram; its model, login and scoped-model pickers take a search, and `Set as default` works.
+  Rename and delete are refused while the host is still loading a list, and the next tap retries.
+- **Host-control commands send one message.** `/new`, `/reload`, `/import`, `/copy`, `/hotkeys`, `/quit` and `/exit`
+  write their confirmation and result onto the `▶️ /<name>` message. OMP's `/btw`, `/omfg` and `/cleanse` results
+  come back to the command message instead of showing only "Done".
+- **Terminal test runs no longer open a browser.** pi's login opened the desktop browser on every `npm test`; the
+  unit tests now record and fake such launches.
+- **Several smaller fixes.** OMP todo reminders appear, and a host warning that repeats a tool failure is dropped;
+  `/tg` pages, bot details (without the token) and debug info stay on the menu message; OMP's agent picker can set
+  a model override.
 - Several dialog, focus and output-capture fixes found by the end-to-end suites on both hosts.
 
 ## [0.0.12] — 2026-10-19
