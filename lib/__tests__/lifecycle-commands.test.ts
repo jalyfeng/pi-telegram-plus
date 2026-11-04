@@ -169,3 +169,38 @@ describe("registerLifecycleCommands /reload", () => {
     expect(queuedAtReload[0]).toEqual([]);
   });
 });
+
+describe("registerLifecycleCommands /quit answered from Telegram (#63)", () => {
+  const telegramTurn = { chatId: 42, messageThreadId: 7, sourceMessageId: 99, queuedAttachments: [] };
+
+  for (const name of ["quit", "exit"] as const) {
+    it(`/${name} writes ✅ Yes and a stopped line, awaited, before the host exits`, async () => {
+      const order: string[] = [];
+      const editText = vi.fn(async () => {
+        order.push("edit-start");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        order.push("edit-done");
+      });
+      const sendText = vi.fn(async () => [{ message_id: 1 }]);
+      const shutdown = vi.fn(() => { order.push("shutdown"); });
+      const { registry, handlers } = makeRegistry();
+      registerLifecycleCommands(registry, { transport: { editText, sendText } as never });
+      const confirm = vi.fn(async () => true);
+      const notify = vi.fn();
+      const scope = { telegramMessageId: 5 } as unknown as CommandScope;
+
+      await runWithTelegramTurn(telegramTurn, () => runInCommand(scope, () =>
+        handlers.get(name)!.handler("", { ui: { confirm, notify }, shutdown } as never)));
+
+      expect(order).toEqual(["edit-start", "edit-done", "shutdown"]);
+      expect(editText).toHaveBeenCalledTimes(1);
+      const [chatId, messageId, html] = editText.mock.calls[0] as unknown as [number, number, string];
+      expect(chatId).toBe(42);
+      expect(messageId).toBe(5);
+      expect(html).toContain("✅ Yes");
+      expect(html).toContain("stopped");
+      // Nothing is left to send after the exit: the stopped line is the write, not a notify.
+      expect(notify).not.toHaveBeenCalled();
+    });
+  }
+});

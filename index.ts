@@ -212,7 +212,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     getTransport: () => transport,
     getActiveChatId: () => config.activeChatId,
     getActiveTurn: getCurrentActiveTurn,
-  });
+  }, { transport });
 
   // /tg multi-level menu — the single entry point for bot / project /
   // instance management (Bots / Project / Commands / Config / Switch instance).
