@@ -3,7 +3,7 @@ import { registerTelegramRenderer } from "../renderer.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "../turn-context.ts";
 import type { TelegramTransport, TelegramTurn } from "../types.ts";
 
-function createRendererHarness(options: { tool?: "hidden" | "brief" | "full" } = {}) {
+function createRendererHarness(options: { tool?: "hidden" | "brief" | "full"; activeTurn?: () => TelegramTurn | undefined } = {}) {
   const handlers = new Map<string, Array<(event: any) => Promise<void>>>();
   const sent: Array<{ chatId: number; text: string; messageThreadId?: number; replyToMessageId?: number; richMarkdown?: string }> = [];
   const actions: Array<{ chatId: number; action: string; messageThreadId?: number }> = [];
@@ -40,7 +40,7 @@ function createRendererHarness(options: { tool?: "hidden" | "brief" | "full" } =
   registerTelegramRenderer(pi as any, {
     getConfig: () => ({ botToken: "token", activeChatId: 111, tool: options.tool ?? "full", thinking: "brief" }),
     transport,
-    getActiveTurn: () => getCurrentTelegramTurn(),
+    getActiveTurn: options.activeTurn ?? (() => getCurrentTelegramTurn()),
     hasActiveTurns: () => true,
   });
 
@@ -647,5 +647,18 @@ describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
     expect(edits).toHaveLength(0);
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toContain("notes.md");
+  });
+});
+
+describe("Telegram reply target for a host-started turn (#61, #60)", () => {
+  it("quotes the Telegram message that started the host turn when no Telegram turn is running", async () => {
+    // A forced turn, a /loop repeat or a /goal continuation: the host starts it, so no Telegram
+    // turn is active, but the message that started the activity is the reply target.
+    const origin: TelegramTurn = { chatId: 111, sourceMessageId: 77, queuedAttachments: [] };
+    const { emit, sent } = createRendererHarness({ activeTurn: () => origin });
+
+    await emit("message_end", { message: { role: "assistant", content: "forced turn answer" } });
+
+    expect(sent).toEqual([expect.objectContaining({ chatId: 111, replyToMessageId: 77, text: expect.stringContaining("forced turn answer") })]);
   });
 });

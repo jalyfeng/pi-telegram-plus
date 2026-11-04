@@ -55,6 +55,29 @@ function suppressedByShownError(target: NoticeTarget, html: string, turn: Telegr
 
 /** Forwards host notices raised during a Telegram turn to that turn's chat. The newest
  * active turn owns the notice; with no active turn the notice stays in the terminal. */
+/**
+ * The Telegram message that last started host activity (a prompt, or a command the host runs):
+ * host-started turns (a forced turn, a `/loop` repeat, a `/goal` continuation) belong to it, so
+ * their replies quote it and their host notices reach its chat (#61, #60).
+ */
+export function createHostOriginTracker() {
+  let current: TelegramTurn | undefined;
+  return {
+    note(origin: { chatId: number; messageThreadId?: number; sourceMessageId?: number }): void {
+      current = { chatId: origin.chatId, messageThreadId: origin.messageThreadId, sourceMessageId: origin.sourceMessageId, queuedAttachments: [] };
+    },
+    turn(): TelegramTurn | undefined {
+      return current;
+    },
+  };
+}
+
+/** The turns a host notice or reply belongs to: the running Telegram turns, or the remembered origin when none runs. */
+export function turnsOrHostOrigin(active: TelegramTurn[], hostOrigin: TelegramTurn | undefined): TelegramTurn[] {
+  if (active.length > 0 || !hostOrigin) return active;
+  return [hostOrigin];
+}
+
 export function createTurnNotice(
   getTurns: () => TelegramTurn[],
   transport: Pick<TelegramTransport, "sendText">,
@@ -119,6 +142,8 @@ export type TelegramController = {
   showPaged(target: { chatId: number; messageThreadId?: number; messageId: number }, title: string, html: string): void;
   /** `handOver`: the runtime is being replaced or shut down; see OutputCapture.handOver (P2-21). */
   dispose(options?: { handOver?: boolean }): void;
+  /** The Telegram message host-started turns belong to (the last prompt or host command); see createHostOriginTracker. */
+  hostOriginTurn(): TelegramTurn | undefined;
 };
 
 /**
@@ -911,11 +936,12 @@ export function createTelegramController(deps: {
     holdOpen: (): boolean => outputCapture.hasRunningBash(),
   });
   const secretStore = deps.secrets ?? new SecretStore();
+  const hostOrigins = createHostOriginTracker();
   const outputCapture = new OutputCapture(
     deps.transport,
     originTracker,
     secretStore,
-    createTurnNotice(() => deps.getActiveTurns?.() ?? [], deps.transport),
+    createTurnNotice(() => turnsOrHostOrigin(deps.getActiveTurns?.() ?? [], hostOrigins.turn()), deps.transport),
   );
   const commandGateway = new CommandGateway({
     bridge,
@@ -1255,6 +1281,7 @@ export function createTelegramController(deps: {
   // starts a fresh main-thread turn.
   const runMainDelivery = async (text: string, chatId: number, replaceMessageId: number | undefined, messageThreadId: number | undefined, sourceMessageId: number | undefined, onTaken: TakenSignal) => {
     const turn = deps.beginTelegramTurn(chatId, replaceMessageId, messageThreadId, sourceMessageId);
+    if (turn) hostOrigins.note({ chatId, messageThreadId, sourceMessageId });
     if (!turn) {
       // Target already has an active turn — reject with a busy message.
       if (replaceMessageId !== undefined) await deps.transport.editText(chatId, replaceMessageId, "⏳ π is busy. Try again shortly.");
@@ -1325,6 +1352,7 @@ export function createTelegramController(deps: {
       if (!existingTurn) {
         // No active turn to steer into — fall back to a new prompt.
         const turn = deps.beginTelegramTurn(chatId, undefined, messageThreadId, sourceMessageId);
+        if (turn) hostOrigins.note({ chatId, messageThreadId, sourceMessageId });
         if (!turn) {
           await deps.transport.sendText(chatId, "⏳ π is busy. Try again shortly.", messageThreadId, sourceMessageId);
           return;
@@ -1668,6 +1696,8 @@ export function createTelegramController(deps: {
       // A suffixed name keeps its suffix (`force` + `:read`), and usage records the base only.
       const hostName = suffixed?.served ? `${suffixed.served.name}${suffixed.suffix}` : served.name;
       const usageName = suffixed?.served ? suffixed.base : name;
+      // The host runs this command and whatever turns it starts: they belong to this message (#61).
+      hostOrigins.note({ chatId, messageThreadId, sourceMessageId });
       const handled = await commandGateway.run({
         name: hostName,
         args,
@@ -2002,6 +2032,7 @@ export function createTelegramController(deps: {
 
     startTui,
     showPaged: (target, title, html) => dialogBroker.showPaged(target, title, html),
+    hostOriginTurn: () => hostOrigins.turn(),
     dispose(options) {
       // The output hands its final render over before the broker settles a dialog into it,
       // so a settled dialog's summary is written by the replacement runtime (P2-21).

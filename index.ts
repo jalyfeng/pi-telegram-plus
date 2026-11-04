@@ -293,7 +293,9 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     transport,
     getActiveTurn: (chatId?: number, messageThreadId?: number) => {
       if (chatId !== undefined) return activeTurns.get(activeTurnKey(chatId, messageThreadId));
-      return getCurrentActiveTurn();
+      // A host-started turn (forced turn, /loop repeat, /goal continuation) has no Telegram turn of
+      // its own: it belongs to the message that started the host activity (#61, #60).
+      return getCurrentActiveTurn() ?? controller.hostOriginTurn();
     },
     hasActiveTurns: () => activeTurns.size > 0,
     getSession: getActiveSession,

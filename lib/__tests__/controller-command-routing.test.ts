@@ -502,3 +502,21 @@ describe("Host-control commands are one command, one message (P20, P2-35)", () =
     expect(texts.map((call) => call.text)).toEqual(["<b>▶️ /hotkeys</b>"]);
   });
 });
+
+describe("host turns started by a Telegram command (#61, #60)", () => {
+  it("a command routed to the host makes its message the origin of the host-started turns", async () => {
+    const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
+    const harness = createHarness({ bridge: createBridge() });
+
+    await harness.controller.handleMessage({
+      message_id: 55,
+      chat: { id: 42, type: "private" },
+      from: { id: 7 },
+      text: "/tools",
+    });
+
+    expect(run).toHaveBeenCalled();
+    expect(harness.controller.hostOriginTurn()).toEqual(expect.objectContaining({ chatId: 42, sourceMessageId: 55 }));
+    run.mockRestore();
+  });
+});
