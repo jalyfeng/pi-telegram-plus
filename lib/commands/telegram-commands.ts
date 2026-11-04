@@ -228,7 +228,9 @@ export async function updateBotFlow(
     await deps.syncTelegramCommands();
     deps.refreshStatus();
   }
-  ui.notify(`Bot updated: ${escapeHtml(bot.name)} (${bot.id.slice(0, 8)})`, "info");
+  // A rename is reported under the new name.
+  const shownName = selectedField === "name" ? fieldValue : bot.name;
+  ui.notify(`Bot updated: ${escapeHtml(shownName)} (${bot.id.slice(0, 8)})`, "info");
 }
 
 export async function removeBotFlow(
