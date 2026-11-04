@@ -222,6 +222,10 @@ function firstLine(text: string): string {
   return text.split(/\r?\n/, 1)[0].replace(/\s+/g, " ").trim();
 }
 
+function formatDurationMs(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
 function shortenSummary(text: string, max: number): string {
   if (!text || text === "{}") return "";
   return text.length <= max ? text : text.slice(0, max - 1) + "…";
@@ -278,17 +282,21 @@ function summarizeAsk(a: ToolArgs): string {
   return questions.length > 1 ? `${first} (+${questions.length - 1} more)` : first;
 }
 
+/**
+ * OMP's task call names its agents: `agent` at the top level for one spawn, or `tasks[].agent`
+ * for a batch. The agent names are the summary; without one, the first task's text.
+ */
 function summarizeTask(a: ToolArgs): string {
-  const tasks = Array.isArray(a.tasks) ? (a.tasks as Array<{ name?: unknown; task?: unknown }>) : [];
-  if (tasks.length === 0) return "";
-  const first = tasks[0];
-  const label = firstLine(
-    typeof first.name === "string" && first.name.trim()
-      ? first.name
-      : typeof first.task === "string" ? first.task : "",
-  );
-  const count = `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
-  return label ? `${count}: ${label}` : count;
+  const items = Array.isArray(a.tasks) ? (a.tasks as Array<{ agent?: unknown; task?: unknown } | undefined>) : [];
+  const count = items.length > 0 ? items.length : 1;
+  const agents = [...new Set((items.length > 0 ? items.map((item) => item?.agent) : [a.agent])
+    .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+    .map((name) => name.trim()))];
+  if (agents.length > 0) return `${count} ${count === 1 ? "agent" : "agents"} · ${summarizeFileNames(agents)}`;
+  const first = items[0] ?? a;
+  const label = firstLine(typeof first?.task === "string" ? first.task : "");
+  const noun = `${count} task${count === 1 ? "" : "s"}`;
+  return label ? `${noun}: ${label}` : noun;
 }
 
 /** First string argument, skipping the intent field `i`. Used for unknown tools. */
@@ -557,6 +565,19 @@ export function registerTelegramRenderer(
       const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown, delivery);
       return sent[0]?.message_id;
     }
+  };
+
+  /** One line of a background job's completion: the terminal's "Background job completed" row. */
+  const backgroundJobNotices = (message: { customType?: unknown; details?: unknown }): string[] => {
+    if (message.customType !== "async-result" || !message.details || typeof message.details !== "object") return [];
+    const details = message.details as { jobs?: unknown; jobId?: unknown; type?: unknown; label?: unknown; durationMs?: unknown };
+    const jobs = Array.isArray(details.jobs) && details.jobs.length > 0 ? details.jobs as Array<Record<string, unknown>> : [details as Record<string, unknown>];
+    return jobs.map((job) => {
+      const jobId = typeof job.jobId === "string" && job.jobId ? job.jobId : "unknown";
+      const type = typeof job.type === "string" && job.type ? job.type : "job";
+      const took = typeof job.durationMs === "number" ? ` (${formatDurationMs(job.durationMs)})` : "";
+      return `✅ Background job completed [${type}] ${jobId}${took}`;
+    });
   };
 
   const sendInlineEvent = async (event: string) => {
@@ -958,6 +979,12 @@ export function registerTelegramRenderer(
     const message = event.message as AnyMessage;
     if (message.role === "user") {
       adoptSteeredReplyTarget(message);
+      return;
+    }
+    // A background job's completion is delivered to the session as a custom message. It is
+    // a notice in the turn it arrives in, whether or not the main loop is busy.
+    if (message.role === "custom") {
+      await sendInlineEvents(backgroundJobNotices(message as { customType?: unknown; details?: unknown }));
       return;
     }
     if (message.role !== "assistant") return;

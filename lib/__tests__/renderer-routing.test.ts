@@ -301,14 +301,32 @@ describe("Telegram tool-call lines are readable, one per call", () => {
     ["wait", {}, "🔧 wait"],
     ["ask", { i: "Asking", questions: [{ question: "Which branch?", options: ["a", "b"] }, { question: "Second?" }] }, "🔧 ask: Which branch? (+1 more)"],
     ["web_search", { i: "Searching web", query: "oh-my-pi hashline" }, "🔧 web_search: oh-my-pi hashline"],
-    ["task", { i: "Delegating", context: "shared", tasks: [{ name: "Scan", agent: "task", task: "scan the repo", solutionSpace: "x" }, { agent: "task", task: "second", solutionSpace: "y" }] }, "🔧 task: 2 tasks: Scan"],
-    ["task", { i: "Delegating", context: "shared", tasks: [{ agent: "task", task: "Review the diff", solutionSpace: "x" }] }, "🔧 task: 1 task: Review the diff"],
+    ["task", { i: "Delegating", context: "shared", tasks: [{ agent: "scan", task: "scan the repo", solutionSpace: "x" }, { agent: "review", task: "second", solutionSpace: "y" }] }, "🔧 task: 2 agents · scan, review"],
+    ["task", { i: "Delegating", context: "shared", tasks: [{ agent: "e2e-sub", task: "Review the diff", solutionSpace: "x" }] }, "🔧 task: 1 agent · e2e-sub"],
+    ["task", { i: "Delegating", agent: "e2e-sub", task: "Probe the tool" }, "🔧 task: 1 agent · e2e-sub"],
+    ["task", { i: "Delegating", task: "Probe the tool" }, "🔧 task: 1 task: Probe the tool"],
     ["custom_tool", { i: "Custom", target: "thing", count: 3 }, "🔧 custom_tool: thing"],
     ["custom_tool", { i: "Custom", count: 3 }, "🔧 custom_tool"],
   ])("%s %j -> one line", async (toolName, args, expected) => {
     const line = await briefLine(toolName, args);
     expect(line).toBe(expected);
     expect(line).not.toMatch(/[{}"]\s*:|\{ /);
+  });
+
+  it("sends a background task completion as a notice in the turn", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "brief" });
+
+    await runWithTelegramTurn(turn, () => emit("message_end", {
+      message: {
+        role: "custom",
+        customType: "async-result",
+        display: true,
+        content: "Background job e2e-sub completed.",
+        details: { jobs: [{ jobId: "e2e-sub", type: "task", label: "e2e-sub", durationMs: 43 }] },
+      },
+    }));
+
+    expect(sent).toEqual([expect.objectContaining({ chatId: 111, text: "<blockquote>✅ Background job completed [task] e2e-sub (43ms)</blockquote>" })]);
   });
 
   it("does not echo raw JSON or the intent field for a tool whose args only hold intent", async () => {
