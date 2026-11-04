@@ -221,6 +221,28 @@ describe("telegram ui inside a live /tg menu", () => {
     expect(transport.sendText).not.toHaveBeenCalled();
   });
 
+  it("a confirm on the menu message records the answer under its question", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+    const first = ui.menu("📁 Project", ["Disconnect"]);
+    await press(env, 100, "Disconnect");
+    await first;
+
+    const answer = ui.confirm("Disconnect Telegram for this folder?", "Telegram will stop responding.");
+    await press(env, 100, "Yes");
+    expect(await answer).toBe(true);
+    await vi.waitFor(() => expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("✅ Yes"));
+    const recorded = transport.editButtons.mock.calls.at(-1)!;
+    expect(recorded[2]).toBe("<b>Disconnect Telegram for this folder?</b>\n\nTelegram will stop responding.\n\n✅ Yes");
+    expect(recorded[3]).toEqual([]);
+
+    // The notice a flow reports after the answer goes on the same message, under the record.
+    ui.notify("Telegram disconnected for this folder.");
+    await vi.waitFor(() => expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("✅ Yes\nTelegram disconnected"));
+    expect(transport.sendText).not.toHaveBeenCalled();
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+  });
+
   it("a select renders its options on the menu message", async () => {
     const env = setup();
     const { transport, ui, runtime } = env;

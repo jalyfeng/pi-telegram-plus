@@ -183,9 +183,10 @@ export function createTelegramUiRuntime(deps: {
         const id = menuMessageId; menuMessageId = undefined; menuView = undefined; menuNotices = [];
         void deps.transport.removeInlineKeyboard(chatId, id);
       };
-      /** A prompt answered on the menu message: its keyboard goes, its text and the notices it shows stay. */
-      const settleMenuAnswer = () => {
-        menuNotices = [];
+      /** A prompt answered on the menu message: its keyboard goes, its text stays. The
+       *  answer's own line (if any) becomes the only notice; the earlier notices are answered. */
+      const settleMenuAnswer = (answerLine?: string) => {
+        menuNotices = answerLine === undefined ? [] : [answerLine];
         if (menuView) void drawMenu(menuView.title, menuView.body, []).catch(uiLog.swallow("warn", "settling menu prompt failed", { chatId }));
       };
 
@@ -199,6 +200,7 @@ export function createTelegramUiRuntime(deps: {
         sensitive: boolean,
         acceptsText: boolean,
         onShown?: (messageId: number) => void,
+        answerLine?: (value: string | boolean | undefined) => string | undefined,
       ) => {
         activeFlowByTarget.set(target, flowId);
         let promptMessageId: number;
@@ -211,7 +213,7 @@ export function createTelegramUiRuntime(deps: {
         onShown?.(promptMessageId);
         const value = await waitInput(chatId, messageThreadId, flowId, sensitive, acceptsText, promptMessageId);
         activeFlowByTarget.delete(target);
-        if (menuMessageId !== undefined && promptMessageId === menuMessageId) settleMenuAnswer();
+        if (menuMessageId !== undefined && promptMessageId === menuMessageId) settleMenuAnswer(answerLine?.(value));
         else void deps.transport.removeInlineKeyboard(chatId, promptMessageId);
         return value;
       };
@@ -238,6 +240,7 @@ export function createTelegramUiRuntime(deps: {
             [[{ text: "Yes", value: cb(flowId, "yes") }, { text: "No", value: cb(flowId, "no") }]],
             false, false,
             (messageId) => onConfirmMessage?.(messageId),
+            (answer) => (answer === true ? "✅ Yes" : answer === false ? "❌ No" : undefined),
           );
           return value === true || value === "yes";
         },
