@@ -142,8 +142,10 @@ export function buildTelegramMenuCommandsFull(
   const catalogAvailable = (options.tuiCommands?.length ?? 0) > 0;
   // One rule for every entry, static or recent: with a captured catalog, a name
   // is offered only if the host serves it or the plugin serves it on Telegram.
+  // A plugin-registered command is served by the plugin whatever the host catalog says: the
+  // same set the /tg Commands list shows (pluginDescriptions holds every registered name, #54).
   const offeredHere = (n: string | undefined): boolean =>
-    !catalogAvailable || !n || catalogNames.has(n) || TELEGRAM_SERVED_COMMANDS.has(n);
+    !catalogAvailable || !n || catalogNames.has(n) || TELEGRAM_SERVED_COMMANDS.has(n) || pluginDescriptions.has(n);
   for (const command of TELEGRAM_MENU_COMMANDS) {
     const n = toTelegramCommandName(command.command);
     if (!offeredHere(n)) continue;

@@ -174,6 +174,22 @@ describe("dynamic TUI catalog in BotMenu", () => {
     expect(commands.find((c) => c.command === "tg")?.description).toBe("Open the Telegram management menu");
   });
 
+  it("offers every command the plugin serves, as the /tg Commands list does (#54)", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      {
+        tuiCommands: [{ name: "settings", description: "Open settings", source: "builtin" }],
+        pluginDescriptions: new Map([
+          ["import", "Import a session JSONL file (path on server)"],
+          ["reload", "Reload extensions, skills, prompts, and themes"],
+        ]),
+      },
+    );
+    const names = new Set(commands.map((c) => c.command));
+    expect(names.has("import")).toBe(true);
+    expect(names.has("reload")).toBe(true);
+  });
+
   it("keeps plugin-served commands even when the host catalog lacks them", () => {
     const commands = buildTelegramMenuCommands(
       { getCommands: () => [] },
