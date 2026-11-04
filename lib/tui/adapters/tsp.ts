@@ -596,20 +596,20 @@ const CLEAR_SEARCH_KEY = "clear-search";
 const BAR_HIDDEN_IDS: Record<string, true> = { close: true, cancel: true, confirm: true };
 
 /** The tab / scope / action-bar buttons Telegram shows beside the list. */
-function pickerExtraActions(props: PickerProps): { label: string; key: string }[] {
-  const extras: { label: string; key: string }[] = [];
+function pickerExtraActions(props: PickerProps): { label: string; mark?: string; key: string }[] {
+  const extras: { label: string; mark?: string; key: string }[] = [];
   if (Array.isArray(props.tabs)) {
     props.tabs.forEach((tab, index) => {
       if (!isObject(tab) || typeof tab.id !== "string") return;
-      const marker = props.tab === tab.id ? "● " : "";
-      extras.push({ label: `${marker}${tspText(tab.label)}`, key: `${TAB_KEY_PREFIX}${index}` });
+      const mark = props.tab === tab.id ? "● " : undefined;
+      extras.push({ label: tspText(tab.label), ...(mark ? { mark } : {}), key: `${TAB_KEY_PREFIX}${index}` });
     });
   }
   if (Array.isArray(props.scopes)) {
     props.scopes.forEach((scope, index) => {
       if (!isObject(scope) || typeof scope.id !== "string" || scope.disabled) return;
-      const marker = props.scope === scope.id ? "● " : "";
-      extras.push({ label: `${marker}${tspText(scope.label)}`, key: `${SCOPE_KEY_PREFIX}${index}` });
+      const mark = props.scope === scope.id ? "● " : undefined;
+      extras.push({ label: tspText(scope.label), ...(mark ? { mark } : {}), key: `${SCOPE_KEY_PREFIX}${index}` });
     });
   }
   if (Array.isArray(props.actions)) {

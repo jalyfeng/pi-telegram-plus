@@ -215,7 +215,7 @@ function renderSelect(model: Extract<DialogModel, { kind: "select" }>, ctx: Rend
   // buttons (OMP /agents: 2 scope + 5 action + Search + Cancel) is rejected
   // by the Bot API (max 8 per row), so the whole list never reaches the chat.
   const extras = keep((model.extraActions ?? []).map(
-    (extra) => button(shorten(extra.label, MAX_LABEL), ctx, "k", extra.key),
+    (extra) => button(shorten(`${extra.mark ?? ""}${extra.label}`, MAX_LABEL), ctx, "k", extra.key),
   ));
   actions.push(...cancelRow(ctx));
   const nav = pageButtons(shown, page, ctx);
@@ -439,7 +439,7 @@ function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: Render
     "Send a message as the input, or tap Cancel.",
   ];
   // The input's extra buttons (e.g. Skip) sit above Cancel, as a select's do.
-  const extras = keep((model.extraActions ?? []).map((extra) => button(shorten(extra.label, MAX_LABEL), ctx, "k", extra.key)));
+  const extras = keep((model.extraActions ?? []).map((extra) => button(shorten(`${extra.mark ?? ""}${extra.label}`, MAX_LABEL), ctx, "k", extra.key)));
   return { text: header(model.title, undefined, body), rows: [...chunk(extras), cancelRow(ctx)], keyMap: new Map(), page: 0, pages: 1 };
 }
 

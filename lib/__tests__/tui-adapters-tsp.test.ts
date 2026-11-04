@@ -460,7 +460,7 @@ describe("tsp picker tabs, scopes and action bar", () => {
     const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: treeProps }), ctxFor()));
     expect(model.extraActions).toEqual([
       { label: "Default", key: "tab:0" },
-      { label: "● No tools", key: "tab:1" },
+      { label: "No tools", mark: "● ", key: "tab:1" },
       { label: "All", key: "tab:2" },
     ]);
   });
@@ -488,7 +488,7 @@ describe("tsp picker tabs, scopes and action bar", () => {
     const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
     expect(model.extraActions).toEqual([
       { label: "Current", key: "scope:0" },
-      { label: "● All", key: "scope:2" },
+      { label: "All", mark: "● ", key: "scope:2" },
     ]);
     const component = makeComponent({ k: "picker", p: props });
     expect(tspPickerAdapter.act(component, { type: "key", name: "scope:2" }, ctxFor())).toBe(true);
@@ -577,7 +577,7 @@ describe("tsp picker empty state with controls", () => {
     expect(model.items).toEqual([]);
     expect(model.total).toBe(0);
     expect(model.extraActions).toEqual([
-      { label: "● Default", key: "tab:0" },
+      { label: "Default", mark: "● ", key: "tab:0" },
       { label: "All", key: "tab:1" },
     ]);
   });

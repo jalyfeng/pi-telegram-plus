@@ -59,7 +59,8 @@ export type DialogModel =
       total: number;
       search?: SearchModel;
       multi?: boolean;
-      extraActions?: { label: string; key: string }[];
+      /** `mark`: a glyph drawn before the label on the button, never in a summary (as DialogItem.mark). */
+      extraActions?: { label: string; mark?: string; key: string }[];
       /** Host subtitle under the title (e.g. "Pick a provider"). */
       subtitle?: string;
       /** Host text shown in the body when the list is empty (or as its note). */
@@ -97,7 +98,7 @@ export type DialogModel =
       /** A multi-step wizard's step list, with the step on screen marked `current`. */
       steps?: { label: string; current: boolean }[];
       /** Buttons under the field (e.g. a wizard's Skip on an optional step); each one's tap is a `key` action with its `key`. */
-      extraActions?: { label: string; key: string }[];
+      extraActions?: { label: string; mark?: string; key: string }[];
     }
   | { kind: "editor"; title: string; prefill?: string }
   | { kind: "progress"; text: string; cancellable: boolean }

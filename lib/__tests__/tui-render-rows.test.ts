@@ -216,6 +216,12 @@ describe("host detail shown as message text (Y-2)", () => {
     expect(text).toContain("Send a message as the answer");
   });
 
+  it("draws an extra action's mark before its label on its button", () => {
+    const model: DialogModel = { kind: "select", title: "Sessions", items: [{ key: "a", label: "alpha" }], total: 1, extraActions: [{ label: "All", mark: "● ", key: "scope:2" }] };
+    const { rows } = renderDialog(model, CTX);
+    expect(texts(rows)).toContainEqual(["● All"]);
+  });
+
   it("draws an item's mark before its label, on the button and in the body", () => {
     const model: DialogModel = { kind: "select", title: "Logout", items: [{ key: "a", label: "MockAuth", mark: "● " }], total: 1 };
     const { rows, text } = renderDialog(model, CTX);

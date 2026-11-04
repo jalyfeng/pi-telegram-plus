@@ -999,6 +999,26 @@ describe("who closed a dialog and what they tapped", () => {
     expect(lastText(transport)).not.toContain("Answered in the terminal");
   });
 
+  it("ends a tab or scope tap with its label, not the marker the host draws on the active one", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const picker: DialogModel = { kind: "select", title: "Sessions", items: [{ key: "a", label: "alpha" }], total: 1, extraActions: [{ label: "All", mark: "● ", key: "scope:2" }] };
+      const { broker, transport, focus, session } = await scripted(picker, () => false);
+      session.keyMap.set(session.generation, new Map([["scope:2", "scope:2"]]));
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "k", arg: "scope:2" });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+      expect(lastText(transport)).toContain("✅ All");
+      expect(lastText(transport)).not.toContain("●");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not echo a plain input's typed text into the closing summary", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
     try {
