@@ -199,9 +199,9 @@ describe("host detail shown as message text (Y-2)", () => {
     expect(texts(rows)).toEqual([["Continue"], ["Cancel"]]);
   });
 
-  it("keeps Yes and No for a confirm without host labels", () => {
+  it("offers Yes and No only for a confirm without host labels", () => {
     const { rows } = renderDialog({ kind: "confirm", title: "Sure?" }, CTX);
-    expect(texts(rows)).toEqual([["✅ Yes", "❌ No"], ["Cancel"]]);
+    expect(texts(rows)).toEqual([["✅ Yes", "❌ No"]]);
   });
 
   it("declines with No when the host names only its confirm button", () => {

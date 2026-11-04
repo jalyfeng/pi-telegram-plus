@@ -380,7 +380,8 @@ function renderConfirm(model: Extract<DialogModel, { kind: "confirm" }>, ctx: Re
     ]);
     return { text: header(model.title, undefined, [body]), rows: [answers], keyMap: new Map(), page: 0, pages: 1 };
   }
-  const rows = [keep([button("✅ Yes", ctx, "y"), button("❌ No", ctx, "n")]), cancelRow(ctx)];
+  // Yes and No only: No is the decline, so a separate Cancel would be the same answer twice.
+  const rows = [keep([button("✅ Yes", ctx, "y"), button("❌ No", ctx, "n")])];
   return { text: header(model.title, undefined, [body]), rows, keyMap: new Map(), page: 0, pages: 1 };
 }
 
