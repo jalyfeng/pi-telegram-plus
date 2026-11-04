@@ -2403,3 +2403,24 @@ describe("tsp settings search header and per-tab counts (#36)", () => {
     expect(model.subtitle).toBe("Appearance");
   });
 });
+
+describe("tsp input title from styled spans (#68)", () => {
+  it("reads the hook input's title line when the host sends it as spans", () => {
+    const field = {
+      describe: () => ({ k: "input", p: { text: "", placeholder: 'e.g. "ts errors"' } }),
+      handleNativeEvent: () => undefined,
+    };
+    const component = makeComponent({
+      k: "col",
+      c: [
+        { k: "text", p: { role: "omp.hook-input.title", spans: [{ t: "Describe what to detect and fix" }] } },
+        field,
+      ],
+    });
+    expect(tspInputAdapter.read(component, ctxFor())).toMatchObject({
+      kind: "input",
+      title: "Describe what to detect and fix",
+      placeholder: 'e.g. "ts errors"',
+    });
+  });
+});

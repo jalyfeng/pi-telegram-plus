@@ -1601,7 +1601,8 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
     return undefined;
   }
   if (node.k === "text" && isObject(node.p)) {
-    const text = tspText(node.p.text).trim();
+    // A text node carries its words as `text` or as `spans` (the hook input's title line is spans).
+    const text = nodeText(node).trim();
     if (text) state.lastText = text;
     if (role === WIZARD_TITLE_ROLE && text) state.heading = text;
   }
