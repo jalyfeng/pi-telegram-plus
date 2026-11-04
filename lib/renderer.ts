@@ -222,6 +222,18 @@ function firstLine(text: string): string {
   return text.split(/\r?\n/, 1)[0].replace(/\s+/g, " ").trim();
 }
 
+/**
+ * The one line a `wait` result adds in brief mode: a wait that had no job to wait on (`jobs` is
+ * empty), such as "Nothing to wait for". A wait that waited on a job adds nothing.
+ */
+function waitResultNotice(toolName: string, result: unknown): string | undefined {
+  if (toolName !== "wait") return undefined;
+  const details = (result as { details?: { op?: unknown; jobs?: unknown } } | null | undefined)?.details;
+  if (details?.op !== "wait" || !Array.isArray(details.jobs) || details.jobs.length > 0) return undefined;
+  const line = firstLine(extractToolResultParts(result).body);
+  return line ? shortenSummary(line, 200) : undefined;
+}
+
 function formatDurationMs(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
@@ -580,16 +592,41 @@ export function registerTelegramRenderer(
     });
   };
 
-  const sendInlineEvent = async (event: string) => {
+  /** Sends an inline event; resolves to the id of the message it went into, when known. */
+  const sendInlineEvent = async (event: string): Promise<number | undefined> => {
     const keyPrefix = eventTargetKey();
-    if (!event || !keyPrefix) return;
+    if (!event || !keyPrefix) return undefined;
     // Inline events quote tool arguments and thinking text — exactly where a
     // pasted key reappears, so redact before `escapeHtml` (§4.7.4).
     const text = redactFor(deps.getActiveTurn(), event);
     const key = `${keyPrefix}:${text}`;
-    if (sentInlineEvents.has(key)) return;
+    if (sentInlineEvents.has(key)) return undefined;
     sentInlineEvents.add(key);
-    await sendToTurn(`<blockquote>${escapeHtml(text)}</blockquote>`);
+    return sendToTurn(`<blockquote>${escapeHtml(text)}</blockquote>`);
+  };
+
+  /**
+   * Brief mode: the line each call's start was sent as, so a result notice can go on that line.
+   * Resolves to undefined when the line was not sent (deduplicated, or the send failed).
+   */
+  const briefToolLines = new Map<string, Promise<{ chatId: number; messageId: number } | undefined>>();
+
+  /** Adds a result notice after the call's brief line, or sends it as a line of its own. */
+  const addBriefNotice = async (
+    line: { chatId: number; messageId: number } | undefined,
+    brief: string,
+    notice: string,
+  ): Promise<void> => {
+    const text = `${brief} — ${notice}`;
+    if (line) {
+      try {
+        await deps.transport.editText(line.chatId, line.messageId, `<blockquote>${escapeHtml(redactFor(deps.getActiveTurn(), text))}</blockquote>`);
+        return;
+      } catch (err) {
+        renderLog.debug("brief tool line edit failed; sending a new line", { err });
+      }
+    }
+    await sendInlineEvent(text);
   };
 
   /**
@@ -841,6 +878,7 @@ export function registerTelegramRenderer(
     toolUpdateAt.clear();
     fullToolCalls.clear();
     fullToolStarts.clear();
+    briefToolLines.clear();
     workflowNoticeSent = false;
     pendingError = undefined;
     attachRetryEvents();
@@ -873,7 +911,12 @@ export function registerTelegramRenderer(
       await sendFullToolStart(event.toolCallId, brief).catch(renderLog.swallow("warn", "tool start send failed", { toolCallId: event.toolCallId }));
       return;
     }
-    await sendInlineEvent(brief);
+    const chatId = deps.getActiveTurn()?.chatId ?? defaultChats()[0];
+    const line = sendInlineEvent(brief)
+      .then((messageId) => (chatId !== undefined && messageId !== undefined ? { chatId, messageId } : undefined))
+      .catch(renderLog.swallow("warn", "brief tool line send failed", { toolCallId: event.toolCallId }));
+    briefToolLines.set(event.toolCallId, line);
+    await line;
     } catch (err) { renderLog.warn("render tool_execution_start handler failed", { err }); }
   });
 
@@ -917,10 +960,17 @@ export function registerTelegramRenderer(
     fullToolCalls.delete(event.toolCallId);
     const args = toolArgs.get(event.toolCallId);
     toolArgs.delete(event.toolCallId);
+    const briefLine = briefToolLines.get(event.toolCallId);
+    briefToolLines.delete(event.toolCallId);
     if (level === "hidden") return;
     if (event.isError) rememberToolFailure(deps.getActiveTurn(), event.result);
     const status = event.isError ? "❌ Tool failed" : "✅ Tool finished";
     if (level === "brief") {
+      const notice = waitResultNotice(event.toolName, event.result);
+      if (notice) {
+        await addBriefNotice(await briefLine, formatToolBrief(event.toolName, args), notice);
+        return;
+      }
       if (!event.isError) return;
       await sendInlineEvent(formatToolFailureBrief(event.toolName, event.result, args));
       return;

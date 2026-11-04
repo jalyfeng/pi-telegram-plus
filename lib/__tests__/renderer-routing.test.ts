@@ -313,6 +313,39 @@ describe("Telegram tool-call lines are readable, one per call", () => {
     expect(line).not.toMatch(/[{}"]\s*:|\{ /);
   });
 
+  it("puts the wait warning on the wait line when the wait had nothing to wait for", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "brief" });
+    await runWithTelegramTurn(turn, async () => {
+      await emit("tool_execution_start", { toolCallId: "wait-1", toolName: "wait", args: {} });
+      await emit("tool_execution_end", {
+        toolCallId: "wait-1",
+        toolName: "wait",
+        isError: false,
+        result: { content: [{ type: "text", text: "Nothing to wait for: no background jobs" }], details: { op: "wait", jobs: [] } },
+      });
+    });
+
+    // The harness records the edit of the start line in `sent` too.
+    expect(sent).toHaveLength(2);
+    expect(sent[1].text).toBe("<blockquote>🔧 wait — Nothing to wait for: no background jobs</blockquote>");
+  });
+
+  it("adds no notice to a wait that waited on a job", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "brief" });
+    await runWithTelegramTurn(turn, async () => {
+      await emit("tool_execution_start", { toolCallId: "wait-2", toolName: "wait", args: {} });
+      await emit("tool_execution_end", {
+        toolCallId: "wait-2",
+        toolName: "wait",
+        isError: false,
+        result: { content: [{ type: "text", text: "Job done" }], details: { op: "wait", jobs: [{ jobId: "a" }] } },
+      });
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toBe("<blockquote>🔧 wait</blockquote>");
+  });
+
   it("sends a background task completion as a notice in the turn", async () => {
     const { emit, sent } = createRendererHarness({ tool: "brief" });
 
