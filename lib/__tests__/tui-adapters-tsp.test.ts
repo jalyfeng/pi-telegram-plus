@@ -2472,3 +2472,39 @@ describe("tsp wizard name step note (#67)", () => {
     });
   });
 });
+
+describe("tsp picker confirm button duplicates the tappable row (#65, #60)", () => {
+  it("drops the confirm action button: tapping the row does the same", () => {
+    const tree = {
+      k: "picker",
+      p: {
+        title: "Sign in",
+        subtitle: "Pick a provider",
+        items: [{ id: "a", label: "alpha" }],
+        actions: [
+          { id: "confirm", label: "Sign in", primary: true },
+          { id: "close", label: "Close", end: true },
+        ],
+      },
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.title).toBe("Sign in");
+    expect(model.subtitle).toBe("Pick a provider");
+    expect(model.extraActions).toBeUndefined();
+  });
+
+  it("keeps the other action buttons beside the list", () => {
+    const tree = {
+      k: "picker",
+      p: {
+        items: [{ id: "a", label: "alpha" }],
+        actions: [
+          { id: "confirm", label: "Select", primary: true },
+          { id: "delete", label: "Delete" },
+        ],
+      },
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.extraActions).toEqual([{ label: "Delete", key: "act:1" }]);
+  });
+});

@@ -554,8 +554,11 @@ const BAR_KEY_PREFIX = "act:";
 /** The extraAction key of the Clear search button: its tap empties the search box and nothing else. */
 const CLEAR_SEARCH_KEY = "clear-search";
 
-/** Action-bar ids the renderer's own cancel row already covers. */
-const BAR_HIDDEN_IDS: Record<string, true> = { close: true, cancel: true };
+/**
+ * Action-bar ids the renderer's own cancel row already covers, plus `confirm`: a picker's primary
+ * "confirm" acts on the highlighted row, and a Telegram row is tappable, so its button only repeats the tap.
+ */
+const BAR_HIDDEN_IDS: Record<string, true> = { close: true, cancel: true, confirm: true };
 
 /** The tab / scope / action-bar buttons Telegram shows beside the list. */
 function pickerExtraActions(props: PickerProps): { label: string; key: string }[] {
