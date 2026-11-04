@@ -445,8 +445,8 @@ describe("Host capability routing", () => {
     await vi.waitFor(() => {
       expect(harness.calls.some((call) => call.text?.includes("Changelog: https://example.test"))).toBe(true);
     });
-    // The terminal user still sees the notification the host printed.
-    expect(terminalPrints).toContain("Changelog: https://example.test/releases");
+    // The notice belongs to the Telegram chat that issued the command: the terminal does not print it.
+    expect(terminalPrints).toEqual([]);
   });
 
   const send = async (harness: { controller: { handleMessage(m: unknown): Promise<void> } }, text: string) => {

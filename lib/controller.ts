@@ -605,25 +605,20 @@ function createHostPromptUi(baseUi: unknown, telegramUi: ExtensionUIContext): Ex
       }
       const name = String(prop);
       if (name === "notify") {
-        // Notifications are not prompts: the terminal still prints them, and the chat keeps
-        // receiving what it used to. When the base UI is already the plugin's routed context -
+        // A notice a Telegram-issued command reports belongs to the chat that issued it: it is
+        // delivered there and never forwarded to the host's ui.notify, which would print it in the
+        // terminal transcript too. When the base UI is already the plugin's routed context -
         // which is exactly what pi hands a command context - its own notify reaches this chat,
-        // so copying it here would send the same line two or three times.
+        // and it is used as is.
         if (baseReachesChat) return value.bind(target);
         return (...args: unknown[]) => {
-          let result: unknown;
-          try {
-            result = (value as (...notifyArgs: unknown[]) => unknown).apply(target, args);
-          } catch {
-            // Host notification failures must not block the chat copy.
-          }
           try {
             const chatNotify = (telegramUi as unknown as Record<string, unknown>).notify;
             if (typeof chatNotify === "function") (chatNotify as (...a: unknown[]) => unknown).apply(telegramUi, args);
           } catch {
-            // Chat notification is best-effort.
+            // Chat notification is best-effort; there is no terminal fallback.
           }
-          return result;
+          return undefined;
         };
       }
       return value.bind(target);
