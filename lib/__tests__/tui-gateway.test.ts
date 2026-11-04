@@ -7,7 +7,7 @@ import type { CommandScope } from "../tui/origin.ts";
 import { FocusTracker } from "../tui/focus.ts";
 import type { TuiBridgeAdapter } from "../tui-bridge.ts";
 import { takePendingNotices } from "../pending-notices.ts";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -934,6 +934,26 @@ describe("/restart result (#62)", () => {
         editMessageId: 1,
         html: "<b>▶️ /restart</b>\n\n✅ Restarted.",
       })]);
+      expect(takePendingNotices()).toEqual([]);
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+      rmSync(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("another instance's record is never taken: a record is read only by the process that wrote it", async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "ptp-restart-other-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      takePendingNotices();
+      // A record another process wrote to the shared agent dir, and one under another PID.
+      const other = { chatId: 9, editMessageId: 3, html: "other instance", createdAt: Date.now() };
+      writeFileSync(join(agentDir, "pending-notices.json"), JSON.stringify([other]));
+      mkdirSync(join(agentDir, "pending-notices"), { recursive: true });
+      writeFileSync(join(agentDir, "pending-notices", "99999.json"), JSON.stringify([other]));
+
       expect(takePendingNotices()).toEqual([]);
     } finally {
       if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
