@@ -129,6 +129,7 @@ A new command from the same chat while one of its dialogs is open closes that di
 - **`/tree`** — not available from Telegram (pi and OMP). Use the terminal.
 - **`/copy`** — not available from Telegram (pi and OMP). Use the terminal.
 - **`/mcp`** — not available from Telegram (pi and OMP). Use the terminal.
+- **`/context`** — not available from Telegram (pi and OMP). Use the terminal.
 - **OMP `/setup`** — the setup wizard is not available from Telegram yet. Run it in the terminal.
 - **OMP `/branch`** — stepping back through earlier points is not available from Telegram yet; only the current point can be chosen. Use the terminal to pick an earlier point.
 - **OMP `/extensions`** — an entry that is disabled by a master switch still shows a button on Telegram, but the host ignores the tap. Turn it on from the terminal.

@@ -18,7 +18,7 @@ missing or mislabelled cannot be published.
 
 ### Changed
 
-- **`/tree`, `/copy` and `/mcp` are terminal-only.** None of them is available from Telegram on pi or OMP: they are
+- **`/tree`, `/copy`, `/mcp` and `/context` are terminal-only.** None of them is available from Telegram on pi or OMP: they are
   left out of the `/` menu and `/tg`, and sending one from Telegram (including `/mcp add`) returns a hint. The
   plugin's own `/copy` is removed.
 - **Confirms offer Yes and No only.** The Telegram confirm has no separate Cancel button, and a picker's extra
