@@ -266,6 +266,12 @@ describe("the desktop guard: showAuth asks for a browser but never starts one", 
     const { dialog } = loginHarness();
     const target = "https://acme.example/auth?state=guard";
     dialog.showAuth(target, "Open this URL to sign in");
-    expect(drainDesktopLaunches()).toEqual([{ api: "spawn", program: "open", args: ["open", [target], expect.any(Object)] }]);
+    // pi's openBrowser picks the opener by platform (pi-coding-agent@1.4.0 dist/utils/open-browser.js).
+    const [program, args] = process.platform === "darwin"
+      ? ["open", [target]]
+      : process.platform === "win32"
+        ? ["rundll32", ["url.dll,FileProtocolHandler", target]]
+        : ["xdg-open", [target]];
+    expect(drainDesktopLaunches()).toEqual([{ api: "spawn", program, args: [program, args, expect.any(Object)] }]);
   });
 });
