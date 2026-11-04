@@ -2538,3 +2538,45 @@ describe("tsp picker preview of the highlighted item (#64)", () => {
     expect(asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor())).notice).toBeUndefined();
   });
 });
+
+describe("tsp prefs submenu opened in the terminal (#34)", () => {
+  const editorNode = { k: "col", p: { role: "omp.prefs.editor" }, c: [{ k: "list", p: { selected: "dark" }, c: [] }] };
+
+  function terminalSubmenuHost(props: Record<string, unknown>, editorOpen: boolean) {
+    const events: unknown[] = [];
+    return {
+      events,
+      describe: () => ({ k: "prefs", p: props, c: editorOpen ? [editorNode] : [] }),
+      handleNativeEvent: (event: unknown) => {
+        events.push(event);
+        const change = event as { type?: string; item?: unknown; value?: unknown };
+        if (change.type === "change" && typeof change.item === "string") applyPrefsChange(props, change.item, change.value);
+      },
+    };
+  }
+
+  it("shows the editor the terminal opened as the same submenu Telegram opens for that row", () => {
+    const props = { ...pageProps(), focus: "theme" };
+    const host = terminalSubmenuHost(props, true);
+    const model = asSettings(tspPrefsAdapter.read(host, ctxFor()));
+    expect(model.submenu?.itemKey).toBe("theme");
+    expect(model.submenu?.model).toMatchObject({ kind: "select", title: "Theme" });
+    expect(model.submenu?.model.kind === "select" ? model.submenu.model.items.map((item) => item.key) : []).toEqual(["dark", "light"]);
+  });
+
+  it("sends the same change event for a choice the user takes in the terminal's editor", () => {
+    const props = { ...pageProps(), focus: "theme" };
+    const host = terminalSubmenuHost(props, true);
+    tspPrefsAdapter.read(host, ctxFor());
+    expect(tspPrefsAdapter.act(host, { type: "choose", key: "light" }, ctxFor())).toBe(true);
+    expect(host.events).toEqual([{ type: "change", key: "", item: "theme", value: "light" }]);
+  });
+
+  it("drops the submenu once the terminal closes its editor", () => {
+    const props = { ...pageProps(), focus: "theme" };
+    const host = terminalSubmenuHost(props, true);
+    tspPrefsAdapter.read(host, ctxFor());
+    const closed = terminalSubmenuHost(props, false);
+    expect(asSettings(tspPrefsAdapter.read(closed, ctxFor())).submenu).toBeUndefined();
+  });
+});

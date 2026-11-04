@@ -1163,6 +1163,15 @@ type PrefsSubmenuKind = "text" | "number" | "multi" | "choice";
 /** The submenu open on the plugin side, per prefs component: the row it edits and its kind. */
 const prefsSubmenus = new WeakMap<object, { rowId: string; kind: PrefsSubmenuKind }>();
 
+/** Owners whose open submenu state came from the terminal's own editor (not from a Telegram tap). */
+const terminalSubmenus = new WeakSet<object>();
+
+/** Whether the page holds the editor the terminal opened: the host's `omp.prefs.editor` child of the prefs node. */
+function prefsEditorOpen(node: NativeNodeLike): boolean {
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  return children.some((child) => isObject(child) && isObject(child.p) && child.p.role === "omp.prefs.editor");
+}
+
 /** A choice's option detail for its current value, when the host gives one. */
 function choiceDetail(control: HostRecord): string | undefined {
   const options = Array.isArray(control.options) ? (control.options as readonly unknown[]) : [];
@@ -1403,7 +1412,21 @@ export const tspPrefsAdapter: DialogAdapter = {
   read(component, ctx): DialogModel {
     const found = findNode(component, "prefs");
     if (!found) return { kind: "unsupported", what: "OMP settings page closed or no longer a settings page" };
-    const { owner, props } = found;
+    const { owner, props, node } = found;
+    // The terminal's own editor (opened on the focused row) becomes the same submenu Telegram opens for that row,
+    // and is dropped again once the terminal closes it.
+    if (prefsEditorOpen(node)) {
+      const focus = props.focus;
+      const row = typeof focus === "string" ? prefsRows(props).find((candidate) => candidate.id === focus) : undefined;
+      const control = row && isObject(row.control) ? row.control : undefined;
+      if (typeof focus === "string" && !prefsSubmenus.has(owner) && control?.k === "choice" && !row?.disabled) {
+        prefsSubmenus.set(owner, { rowId: focus, kind: "choice" });
+        terminalSubmenus.add(owner);
+      }
+    } else if (terminalSubmenus.has(owner)) {
+      terminalSubmenus.delete(owner);
+      prefsSubmenus.delete(owner);
+    }
     const currentPage = typeof props.page === "string" ? props.page : "";
     const query = typeof props.query === "string" ? props.query : "";
     const items: (DialogItem & { values?: string[]; hasSubmenu?: boolean; shortcut?: boolean })[] = [];
