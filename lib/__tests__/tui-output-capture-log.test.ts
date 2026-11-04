@@ -28,10 +28,11 @@ function freshCapture() {
       swallow: () => () => undefined,
     };
     vi.spyOn(log, "child").mockReturnValue(fake);
-    const [{ OutputCapture }, { OriginTracker }, { SecretStore }] = await Promise.all([
+    const [{ OutputCapture }, { OriginTracker }, { SecretStore }, { runInCommand }] = await Promise.all([
       import("../tui/output.ts"),
       import("../tui/origin.ts"),
       import("../tui/secrets.ts"),
+      import("../tui/command-context.ts"),
     ]);
     const transport = {
       sendText: async () => [],
@@ -53,8 +54,13 @@ function freshCapture() {
         "",
       );
       output.bind(scope, { chatId: 42, messageThreadId: 7, messageId: 5, ackHtml: `<b>▶️ /${label}</b>` });
+      return scope;
     };
-    return { debug, attach, bind };
+    // Host output is claimed only inside the command's call chain (v8 §0.2).
+    const addInScope = (scope: unknown, chat: { addChild(child: unknown): void }, child: unknown) => {
+      runInCommand(scope as Parameters<typeof runInCommand>[0], () => chat.addChild(child));
+    };
+    return { debug, attach, bind, addInScope };
   });
 }
 
@@ -96,11 +102,11 @@ function chatFixture() {
 
 describe("OutputCapture debug trace", () => {
   it("logs the claimed component with ctor, line count and children", async () => {
-    const { debug, attach, bind } = await freshCapture();
+    const { debug, attach, bind, addInScope } = await freshCapture();
     const { chat, state } = chatFixture();
     attach(state);
-    bind("clear");
-    chat.addChild(new FakeText("reset \u001b[31mred\u001b[0m done", [{}, {}]));
+    const scope = bind("clear");
+    addInScope(scope, chat, new FakeText("reset \u001b[31mred\u001b[0m done", [{}, {}]));
     const captured = records(debug, "captured component");
     expect(captured).toHaveLength(1);
     expect(captured[0]).toMatchObject({ ctor: "FakeText", lines: 1, children: 2 });
@@ -110,11 +116,11 @@ describe("OutputCapture debug trace", () => {
   });
 
   it("keeps the sample ANSI-free, redacted and 80 chars at most", async () => {
-    const { debug, attach, bind } = await freshCapture();
+    const { debug, attach, bind, addInScope } = await freshCapture();
     const { chat, state } = chatFixture();
     attach(state);
-    bind("clear");
-    chat.addChild(new FakeText(`x \u001b[31m${SECRET}\u001b[0m ${"y".repeat(200)}`));
+    const scope = bind("clear");
+    addInScope(scope, chat, new FakeText(`x \u001b[31m${SECRET}\u001b[0m ${"y".repeat(200)}`));
     const [captured] = records(debug, "captured component");
     const sample = String(captured?.sample);
     expect(sample).not.toContain(SECRET);
@@ -123,12 +129,12 @@ describe("OutputCapture debug trace", () => {
     expect(sample.length).toBeLessThanOrEqual(80);
   });
 
-  it("still logs when the render produced nothing, and omits a missing children field", async () => {
-    const { debug, attach, bind } = await freshCapture();
+  it("still logs when the component has no content, and omits a missing children field", async () => {
+    const { debug, attach, bind, addInScope } = await freshCapture();
     const { chat, state } = chatFixture();
     attach(state);
-    bind("clear");
-    chat.addChild(new FakeSpacer(1));
+    const scope = bind("clear");
+    addInScope(scope, chat, new FakeSpacer(1));
     const captured = records(debug, "captured component");
     expect(captured).toHaveLength(1);
     expect(captured[0]).toEqual({ ctor: "FakeSpacer", lines: 0, sample: "" });

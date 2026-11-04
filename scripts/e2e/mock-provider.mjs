@@ -171,6 +171,9 @@ const server = createServer(async (req, res) => {
   const probeMatch = /PROBE_TOOL:([A-Za-z0-9_]+)/.exec(latestUserText);
   const goalMatch = /PROBE_GOAL_(QUESTIONNAIRE|CONFIRM|QUESTION)/.exec(latestUserText);
   const approvalProbe = !approvalBashMatch && latestUserText.includes("PROBE_APPROVAL");
+  // PROBE_SLOW_BASH: a bash call that runs for about six seconds and prints SLOW_DONE,
+  // so a driver can open a command while agent tool output is still arriving.
+  const slowBashMatch = latestUserText.includes("PROBE_SLOW_BASH");
 
   // Sub-agent probe: a driver message containing TASK_TOOL_PROBE makes the model call
   // OMP's `task` tool once, which spawns a sub-agent session. The sub-agent receives
@@ -193,7 +196,8 @@ const server = createServer(async (req, res) => {
     ? ["write", "edit", "bash"].find((name) => toolNames.includes(name))
     : undefined;
   const requestedProbeTool = probeMatch?.[1] ?? goalToolName ?? approvalToolName
-    ?? (approvalBashMatch && toolNames.includes("bash") ? "bash" : undefined);
+    ?? (approvalBashMatch && toolNames.includes("bash") ? "bash" : undefined)
+    ?? (slowBashMatch && toolNames.includes("bash") ? "bash" : undefined);
   const probeToolDef = requestedProbeTool
     ? (parsed.tools ?? []).find((tool) => (tool?.function?.name ?? tool?.name) === requestedProbeTool)
     : undefined;
@@ -201,7 +205,7 @@ const server = createServer(async (req, res) => {
     ? (probeToolDef.function?.name ?? probeToolDef.name)
     : undefined;
   const triggerProbe = Boolean(probeTool) && !justAnswered
-    && Boolean(probeMatch || goalMatch || approvalProbe || approvalBashMatch);
+    && Boolean(probeMatch || goalMatch || approvalProbe || approvalBashMatch || slowBashMatch);
 
   const fill = (schema) => {
     if (!schema || typeof schema !== "object") return "probe";
@@ -243,9 +247,8 @@ const server = createServer(async (req, res) => {
       return JSON.stringify({ path: "/tmp/pitg-probe-approval.txt", old_string: "probe", new_string: "probe" });
     }
     if (probeTool === "bash") {
-      return JSON.stringify(approvalBashMatch
-        ? { command: `touch ${approvalBashMatch[1]}` }
-        : { command: "true" });
+      if (approvalBashMatch) return JSON.stringify({ command: `touch ${approvalBashMatch[1]}` });
+      return JSON.stringify({ command: slowBashMatch ? "sleep 6; echo SLOW_DONE" : "true" });
     }
     const parameters = probeToolDef?.function?.parameters ?? probeToolDef?.parameters ?? {};
     const required = parameters.required ?? Object.keys(parameters.properties ?? {});

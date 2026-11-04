@@ -17,6 +17,40 @@ import { constructorName } from "./utils.ts";
 
 type HostRecord = Record<string, unknown>;
 
+/**
+ * pi's public `keyHint`, resolved once at extension load (top-level await, as status-footer does) so that
+ * `read` can stay synchronous. Under OMP the pi specifier may not load: then this stays undefined, and
+ * `read` fails explicitly instead of guessing the hint text.
+ */
+const hostKeyHint: typeof import("@earendil-works/pi-coding-agent").keyHint | undefined = await import(
+  "@earendil-works/pi-coding-agent",
+).then(
+  (mod) => mod.keyHint,
+  () => undefined,
+);
+
+/**
+ * The exact key-hint lines login-dialog.js prints as their own `Text` (with the outer parentheses), built with
+ * the same `keyHint` calls and arguments. `keyHint` reads the live keybindings of this process, which are the
+ * ones the host dialog read when it drew the line. Colours are stripped before comparing.
+ */
+function hostKeyHintLines(): Set<string> {
+  if (!hostKeyHint) throw new Error("pi keyHint is unavailable: the login dialog's key hints cannot be matched");
+  const cancel = hostKeyHint("tui.select.cancel", "to cancel");
+  const cancelToSubmit = `${hostKeyHint("tui.select.cancel", "to cancel,")} ${hostKeyHint("tui.select.confirm", "to submit")}`;
+  const close = hostKeyHint("tui.select.cancel", "to close");
+  return new Set([`(${cancel})`, `(${cancelToSubmit})`, `(${close})`].map((line) => stripAnsi(line)));
+}
+
+/**
+ * The click hint login-dialog.js prints on a device-code page, as its own Text under the link. pi exports no
+ * helper for it (the literal is built inline from `process.platform`), so this is the same literal; a Text that
+ * is exactly this line (colours and OSC 8 links stripped) is the terminal's hint, not the page's content.
+ */
+function deviceCodeClickHint(): string {
+  return process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
+}
+
 /** The dynamic content area; its children come and go with the auth step. */
 function contentChildren(component: object): unknown[] | undefined {
   const record = component as HostRecord;
@@ -26,17 +60,66 @@ function contentChildren(component: object): unknown[] | undefined {
   return Array.isArray(container.children) ? container.children : undefined;
 }
 
+/** A `Text` pi writes for a submitted value: `replaceInputWithSubmittedText` puts `> value` where the input was. */
+function isSubmittedEcho(child: unknown): boolean {
+  const record = child as HostRecord | undefined;
+  return !!record && typeof record === "object" && typeof record.text === "string" && record.text.startsWith("> ");
+}
+
+/**
+ * Indexes of the key-hint `Text`s that pi prints right after an input, or after the echo of a submitted
+ * input. login-dialog.js `showPrompt` and `showManualInput` add `this.input` and then a `Text` such as
+ * "(escape/ctrl+c to cancel, enter to submit)": a terminal key hint, meaningless on Telegram. After a
+ * submit the input is replaced by its `> value` echo and the hint stays right behind it. Found by
+ * position next to the input or the echo, not by matching its words.
+ */
+function keyHintIndexes(component: object, children: unknown[]): Set<number> {
+  const input = (component as HostRecord).input;
+  const hints = new Set<number>();
+  for (const [index, child] of children.entries()) {
+    const anchored = (input !== undefined && child === input) || isSubmittedEcho(child);
+    if (!anchored) continue;
+    const next = children[index + 1];
+    if (next && typeof next === "object" && typeof (next as HostRecord).text === "string") hints.add(index + 1);
+  }
+  return hints;
+}
+
+/**
+ * The example line `showPrompt(message, placeholder)` adds: "e.g., <placeholder>" is a `Text` directly
+ * before the input, and the message `Text` sits right before it. Without a placeholder the input follows
+ * the message directly, after a Spacer. Found by position, not by matching its words.
+ */
+function hostPlaceholderIndex(component: object, children: unknown[]): number | undefined {
+  const input = (component as HostRecord).input;
+  if (input === undefined) return undefined;
+  const at = children.indexOf(input);
+  if (at < 2) return undefined;
+  return isTextChild(children[at - 1]) && isTextChild(children[at - 2]) ? at - 1 : undefined;
+}
+
+function isTextChild(child: unknown): boolean {
+  const record = child as HostRecord | undefined;
+  return !!record && typeof record === "object" && typeof record.text === "string";
+}
+
 /**
  * Readable lines of the content area: `Text` text (theme colours stripped),
  * and the bare `url` of an `AuthUrlComponent` (or anything else exposing one).
  * Lines starting with "> " are submitted values the host echoed back -
  * possibly API keys - and are skipped here so no model can carry them out.
+ * The key hints after an input or its echo are skipped too (see `keyHintIndexes`),
+ * and so is the `skip` child, the host's placeholder line, which is not body.
  */
-function bodyLines(component: object): string[] {
+function bodyLines(component: object, skip?: number): string[] {
   const children = contentChildren(component);
   if (!children) return [];
+  const hints = keyHintIndexes(component, children);
+  const hintLines = hostKeyHintLines();
+  const clickHint = deviceCodeClickHint();
   const lines: string[] = [];
-  for (const child of children) {
+  for (const [index, child] of children.entries()) {
+    if (hints.has(index) || index === skip) continue;
     if (!child || typeof child !== "object") continue;
     const record = child as HostRecord;
     if (typeof record.url === "string" && record.url.length > 0) {
@@ -44,7 +127,10 @@ function bodyLines(component: object): string[] {
       continue;
     }
     if (typeof record.text !== "string") continue;
-    for (const raw of stripAnsi(record.text).split("\n")) {
+    const plainText = stripAnsi(record.text);
+    // A Text that is exactly one of pi's own key-hint lines (e.g. "(to cancel)" on a waiting page).
+    if (hintLines.has(plainText) || plainText === clickHint) continue;
+    for (const raw of plainText.split("\n")) {
       const line = raw.trim();
       if (line.length === 0 || line.startsWith("> ")) continue;
       lines.push(line);
@@ -73,6 +159,7 @@ export const piLoginAdapter: DialogAdapter = {
   id: "pi-login",
 
   detect(component, ctx) {
+    // pi only: pi ships unminified class names, so the name is a stable mark here. Never copy this to OMP.
     return ctx.host === "pi"
       && constructorName(component) === "LoginDialogComponent"
       && contentChildren(component) !== undefined;
@@ -80,15 +167,22 @@ export const piLoginAdapter: DialogAdapter = {
 
   read(component, _ctx): DialogModel {
     const title = dialogTitle(component);
-    const lines = bodyLines(component);
     if (isAwaitingInput(component)) {
+      // The message, the sign-in link and any instruction are the body (detail); only the host's
+      // own example line is the placeholder.
+      const children = contentChildren(component) ?? [];
+      const example = hostPlaceholderIndex(component, children);
+      const detail = bodyLines(component, example).join("\n");
+      const placeholder = example === undefined ? undefined : stripAnsi(String((children[example] as HostRecord).text)).trim();
       return {
         kind: "input",
         title,
-        placeholder: lines.length > 0 ? lines.join("\n") : undefined,
+        detail: detail.length > 0 ? detail : undefined,
+        placeholder: placeholder || undefined,
         secret: true,
       };
     }
+    const lines = bodyLines(component);
     return { kind: "info", title, text: lines.join("\n") || "Continue in the terminal", closable: true };
   },
 

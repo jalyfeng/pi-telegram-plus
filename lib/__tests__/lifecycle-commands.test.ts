@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { hostCommandName } from "../session-capture.ts";
 import { registerLifecycleCommands } from "../commands/lifecycle.ts";
 import type { CommandRegistry } from "../commands/register.ts";
 import { runWithTelegramTurn } from "../turn-context.ts";
 import { takePendingNotices, type PendingNotice } from "../pending-notices.ts";
+import { runInCommand } from "../tui/command-context.ts";
+import type { CommandScope } from "../tui/origin.ts";
+
+vi.mock("../session-capture.ts", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../session-capture.ts")>();
+  return { ...mod, hostCommandName: vi.fn(() => "pi" as const) };
+});
 
 type HandlerEntry = {
   name: string;
@@ -41,8 +49,8 @@ describe("registerLifecycleCommands /quit and /exit", () => {
     const { registry, handlers } = makeRegistry();
     registerLifecycleCommands(registry);
 
-    expect(handlers.get("quit")?.description).toBe("Shut down pi");
-    expect(handlers.get("exit")?.description).toBe("Shut down pi");
+    expect(handlers.get("quit")?.description).toBe("Shut down the host after confirmation");
+    expect(handlers.get("exit")?.description).toBe("Shut down the host after confirmation");
   });
 
   for (const name of ["quit", "exit"] as const) {
@@ -55,6 +63,17 @@ describe("registerLifecycleCommands /quit and /exit", () => {
 
       expect(confirm).toHaveBeenCalledWith("Quit pi?", "pi will exit and Telegram will stop responding.");
       expect(shutdown).toHaveBeenCalledTimes(1);
+    });
+
+    it(`/${name} names the host omp in its confirmation on OMP`, async () => {
+      vi.mocked(hostCommandName).mockReturnValueOnce("omp");
+      const { registry, handlers } = makeRegistry();
+      registerLifecycleCommands(registry);
+      const { ctx, confirm } = makeCtx(true);
+
+      await handlers.get(name)!.handler("", ctx);
+
+      expect(confirm).toHaveBeenCalledWith("Quit omp?", "omp will exit and Telegram will stop responding.");
     });
 
     it(`/${name} does nothing when the confirmation is declined`, async () => {
@@ -106,6 +125,37 @@ describe("registerLifecycleCommands /reload", () => {
       replyTo: 99,
       html: "✅ Reloaded.",
     })]);
+  });
+
+  it("adds no completion notice on OMP, where the host's result line is in the command's ack", async () => {
+    vi.mocked(hostCommandName).mockReturnValueOnce("omp");
+    const { registry, handlers } = makeRegistry();
+    registerLifecycleCommands(registry);
+    const { ctx, queuedAtReload } = makeReloadCtx();
+    const scope = { telegramMessageId: 55 } as unknown as CommandScope;
+
+    await runWithTelegramTurn(telegramTurn, () => runInCommand(scope, () => handlers.get("reload")!.handler("", ctx)));
+
+    expect(ctx.reload).toHaveBeenCalledTimes(1);
+    expect(queuedAtReload[0]).toEqual([]);
+  });
+
+  it("edits the completion line into the command's ack on pi, which prints no result line", async () => {
+    vi.mocked(hostCommandName).mockReturnValueOnce("pi");
+    const { registry, handlers } = makeRegistry();
+    registerLifecycleCommands(registry);
+    const { ctx, queuedAtReload } = makeReloadCtx();
+    const scope = { telegramMessageId: 55 } as unknown as CommandScope;
+
+    await runWithTelegramTurn(telegramTurn, () => runInCommand(scope, () => handlers.get("reload")!.handler("", ctx)));
+
+    expect(queuedAtReload[0]).toEqual([expect.objectContaining({
+      chatId: 42,
+      messageThreadId: 7,
+      editMessageId: 55,
+      html: "<b>▶️ /reload</b>\n\n✅ Reloaded.",
+    })]);
+    expect(queuedAtReload[0][0].replyTo).toBeUndefined();
   });
 
   it("queues nothing for a /reload typed in the terminal", async () => {

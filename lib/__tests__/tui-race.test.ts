@@ -10,6 +10,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { installRace, takePendingRace, type RaceHandle } from "../tui/race.ts";
+import { isPluginWrapper, pluginWrapperDepth } from "../tui/hooks.ts";
 import { extensionEditorAdapter, extensionInputAdapter, extensionSelectAdapter } from "../tui/adapters/extension.ts";
 import { approvalAdapter } from "../tui/adapters/approval.ts";
 import { hookEntryMethods, UI_CONTEXT_SPECS } from "../tui/entry.ts";
@@ -196,12 +197,13 @@ describe("race wrapper (installRace)", () => {
     expect(takePendingRace()).toBeUndefined();
   });
 
-  it("installs once per function and stays identifiable by name", () => {
+  it("installs one layer per method and stays identifiable as a plugin wrapper", () => {
     const { target, seen } = fakeHost();
     for (const method of ["select", "confirm", "input"] as const) {
       expect(installRace(target, method)).toBe(true);
-      expect(installRace(target, method)).toBe(false);
-      expect((target[method] as () => unknown).name).toBe(`ptp-race:${method}`);
+      expect(installRace(target, method)).toBe(true);
+      expect(pluginWrapperDepth(target, method)).toBe(1);
+      expect(isPluginWrapper(target[method])).toBe(true);
     }
     callSelect(target)("Pick", ["alpha"], {});
     expect(seen.handles[0]).toBeDefined();
@@ -404,7 +406,7 @@ describe("FocusTracker takes the pending race into the entry", () => {
     expect(fake.seen.handles[0]).toBeUndefined();
     expect(takePendingRace()).toBeUndefined();
     // The outermost wrapper is the race: entry hooks must not re-wrap it.
-    expect((fake.target.select as () => unknown).name).toBe("ptp-race:select");
+    expect(isPluginWrapper(fake.target.select)).toBe(true);
     expect(info?.race?.answer("beta")).toBe(true);
   });
 
@@ -420,7 +422,7 @@ describe("FocusTracker takes the pending race into the entry", () => {
     expect(info?.race).toBeDefined();
     expect(info?.race).not.toBe(fake.seen.handles[1]);
     expect(info?.race?.answer(true)).toBe(true);
-    expect((fake.target.confirm as () => unknown).name).toBe("ptp-race:confirm");
+    expect(isPluginWrapper(fake.target.confirm)).toBe(true);
     expect(takePendingRace()).toBeUndefined();
   });
 });
@@ -569,19 +571,21 @@ describe("FocusTracker host gating of the raced methods", () => {
 
   it("pi gets no editor race: its editor takes no options, so nothing could abort it", () => {
     const { fake } = attachTracker("pi");
-    expect((fake.target.select as () => unknown).name).toBe("ptp-race:select");
-    expect((fake.target.editor as () => unknown).name).not.toBe("ptp-race:editor");
+    expect(isPluginWrapper(fake.target.select)).toBe(true);
+    // Not raced: the host editor sees no abort signal and no race handle.
+    (fake.target.editor as (...args: unknown[]) => unknown)("Compose", "draft", {});
+    expect(fake.seen.signals.at(-1)).toBeNull();
+    expect(fake.seen.handles.at(-1)).toBeUndefined();
     // pi has no `approve` to race: a target without the method installs nothing.
     expect(installRace({ notify: () => undefined }, "approve")).toBe(false);
     // pi has no `askDialog` on its tool context either.
-    expect((fake.target.askDialog as () => unknown).name).not.toBe("ptp-race:askDialog");
   });
 
   it("omp races editor and approve as well", () => {
     const { fake, tracker } = attachTracker("omp");
-    expect((fake.target.editor as () => unknown).name).toBe("ptp-race:editor");
-    expect((fake.target.approve as () => unknown).name).toBe("ptp-race:approve");
-    expect((fake.target.askDialog as () => unknown).name).toBe("ptp-race:askDialog");
+    expect(pluginWrapperDepth(fake.target, "editor")).toBe(1);
+    expect(pluginWrapperDepth(fake.target, "approve")).toBe(1);
+    expect(pluginWrapperDepth(fake.target, "askDialog")).toBe(1);
     callEditor(fake.target)("Compose", "draft", {});
     // The entry above took the handle, exactly like select/confirm/input.
     const info = tracker.entryFor({});

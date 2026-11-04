@@ -2,7 +2,7 @@
  * Stage 0 probe extension. Loaded with `-e` next to the plugin so the host
  * creates extension dialogs that the plugin's probe can observe.
  *
- * It is intentionally untyped: it runs under both pi 0.81.1 and OMP 18.12.5,
+ * It is intentionally untyped: it runs under both pi 1.4.0 and OMP 18.12.5,
  * whose extension APIs share the `select/confirm/input/editor/custom` shape but
  * differ around it.
  */

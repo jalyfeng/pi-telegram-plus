@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { checkpointCurrentUpdateCursor, processTelegramUpdatesBatch } from "../polling.ts";
+import { processTelegramUpdatesBatch } from "../polling.ts";
 import type { TelegramConfig, TelegramUpdate } from "../types.ts";
 
 const update = (id: number): TelegramUpdate => ({
@@ -25,10 +25,12 @@ describe("processTelegramUpdatesBatch", () => {
       onError: (error, context) => { errors.push({ error, context }); },
     });
 
+    // The cursor moves past an update before its handler runs, so the failed update is
+    // committed and not retried; the batch stops there.
     expect(processed).toBe(false);
     expect(handled).toEqual([10, 11]);
-    expect(persisted).toEqual([10]);
-    expect(config.lastUpdateId).toBe(10);
+    expect(persisted).toEqual([10, 11]);
+    expect(config.lastUpdateId).toBe(11);
     expect(errors).toHaveLength(1);
     expect(errors[0].error).toBeInstanceOf(Error);
     expect(errors[0].context).toBe("processing");
@@ -75,7 +77,8 @@ describe("processTelegramUpdatesBatch", () => {
 
     expect(processed).toBe(false);
     expect(errors[0].context).toBe("processing");
-    expect(handled).toEqual([21]);
+    // The cursor could not be committed, so the update was not handled and stays unconfirmed.
+    expect(handled).toEqual([]);
     expect(persisted).toEqual([21]);
     expect(config.lastUpdateId).toBe(20);
     expect(errors).toHaveLength(1);
@@ -101,52 +104,8 @@ describe("processTelegramUpdatesBatch", () => {
   });
 });
 
-describe("checkpointCurrentUpdateCursor", () => {
-  it("commits the cursor before a destructive handler when it checkpoints", async () => {
-    let config: TelegramConfig = { botToken: "token", lastUpdateId: 9 };
-    const persisted: number[] = [];
-    let cursorAtDestructiveCall: number | undefined;
-
-    const processed = await processTelegramUpdatesBatch([update(10)], {
-      getConfig: () => config,
-      setConfig: (next) => { config = next; },
-      persistConfig: vi.fn(async (next) => { persisted.push(next.lastUpdateId!); }),
-      handleUpdate: vi.fn(async () => {
-        // A session-replacement handler checkpoints the cursor, then reads it
-        // the way the replacement runtime would after re-activation.
-        await checkpointCurrentUpdateCursor();
-        cursorAtDestructiveCall = config.lastUpdateId;
-      }),
-      onError: () => {},
-    });
-
-    expect(processed).toBe(true);
-    // The checkpoint advanced the cursor to this update before the destructive
-    // call, so a replacement runtime re-reading the cursor will not re-fetch it.
-    expect(cursorAtDestructiveCall).toBe(10);
-    // The normal post-handler persist is idempotent (same id).
-    expect(persisted).toEqual([10, 10]);
-  });
-
-  it("routes the checkpoint through persistUpdate so the coordinator cursor stays consistent", async () => {
-    let config: TelegramConfig = { botToken: "token", lastUpdateId: 9 };
-    const persistedVia: string[] = [];
-
-    await processTelegramUpdatesBatch([update(10)], {
-      getConfig: () => config,
-      setConfig: (next) => { config = next; },
-      persistUpdate: vi.fn(async (_next, item) => { persistedVia.push(`update:${item.update_id}`); }),
-      persistConfig: vi.fn(async () => { persistedVia.push("config"); }),
-      handleUpdate: vi.fn(async () => { await checkpointCurrentUpdateCursor(); }),
-      onError: () => {},
-    });
-
-    // The replacement runtime reads the coordinator cursor, so the checkpoint
-    // must use persistUpdate (not the project-only persistConfig).
-    expect(persistedVia).toEqual(["update:10", "update:10"]);
-  });
-
-  it("leaves the cursor behind the update when a handler does not checkpoint", async () => {
+describe("the cursor is committed before the handler runs", () => {
+  it("has the update's cursor committed while its handler runs", async () => {
     let config: TelegramConfig = { botToken: "token", lastUpdateId: 9 };
     let cursorDuringHandler: number | undefined;
 
@@ -158,12 +117,54 @@ describe("checkpointCurrentUpdateCursor", () => {
       onError: () => {},
     });
 
-    // Without a checkpoint the cursor is still the previous one while the
-    // handler runs — a replacement runtime would re-fetch this update.
-    expect(cursorDuringHandler).toBe(9);
+    expect(cursorDuringHandler).toBe(10);
   });
 
-  it("is a no-op outside an update context", async () => {
-    expect(await checkpointCurrentUpdateCursor()).toBe(false);
+  it("persists the cursor through persistUpdate before the handler", async () => {
+    let config: TelegramConfig = { botToken: "token", lastUpdateId: 9 };
+    const order: string[] = [];
+
+    await processTelegramUpdatesBatch([update(10)], {
+      getConfig: () => config,
+      setConfig: (next) => { config = next; },
+      persistUpdate: vi.fn(async (_next, item) => { order.push(`persist:${item.update_id}`); }),
+      persistConfig: vi.fn(async () => { order.push("config"); }),
+      handleUpdate: vi.fn(async (item) => { order.push(`handle:${item.update_id}`); }),
+      onError: () => {},
+    });
+
+    // The replacement runtime reads the coordinator cursor, so the commit goes through
+    // persistUpdate, and before the handler can replace the runtime.
+    expect(order).toEqual(["persist:10", "handle:10"]);
+  });
+
+  it("does not hand an update to the replacement runtime again when the handler replaces the runtime", async () => {
+    // Telegram serves every update at or above the offset the runtime asks for.
+    const server = [update(10), update(11)];
+    const serve = (offset: number) => server.filter((item) => item.update_id >= offset);
+    // What is on disk is what a replacement runtime starts from.
+    const disk: { config: TelegramConfig } = { config: { botToken: "token", lastUpdateId: 9 } };
+    let memory = disk.config;
+    let tornDown = false;
+    let replacementFirstFetch: number[] | undefined;
+
+    await processTelegramUpdatesBatch(serve(memory.lastUpdateId! + 1), {
+      getConfig: () => memory,
+      setConfig: (next) => { memory = next; },
+      persistUpdate: vi.fn(async (next) => { disk.config = next; }),
+      persistConfig: vi.fn(async () => {}),
+      shouldProcess: () => !tornDown,
+      handleUpdate: vi.fn(async (item) => {
+        if (item.update_id !== 10) return;
+        // The command switches the session: the replacement runtime starts and makes its first
+        // fetch from the stored cursor while this handler is still running, then the old one is disposed.
+        replacementFirstFetch = serve(disk.config.lastUpdateId! + 1).map((next) => next.update_id);
+        tornDown = true;
+      }),
+      onError: () => {},
+    });
+
+    // The replacement must not get update 10 again; 11 was never handled and is still due.
+    expect(replacementFirstFetch).toEqual([11]);
   });
 });

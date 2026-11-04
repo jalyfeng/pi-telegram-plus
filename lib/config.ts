@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BotRecord, BotRegistry, ProjectTelegramBinding, ResolvedTelegramConfig, TelegramConfig, TelegramRenderLevel } from "./types.ts";
+import { MESSAGE_MODES } from "./types.ts";
 import { log } from "./logger.ts";
 
 const configLog = log.child("config");
@@ -125,19 +126,24 @@ export async function readProjectBinding(cwd: string): Promise<{ path: string; b
   while (true) {
     const bindingPath = join(dir, ".pi", "telegram.json");
     if (existsSync(bindingPath)) {
+      let binding: ProjectTelegramBinding;
       try {
         const raw = await readFile(bindingPath, "utf8");
-        const binding = JSON.parse(raw) as ProjectTelegramBinding;
-        const legacyTuiBridge = binding as ProjectTelegramBinding & { tuiBridge?: unknown };
-        if (legacyTuiBridge.tuiBridge !== undefined && !legacyTuiBridgeWarned) {
-          legacyTuiBridgeWarned = true;
-          configLog.warn("tuiBridge is no longer configurable; ignored");
-        }
-        return { path: dir, binding };
+        binding = JSON.parse(raw) as ProjectTelegramBinding;
       } catch {
         // Corrupt binding file — treat as not found so caller falls back to default.
         return undefined;
       }
+      // Unsupported values are a hard error, not a silent fallback.
+      if (binding.messageMode !== undefined && !(MESSAGE_MODES as readonly unknown[]).includes(binding.messageMode)) {
+        throw new Error(`Invalid messageMode "${String(binding.messageMode)}" in ${bindingPath}; expected steer or queue`);
+      }
+      const legacyTuiBridge = binding as ProjectTelegramBinding & { tuiBridge?: unknown };
+      if (legacyTuiBridge.tuiBridge !== undefined && !legacyTuiBridgeWarned) {
+        legacyTuiBridgeWarned = true;
+        configLog.warn("tuiBridge is no longer configurable; ignored");
+      }
+      return { path: dir, binding };
     }
     const parent = dirname(dir);
     if (parent === dir) break;
@@ -277,6 +283,7 @@ export function materializeTelegramConfig(
     if (binding.thinking !== undefined) config.thinking = binding.thinking;
     if (binding.retryCount !== undefined) config.retryCount = binding.retryCount;
     if (binding.bashConfirm !== undefined) config.bashConfirm = binding.bashConfirm;
+    if (binding.messageMode !== undefined) config.messageMode = binding.messageMode;
     if (binding.lastUpdateId !== undefined) config.lastUpdateId = binding.lastUpdateId;
     if (binding.activeChatId !== undefined) config.activeChatId = binding.activeChatId;
   } else {
@@ -344,6 +351,7 @@ export async function persistProjectRuntimeState(
     if (config.thinking !== undefined) binding.thinking = config.thinking;
     if (config.retryCount !== undefined) binding.retryCount = config.retryCount;
     if (config.bashConfirm !== undefined) binding.bashConfirm = config.bashConfirm;
+    if (config.messageMode !== undefined) binding.messageMode = config.messageMode;
 
     await writeProjectBinding(projectDir, binding);
 
@@ -391,6 +399,7 @@ export function preserveInMemoryRuntimeState(
       ? { retryCount: memory.retryCount }
       : {}),
     ...(persisted.bashConfirm === undefined && memory.bashConfirm !== undefined ? { bashConfirm: memory.bashConfirm } : {}),
+    ...(persisted.messageMode === undefined && memory.messageMode !== undefined ? { messageMode: memory.messageMode } : {}),
   };
 }
 
@@ -505,6 +514,7 @@ async function migrateToV3(value: unknown): Promise<BotRegistry> {
           ...(workspace.config.thinking === undefined ? {} : { thinking: workspace.config.thinking }),
           ...(workspace.config.retryCount === undefined ? {} : { retryCount: workspace.config.retryCount }),
           ...(workspace.config.bashConfirm === undefined ? {} : { bashConfirm: workspace.config.bashConfirm }),
+          ...(workspace.config.messageMode === undefined ? {} : { messageMode: workspace.config.messageMode }),
           ...(workspace.config.lastUpdateId === undefined ? {} : { lastUpdateId: workspace.config.lastUpdateId }),
           ...(workspace.config.activeChatId === undefined ? {} : { activeChatId: workspace.config.activeChatId }),
         };

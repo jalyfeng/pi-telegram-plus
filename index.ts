@@ -1,18 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { extname, join, resolve } from "node:path";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createActiveTelegramTransport } from "./lib/active-transport.ts";
 import { registerTelegramAttachmentTool } from "./lib/attachments.ts";
 import { enableConfiguredTelegramOnStartup, readResolvedTelegramConfig, persistProjectRuntimeState, resetProjectBindingCursor, updateBot, getAgentDir } from "./lib/config.ts";
-import { createTelegramController, type TelegramCommandHandler } from "./lib/controller.ts";
+import { createTelegramController, saveIncomingAttachment, type TelegramCommandHandler } from "./lib/controller.ts";
 import { escapeHtml } from "./lib/html.ts";
 import { createHeartbeat } from "./lib/heartbeat.ts";
 import { replayTelegramHistory, type TelegramHistoryEntry } from "./lib/history-replay.ts";
-import { TelegramInstanceCoordinator, failoverHasOtherLiveInstances, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
+import { TelegramInstanceCoordinator, formatFailoverNotice, isGenuineFailover, telegramTokenHash, type TelegramActiveInstance, type TelegramInstanceMetadata } from "./lib/instance-coordinator.ts";
 import { mainOnlyEvents } from "./lib/main-only-pi.ts";
 import { registerTelegramRenderer } from "./lib/renderer.ts";
-import { getActiveSession, installAgentSessionCapture } from "./lib/session-capture.ts";
+import { getActiveSession, hostCommandName, installAgentSessionCapture, isOmpHost } from "./lib/session-capture.ts";
 import { createTelegramTransport, downloadTelegramFile, getTelegramBotUsername, getTelegramFile } from "./lib/telegram-api.ts";
 import { createTelegramUiRuntime } from "./lib/telegram-ui.ts";
 import { formatTelegramStatusLine, clearTelegramStatus, TELEGRAM_STATUS_KEY } from "./lib/status.ts";
@@ -23,12 +22,14 @@ import { deliverPendingNotices } from "./lib/pending-notices.ts";
 import { initLogger, log, type LogLevel } from "./lib/logger.ts";
 import { authorizeTelegramUser, ensureTelegramPairingCode, formatPairingInstructions } from "./lib/pairing.ts";
 import { getCurrentTelegramTurn } from "./lib/turn-context.ts";
+import { runDetached } from "./lib/tui/command-context.ts";
 
 import { registerAllCommands } from "./lib/commands/register.ts";
 import { registerTgMenuCommand } from "./lib/commands/tg-menu.ts";
 import type { TelegramConnectionState } from "./lib/commands/telegram-commands.ts";
 import { syncTelegramCommands, scheduleTelegramCommandRefresh, cancelTelegramCommandRefreshes } from "./lib/menu-commands.ts";
-import { installTuiBridge, tuiBridge, getTuiCommands } from "./lib/tui-bridge.ts";
+import { installTuiBridge, tuiBridge, getTuiCommands, getTuiHostState } from "./lib/tui-bridge.ts";
+import { isTerminalOnlyCommand } from "./lib/terminal-only-commands.ts";
 import { SecretStore } from "./lib/tui/secrets.ts";
 import type { ResolvedTelegramConfig, TelegramConfig, TelegramTurn } from "./lib/types.ts";
 
@@ -90,6 +91,8 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
   let lastStatusError: string | undefined;
   // Collapses a retry storm into one outage notice + one recovery notice.
   const pollingNotices = new PollingNoticeGate();
+  /** True from a polling failure until the next successful poll (see the polling onSuccess). */
+  let pollingFailing = false;
 
   const setConfig = (nextConfig: TelegramConfig) => {
     const routingChanged = config.botToken !== nextConfig.botToken
@@ -106,31 +109,6 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
   const currentSessionCwd = (): string => {
     const session = getActiveSession();
     return session?.extensionRunner?.createCommandContext?.().cwd ?? process.cwd();
-  };
-
-  const sanitizeIncomingFileName = (value: string): string => {
-    const trimmed = value.trim().replace(/\.[^./\\]+$/, "");
-    const sanitized = trimmed
-      .replace(/[^a-zA-Z0-9._-]/g, "_")
-      .replace(/_+/g, "_");
-    const compact = sanitized.replace(/^\.+/, "").replace(/\.+$/, "");
-    return compact.slice(0, 120) || "attachment";
-  };
-
-  const inferIncomingExtension = (fileName: string | undefined, filePath: string | undefined): string => {
-    const source = filePath || fileName;
-    if (!source) return ".bin";
-    const extension = extname(source).toLowerCase();
-    return extension || ".bin";
-  };
-
-  const buildIncomingAttachmentPath = (fileId: string, fileName: string | undefined, filePath: string): string => {
-    const ext = inferIncomingExtension(fileName, filePath);
-    const base = fileName
-      ? sanitizeIncomingFileName(fileName)
-      : sanitizeIncomingFileName(filePath || "telegram-file");
-    const safeFileId = fileId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    return resolve(currentSessionCwd(), `${Date.now()}-${safeFileId.slice(0, 18)}-${base}${ext}`);
   };
 
   const persistCurrentConfig = async (nextConfig = config): Promise<void> => {
@@ -287,7 +265,9 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
       // Hosts that do not surface extension commands through getCommands()
       // (OMP) would otherwise hide /status, /tg, and friends from this menu.
       for (const name of telegramCommands.keys()) add(name);
-      return commands;
+      // Terminal-only commands are not offered in Telegram (see terminal-only-commands.ts).
+      const host = tuiBridge.getHost();
+      return commands.filter((command) => !isTerminalOnlyCommand(command.name, host));
     },
     runCommand: async (name, args) => {
       if (!runCommandFromMenu) return;
@@ -303,6 +283,12 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
   });
 
   registerTelegramRenderer(pi, {
+    isOmp: isOmpHost(),
+    // OMP: the session the TUI runs (InteractiveMode.session, captured by the TUI bridge).
+    // The registry's "Main" entry is not used for the retry events there. pi: unchanged.
+    getRetrySession: isOmpHost()
+      ? () => getTuiHostState().session as ReturnType<typeof getActiveSession>
+      : getActiveSession,
     getConfig: () => config,
     transport,
     getActiveTurn: (chatId?: number, messageThreadId?: number) => {
@@ -346,11 +332,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
       }
       const fileInfo = await getTelegramFile(token, fileId, undefined, config.apiBase);
       const data = await downloadTelegramFile(token, fileInfo.file_path, undefined, config.apiBase);
-      await mkdir(currentSessionCwd(), { recursive: true });
-      const candidateName = buildIncomingAttachmentPath(fileId, fileName || kind, fileInfo.file_path);
-      const outputPath = candidateName;
-      await writeFile(outputPath, data);
-      return outputPath;
+      return saveIncomingAttachment(currentSessionCwd(), fileName || kind, fileInfo.file_path, data);
     },
     getActiveTurn: (chatId: number, messageThreadId?: number) => activeTurns.get(activeTurnKey(chatId, messageThreadId)),
     getActiveTurns: () => [...activeTurns.values()],
@@ -446,6 +428,11 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     },
     onSuccess: () => {
       if (lastStatusError !== undefined) { lastStatusError = undefined; refreshStatus(); }
+      // The first successful poll after a failure means the link is back: replay what an outage kept.
+      if (pollingFailing) {
+        pollingFailing = false;
+        void deliverPendingNotices(transport, controller.showPaged);
+      }
       if (!pollingNotices.success()) return;
       const turn = getCurrentActiveTurn();
       const chatId = turn?.chatId ?? config.activeChatId;
@@ -469,6 +456,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
       // One notice per outage (after the debounce), not one per retry. The
       // cause is included because "polling failed" alone is not actionable.
       const { kind, label } = classifyPollingError(error, context === "processing");
+      if (context !== "processing") pollingFailing = true;
       if (!pollingNotices.failure(kind, Date.now())) return;
 
       const heading = kind === "processing"
@@ -653,10 +641,10 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
 
     if (snapshot.active.reason === "failover") {
       const notifiedByToken = runtimeState.notifiedFailoverByToken!;
-      // Only announce a failover when another live instance is registered besides
-      // self — a genuine multi-instance handoff. A single-instance restart (self
-      // alone) must not spam a "failover" notice on every pi start.
-      if (failoverHasOtherLiveInstances(snapshot, currentCoordinator.instanceId)
+      // Only announce a takeover from another instance: the replaced active record
+      // must name a different instance. A single-instance restart must not spam a
+      // "failover" notice on every pi start.
+      if (isGenuineFailover(snapshot.active, currentCoordinator.instanceId)
         && (notifiedByToken[tokenHash] ?? 0) < snapshot.active.generation
         && config.activeChatId !== undefined) {
         const chatId = config.activeChatId;
@@ -664,7 +652,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
         notifiedByToken[tokenHash] = snapshot.active.generation;
         void transport.sendText(
           chatId,
-          `⚠️ <b>Telegram instance failover</b>\nThe previous active pi instance went offline. This instance is now active.`,
+          formatFailoverNotice(snapshot.active, hostCommandName()),
         ).then((sent) => {
           if (sent.length === 0 && notifiedByToken[tokenHash] === snapshot.active.generation) {
             notifiedByToken[tokenHash] = previousGeneration;
@@ -697,7 +685,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     // own transport drops them once the lease changes, so this active runtime
     // sends them with its own transport. The take inside drains the queue, so a
     // later reconcile never repeats a delivery.
-    deliverPendingNotices(transport);
+    void deliverPendingNotices(transport, controller.showPaged);
     refreshStatus();
   };
 
@@ -728,7 +716,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     return reconcileTail;
   }
 
-  coordinatorTimer = setInterval(requestCoordinatorReconcile, 2_000);
+  coordinatorTimer = runDetached(() => setInterval(requestCoordinatorReconcile, 2_000));
 
   function buildStatusState(error?: string): Parameters<typeof formatTelegramStatusLine>[1] {
     const enabled = !!config.botToken && isTelegramEnabled();
@@ -811,13 +799,18 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     cancelTelegramCommandRefreshes();
     void polling.stop();
     heartbeat.dispose();
-    controller.dispose();
+    controller.dispose({ handOver: true });
     activeTurns.clear();
     ui.dispose();
     clearStatus();
   }
 
-  pi.on("session_start", async () => {
+  // The whole startup (polling, heartbeat, coordinator and menu sync) runs detached from
+  // whatever command re-ran it: a /resume or /new must not stamp its scope onto the
+  // long-running work it starts (see runDetached in lib/tui/command-context.ts).
+  pi.on("session_start", () => runDetached(async () => {
+    // sub-agent sessions re-run this factory; starting the TUI runtime only from the main session keeps a sub-agent's trackers from replacing the main session's host hooks (#32)
+    controller.startTui();
     // Only the main session reaches this handler (sub-agents are filtered by
     // mainOnlyEvents), so it takes over the process runtime from any earlier one.
     if (runtimeState.dispose && runtimeState.dispose !== disposeRuntime) runtimeState.dispose();
@@ -881,7 +874,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     lastStatusError = tuiBridge.isAvailable() ? undefined : `TUI bridge unavailable: ${tuiBridge.getHost()}`;
     heartbeat.startStatusHeartbeat(refreshStatus);
     refreshStatus();
-  });
+  }));
 
   pi.on("session_shutdown", () => {
     disposeRuntime();

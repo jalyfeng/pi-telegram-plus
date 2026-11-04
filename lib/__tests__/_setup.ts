@@ -11,10 +11,24 @@
  * call `initLogger({ dir: <tmpdir>, level, enabled: true })` in their own
  * beforeEach, which runs after this global hook and re-enables logging into a
  * per-test temp directory.
+ *
+ * Desktop guard: no test may start a browser, a clipboard writer or any other
+ * desktop program (see `_desktop-guard.ts`). A launch that reached the guard
+ * and was not drained by its test fails that test here.
  */
-import { beforeEach } from "vitest";
+import { afterEach, beforeEach } from "vitest";
 import { initLogger } from "../logger.ts";
+import { drainDesktopLaunches, installDesktopGuard } from "./_desktop-guard.ts";
+
+installDesktopGuard();
 
 beforeEach(() => {
   initLogger({ enabled: false });
+});
+
+afterEach(() => {
+  const launches = drainDesktopLaunches();
+  if (launches.length === 0) return;
+  const list = launches.map((launch) => `${launch.api}(${launch.program})`).join(", ");
+  throw new Error(`unit test tried to launch a desktop program that was not started: ${list}`);
 });

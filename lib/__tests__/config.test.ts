@@ -350,6 +350,11 @@ describe("Project binding file read/write", () => {
     expect(result).toBeUndefined();
   });
 
+  it("rejects an unsupported messageMode instead of falling back", async () => {
+    await writeProjectBinding(projectDir, { botId: "x", messageMode: "main" } as unknown as ProjectTelegramBinding);
+    await expect(readProjectBinding(projectDir)).rejects.toThrow(/Invalid messageMode "main".*expected steer or queue/);
+  });
+
   it("walks up from a subdirectory to find parent binding", async () => {
     const parentDir = projectDir;
     const childDir = join(parentDir, "a", "b");
@@ -620,6 +625,20 @@ describe("persistProjectRuntimeState", () => {
   afterEach(async () => {
     if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+  });
+
+  it("round-trips messageMode through the project binding", async () => {
+    const bot = makeBot({ token: "mm-tok" });
+    await addBot(bot);
+    await writeProjectBinding(projectDir, { botId: bot.id, enabled: true });
+    const resolved = await resolveTelegramConfig(projectDir);
+
+    await persistProjectRuntimeState(resolved, { botToken: bot.token, telegramEnabled: true, messageMode: "queue" });
+
+    const binding = await readProjectBinding(projectDir);
+    expect(binding?.binding.messageMode).toBe("queue");
+    const reloaded = await resolveTelegramConfig(projectDir);
+    expect(reloaded.config.messageMode).toBe("queue");
   });
 
   it("persists tool, thinking, retryCount, lastUpdateId, activeChatId to the project binding (P1-1)", async () => {

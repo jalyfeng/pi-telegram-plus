@@ -1,6 +1,6 @@
 import type { TgConfigDeps } from "./register.ts";
-import type { TelegramBashConfirm, TelegramConfig, TelegramRenderLevel } from "../types.ts";
-import { BASH_CONFIRM_MODES, RENDER_LEVELS } from "../types.ts";
+import type { TelegramBashConfirm, TelegramConfig, TelegramMessageMode, TelegramRenderLevel } from "../types.ts";
+import { BASH_CONFIRM_MODES, MESSAGE_MODES, RENDER_LEVELS } from "../types.ts";
 import type { MenuUi } from "./telegram-commands.ts";
 
 const KEY_LABELS: Record<string, string> = {
@@ -8,6 +8,7 @@ const KEY_LABELS: Record<string, string> = {
   thinking: "💭 Thinking rendering",
   retry: "🔄 Retry count",
   bash: "🐚 Shell confirm",
+  mode: "📨 Message mode",
 };
 
 // ── Reusable config flow functions (used by the /tg Config submenu) ───────
@@ -103,6 +104,33 @@ export async function configBashFlow(
   deps.setConfig(next);
   await deps.persistConfig(next);
   ui.notify(`${KEY_LABELS.bash} set to ${selected}`, "info");
+}
+
+export async function configModeFlow(
+  ui: MenuUi,
+  deps: TgConfigDeps,
+  value?: string,
+): Promise<void> {
+  const config = deps.getConfig();
+  const current = config.messageMode ?? "steer";
+  let selected: TelegramMessageMode | undefined;
+  if (value && (MESSAGE_MODES as readonly string[]).includes(value)) {
+    selected = value as TelegramMessageMode;
+  } else if (!value) {
+    const labels = [...MESSAGE_MODES].map((mode) => (mode === current ? `● ${mode}` : `  ${mode}`));
+    const choice = await ui.select(KEY_LABELS.mode, labels);
+    if (!choice) return;
+    const index = labels.indexOf(choice);
+    if (index >= 0) selected = MESSAGE_MODES[index];
+  } else {
+    ui.notify("Invalid. Use: steer or queue", "error");
+    return;
+  }
+  if (!selected) return;
+  const next: TelegramConfig = { ...config, messageMode: selected };
+  deps.setConfig(next);
+  await deps.persistConfig(next);
+  ui.notify(`${KEY_LABELS.mode} set to ${selected}`, "info");
 }
 
 async function pickRenderLevel(ui: MenuUi, title: string, current: TelegramRenderLevel): Promise<TelegramRenderLevel | undefined> {

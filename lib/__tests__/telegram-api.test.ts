@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { createTelegramTransport, __resetRichMessagesForTests } from "../telegram-api.ts";
+import { createTelegramTransport, telegramApi, TelegramApiRequestError, __resetRichMessagesForTests } from "../telegram-api.ts";
 import type { TelegramConfig } from "../types.ts";
 import { __drainAndListFiles, __resetSinkForTests, initLogger } from "../logger.ts";
+import { deliverPendingNotices, takePendingNotices } from "../pending-notices.ts";
 
 type FetchImpl = typeof fetch;
 
@@ -211,6 +212,108 @@ describe("createTelegramTransport — network-failure suppression & logging", ()
   });
 });
 
+describe("createTelegramTransport — retries only transient failures", () => {
+  let originalFetch: FetchImpl;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let logDir: string;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    logDir = freshLogDir();
+    __resetSinkForTests();
+    initLogger({ dir: logDir, level: "debug" });
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    warnSpy.mockRestore();
+    await rm(logDir, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  const httpError = (status: number, description: string, retryAfter?: number) => new Response(JSON.stringify({
+    ok: false,
+    description,
+    ...(retryAfter === undefined ? {} : { parameters: { retry_after: retryAfter } }),
+  }), { status, headers: { "content-type": "application/json" } });
+
+  it("a 400 parse rejection makes one HTML attempt and one plain-text attempt, even with retries configured", async () => {
+    const stub = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      return body.parse_mode === "HTML"
+        ? httpError(400, "Bad Request: can't parse entities: unexpected character")
+        : telegramResponse(true, { message_id: 7 });
+    });
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 3 });
+    await expect(transport.sendText(1, "<pre><code>x &lt; y</code></pre>")).resolves.toEqual([{ message_id: 7 }]);
+
+    expect(stub).toHaveBeenCalledTimes(2);
+    const bodies = stub.mock.calls.map(([, init]) => JSON.parse((init as RequestInit).body as string));
+    expect(bodies[0].parse_mode).toBe("HTML");
+    expect(bodies[1].parse_mode).toBeUndefined();
+  });
+
+  it("a 400 rejection on the plain-text fallback is not retried either", async () => {
+    const stub = vi.fn(async () => httpError(400, "Bad Request: message is too long"));
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 3 });
+    await expect(transport.sendText(1, "<b>hi</b>")).rejects.toThrow(/message is too long/);
+
+    expect(stub).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a 5xx answer per retryCount", async () => {
+    const stub = vi.fn(async () => httpError(502, "Bad Gateway"));
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 2 });
+    await expect(transport.sendText(1, "hello")).rejects.toThrow(/Bad Gateway/);
+
+    expect(stub).toHaveBeenCalledTimes(3);
+  });
+
+  it("a non-JSON 502 answer (proxy outage page) is a TelegramApiRequestError carrying the status", async () => {
+    globalThis.fetch = vi.fn(async () => new Response("Bad Gateway (mock outage)", { status: 502 })) as unknown as FetchImpl;
+
+    const error = await telegramApi("tok", "getUpdates", {}).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(TelegramApiRequestError);
+    expect((error as TelegramApiRequestError).status).toBe(502);
+    expect((error as Error).message).toMatch(/502/);
+    expect((error as Error).message).toMatch(/Bad Gateway \(mock outage\)/);
+  });
+
+  it("retries a non-JSON 502 answer per retryCount and reports it as a 502 TelegramApiRequestError", async () => {
+    const stub = vi.fn(async () => new Response("Bad Gateway (mock outage)", { status: 502 }));
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 2 });
+    const error = await transport.sendText(1, "hello").catch((err: unknown) => err);
+
+    expect(stub).toHaveBeenCalledTimes(3);
+    expect(error).toBeInstanceOf(TelegramApiRequestError);
+    expect((error as TelegramApiRequestError).status).toBe(502);
+  });
+
+  it("retries a 429 answer per retryCount", async () => {
+    const stub = vi.fn(async () => httpError(429, "Too Many Requests: retry later", 0));
+    globalThis.fetch = stub as unknown as FetchImpl;
+
+    const { transport, setConfig } = makeTransport();
+    setConfig({ botToken: "tok", retryCount: 2 });
+    await expect(transport.sendText(1, "hello")).rejects.toThrow(/Too Many Requests/);
+
+    expect(stub).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("createTelegramTransport — Rich Messages (native Markdown tables)", () => {
   let originalFetch: FetchImpl;
   let warnSpy: ReturnType<typeof vi.spyOn>;
@@ -334,5 +437,124 @@ describe("createTelegramTransport — Rich Messages (native Markdown tables)", (
 
     expect(calls.map((call) => call.url.split("/").pop())).toEqual(["editMessageText", "editMessageText"]);
     expect(calls[1].body).toMatchObject({ parse_mode: "HTML", text: "<b>Project</b>" });
+  });
+});
+describe("createTelegramTransport — must-deliver sends survive an outage (P2-43)", () => {
+  let originalFetch: FetchImpl;
+  let logDir: string;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    logDir = freshLogDir();
+    __resetSinkForTests();
+    initLogger({ dir: logDir, level: "debug" });
+    takePendingNotices();
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    takePendingNotices();
+    await rm(logDir, { recursive: true, force: true }).catch(() => undefined);
+  });
+
+  const outage = () => new Response("Bad Gateway (mock outage)", { status: 502 });
+
+  it("a must-deliver reply that fails on an outage is queued with its reply target and resolves", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await expect(
+      transport.sendText(42, "<b>reply</b>", 7, 99, undefined, { mustDeliver: true }),
+    ).resolves.toEqual([]);
+
+    const held = takePendingNotices();
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ chatId: 42, messageThreadId: 7, replyTo: 99, html: "<b>reply</b>", mustDeliver: true });
+  });
+
+  it("a send without mustDeliver is not queued and still rejects", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await expect(transport.sendText(42, "progress")).rejects.toThrow(/502/);
+    expect(takePendingNotices()).toEqual([]);
+  });
+
+  it("a non-transient rejection of a must-deliver send is not queued", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ ok: false, description: "Bad Request: message is too long" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    })) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await expect(transport.sendText(42, "x", undefined, undefined, undefined, { mustDeliver: true })).rejects.toThrow(/too long/);
+    expect(takePendingNotices()).toEqual([]);
+  });
+
+  it("only the chunks that were not sent are queued when an outage hits a multi-chunk reply", async () => {
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1;
+      return calls === 1 ? telegramResponse(true, { message_id: 1 }) : outage();
+    }) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+    const text = Array.from({ length: 3 }, (_, i) => `<b>part ${i}</b> ${"x".repeat(3_000)}`).join("\n\n");
+
+    await transport.sendText(42, text, undefined, undefined, undefined, { mustDeliver: true });
+
+    const held = takePendingNotices();
+    expect(held.length).toBeGreaterThanOrEqual(1);
+    expect(held.every((notice) => notice.mustDeliver === true)).toBe(true);
+    expect(held.map((notice) => notice.html).join("")).not.toContain("part 0");
+    expect(held[0].html).toContain("part 1");
+  });
+
+  it("a must-deliver edit that fails on an outage is queued, and a second failed edit replaces it", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await transport.editText(42, 5, "first", undefined, { mustDeliver: true });
+    await transport.editText(42, 5, "second", undefined, { mustDeliver: true });
+
+    const held = takePendingNotices();
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ chatId: 42, editMessageId: 5, html: "second", mustDeliver: true });
+  });
+
+  it("a later successful edit of the same message drops the queued older edit", async () => {
+    let failing = true;
+    globalThis.fetch = vi.fn(async () => (failing ? outage() : telegramResponse(true, true))) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await transport.editText(42, 5, "older", undefined, { mustDeliver: true });
+    failing = false;
+    await transport.editText(42, 5, "newer");
+
+    expect(takePendingNotices()).toEqual([]);
+  });
+
+  it("a closing editButtons with no keyboard that fails on an outage is sent on reconnect", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await expect(transport.editButtons(42, 5, "<b>closed</b>", [], { mustDeliver: true })).resolves.toBeUndefined();
+
+    const reconnected = vi.fn(async () => telegramResponse(true, true));
+    globalThis.fetch = reconnected as unknown as FetchImpl;
+    await deliverPendingNotices(transport);
+
+    expect(reconnected).toHaveBeenCalledTimes(1);
+    const [url, init] = reconnected.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toMatch(/editMessageText$/);
+    expect(JSON.parse(init.body as string)).toMatchObject({ chat_id: 42, message_id: 5, text: "<b>closed</b>", parse_mode: "HTML" });
+  });
+
+  it("a replayed edit that fails again keeps the first failure time", async () => {
+    globalThis.fetch = vi.fn(async () => outage()) as unknown as FetchImpl;
+    const { transport } = makeTransport();
+
+    await transport.sendText(42, "again", undefined, undefined, undefined, { mustDeliver: true, heldSince: 1_000 });
+
+    expect(takePendingNotices(1_000)[0]).toMatchObject({ createdAt: 1_000 });
   });
 });

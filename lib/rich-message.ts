@@ -26,11 +26,103 @@ export const TELEGRAM_RICH_TEXT_LIMIT = 30_000;
  * Rich Markdown markup. Rich Markdown accepts HTML tags, so an unescaped `<`
  * from a tool result or a code sample would be interpreted as markup.
  *
+ * Code is left alone: per GFM/CommonMark, fenced code blocks and code spans
+ * are literal, so escaping them would show `&lt;` to the reader. Fences and
+ * inline code spans are therefore passed through unchanged.
+ *
  * `>` is deliberately left alone: it cannot open a tag on its own, and escaping
  * it would turn `> quoted line` into literal text instead of a blockquote.
  */
 export function escapeRichMarkdown(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let prose: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const open = FENCE_OPEN.exec(lines[i]);
+    if (!open) {
+      prose.push(lines[i]);
+      i++;
+      continue;
+    }
+    if (prose.length) out.push(escapeProse(prose.join("\n")));
+    prose = [];
+    // An unclosed fence runs to the end of the text, as in CommonMark.
+    let end = i + 1;
+    while (end < lines.length && !closesFence(lines[end], open[1])) end++;
+    end = Math.min(end, lines.length - 1);
+    for (let k = i; k <= end; k++) out.push(lines[k]);
+    i = end + 1;
+  }
+  if (prose.length) out.push(escapeProse(prose.join("\n")));
+  return out.join("\n");
+}
+
+const FENCE_OPEN = /^\s*(`{3,}|~{3,})/;
+
+/** True when `line` closes a fence opened with `opener`: same character, at least as long. */
+function closesFence(line: string, opener: string): boolean {
+  const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line);
+  return close !== null && close[1][0] === opener[0] && close[1].length >= opener.length;
+}
+
+/** Escape prose outside fenced code, leaving inline code spans untouched. */
+function escapeProse(text: string): string {
+  // Split on blank lines (kept in the output): a code span cannot cross a paragraph break.
+  return text
+    .split(/(\n[ \t]*\n)/)
+    .map(escapeParagraph)
+    .join("");
+}
+
+/** Escape one paragraph, skipping backtick code spans (a run closed by an equal-length run). */
+function escapeParagraph(text: string): string {
+  let out = "";
+  let plain = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "`") {
+      plain += text[i];
+      i++;
+      continue;
+    }
+    const runEnd = backtickRunEnd(text, i);
+    const close = findClosingRun(text, runEnd, runEnd - i);
+    if (close === -1) {
+      plain += text.slice(i, runEnd);
+      i = runEnd;
+      continue;
+    }
+    out += escapeRichPlain(plain) + text.slice(i, close + (runEnd - i));
+    plain = "";
+    i = close + (runEnd - i);
+  }
+  return out + escapeRichPlain(plain);
+}
+
+function escapeRichPlain(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+}
+
+function backtickRunEnd(text: string, start: number): number {
+  let end = start;
+  while (end < text.length && text[end] === "`") end++;
+  return end;
+}
+
+/** Index of the next backtick run of exactly `length` at or after `from`, or -1. */
+function findClosingRun(text: string, from: number, length: number): number {
+  let j = from;
+  while (j < text.length) {
+    if (text[j] !== "`") {
+      j++;
+      continue;
+    }
+    const end = backtickRunEnd(text, j);
+    if (end - j === length) return j;
+    j = end;
+  }
+  return -1;
 }
 
 /** True when every code fence is closed (an unterminated fence swallows the rest). */

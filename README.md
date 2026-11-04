@@ -12,7 +12,7 @@
 
 - Requires Node.js `>=22.19.0`.
 - Supports exactly one version of each host: **pi coding agent `1.4.0`** and **OMP
-  `18.12.x`**. On any other version, or when the version cannot be read, the extension
+  `18.14.x`**. On any other version, or when the version cannot be read, the extension
   refuses to start and says so in the status bar and in Telegram. There is no fallback
   mode and no multi-version support; a new host version is enabled only after its source
   has been reviewed and the E2E suites pass on it.
@@ -67,14 +67,14 @@ The `/login` steps in `test:e2e:dialogs` put a stub `open` on `PATH` so no brows
 - **Quoted message context** — when you reply to a Telegram message, the quoted text/caption and attachment summary are included in the prompt sent to pi so the agent understands what “this” refers to
 
 ### 🎮 Host Commands, Run by the Host
-A slash command sent from Telegram is typed into the host's own editor and executed by the host, exactly as if you had typed it in the terminal: `/model`, `/resume`, `/tree`, `/fork`, `/settings`, `/login`, `/compact`, `/export` and every other command the host advertises. The plugin does not reimplement any of them. Their output is relayed back as a reply to your message, and any dialog they open appears in Telegram as buttons (see **Dialogs in Telegram**). The Telegram bot menu is built from the host's live command catalog plus `/tg`.
+A slash command sent from Telegram is typed into the host's own editor and executed by the host, exactly as if you had typed it in the terminal: `/model`, `/resume`, `/tree`, `/fork`, `/settings`, `/login`, `/compact`, `/export` and every other command the host advertises. The plugin does not reimplement any of them. Each command gets one reply message that is edited in place: the dialog it opens appears on it as buttons (see **Dialogs in Telegram**), then its result; long output is paged inside the same message. Text the command shows in the terminal (for example `/session`, `/changelog`) is sent as text, taken from the host's structured data rather than the rendered screen. Commands typed in the local terminal are not mirrored to Telegram. The Telegram bot menu is built from the host's live command catalog plus `/tg`.
 
-Shell commands work the same way: `!cmd` and `!!cmd` (output kept out of the model context) are handed to the host's shell path after the **Shell confirm** policy (`/tg` → Config) approves them, so extensions that guard shell commands still see them. The final output is sent back once the command finishes.
+Shell commands work the same way: `!cmd` and `!!cmd` (output kept out of the model context) are handed to the host's shell path after the **Shell confirm** policy (`/tg` → Config) approves them, so extensions that guard shell commands still see them. The final output is sent back once the command finishes, with `exit N` when it fails.
 
 ### 📨 Message Delivery (TUI Parity)
 Messages sent from Telegram behave **exactly like typing in the pi terminal**:
 
-- **Main thread running** — the message steers into the main turn, like typing while the agent works.
+- **Main thread running** — by default the message steers into the main turn, like typing while the agent works. Set **Message mode** to `queue` (`/tg` → Config) to send it as a follow-up after the turn ends instead.
 - **Background workflow running** (main loop idle) — the message is held (`⏳ π is busy — holding your message…`) and delivered as a **fresh main-thread turn** with a plain prompt once the main loop settles. It is never injected into a workflow agent's conversation.
 - **Everything idle** — the message starts a fresh main-thread turn immediately.
 
@@ -96,7 +96,7 @@ When a command or turn you started from Telegram makes the host ask something, t
 | pi built-in pickers: models, scoped models, sessions (`/resume`), session tree (`/tree`), fork/clone messages, settings (with search and submenus), project trust, login providers | Read from the component's own fields; your choice is applied through the host's input path |
 | pi login prompts (API key, pasted codes) | Always treated as secrets: your reply is deleted from the chat right after it is used and never echoed back. Remembered secrets are masked as `***` in everything the plugin sends afterwards; see [docs/compatibility.md](docs/compatibility.md#secrets) for the limits |
 | OMP built-in pickers and settings (`/model` including the role assignment step, `/settings`, `/login`, `/agents`, …) | Read from the components' semantic description and answered with structured events |
-| [`@capyup/pi-goal`](https://www.npmjs.com/package/@capyup/pi-goal) `custom()` dialogs (draft confirmation, `goal_question`, `goal_questionnaire`) | A dedicated adapter turns them into option buttons, a typed-answer path and Submit/Cancel |
+| OMP text panels and reports (`/session`, `/changelog`, `/hotkeys`, `/jobs`, `/usage`, `/mcp`, …) | Read from the components' semantic description and shown as text with the panel's own buttons |
 | Anything the plugin cannot model | A plain notice — "the terminal shows a dialog Telegram cannot handle, please answer it there" — with a single Cancel button. The plugin never guesses keystrokes or mirrors screen text |
 
 A new command from the same chat while one of its dialogs is open closes that dialog first; `/stop` cancels it.
@@ -121,9 +121,15 @@ A new command from the same chat while one of its dialogs is open closes that di
 - Automatic photo detection (jpg/png/webp → send as photo, fallback to document)
 
 **Download (Telegram → user → agent):**
-- Automatically saves incoming photos, documents, videos, audio, voice, stickers to the working directory
+- Automatically saves incoming photos, documents, videos, audio, voice, stickers to `.pi/telegram-attachments/` in the working directory (original file name; a repeated name gets ` (2)`, ` (3)`, …)
 - Reports saved paths back to the user
 - Handles name sanitization and deduplication
+
+### 🚧 Not yet supported
+- **OMP `/tree`** — adding a label to an entry is not available from Telegram yet. Use the terminal.
+- **OMP `/setup`** — the setup wizard is not available from Telegram yet. Run it in the terminal.
+- **OMP `/branch`** — stepping back through earlier points is not available from Telegram yet; only the current point can be chosen. Use the terminal to pick an earlier point.
+- **OMP `/extensions`** — an entry that is disabled by a master switch still shows a button on Telegram, but the host ignores the tap. Turn it on from the terminal.
 
 ---
 
@@ -192,7 +198,7 @@ All bot registry, project binding, config and instance-switching actions live in
 
 #### `/tg` — Telegram management menu
 
-Opens an inline-keyboard menu with four submenus (each with a **⬅️ Back** option to return to the parent level):
+Opens an inline-keyboard menu with four submenus (each with a **⬅️ Back** option to return to the parent level; cancelling a prompt with its Cancel button, `/stop` or Esc closes the whole menu):
 
 | Menu | Actions |
 |------|--------|
@@ -201,7 +207,6 @@ Opens an inline-keyboard menu with four submenus (each with a **⬅️ Back** op
 | **⚙️ Config** | **🔧 Tool** — hidden / brief / full · **💭 Thinking** — hidden / brief / full · **🧠 Thinking level** — model reasoning effort (OMP only, shown when the model supports it; on pi use `/thinking`) · **🔄 Retry** — 0–10 · **🐚 Shell confirm** — dangerous / always / never |
 | **🔄 Switch instance** | List live pi instances sharing this bot token; select one to switch. Must be run on the currently active instance. |
 | **🛠 Debug info** | The plugin's own diagnostics (model, thinking, streaming, entries, cwd). `/debug` itself runs the host's command. |
-| **❌ Close** | Exit the menu. |
 
 The menu uses the same UI abstraction that renders Telegram inline keyboards (`ctx.ui.select` / `input` / `inputSecret` / `confirm`). In Telegram, navigation edits **one message in place** — moving between levels updates that message instead of posting a new one per level. A leaf action that needs its own prompt (input, confirm, a value picker) appears below it, and the menu then continues as a fresh message under that prompt. The local TUI falls back to ordinary selects. Each leaf action shows a result notification, then returns to its submenu.
 
@@ -256,9 +261,10 @@ Common issues and diagnostic steps. The extension writes a structured JSON Lines
 - A dialog the plugin cannot model arrives as a plain "please answer it in the terminal" notice with a Cancel button. That is expected; answer it in the terminal.
 - Inline keyboards are removed once the dialog is answered on either side or cancelled with `/stop`. Re-run the command to get a fresh keyboard.
 - Check the log at `PI_TELEGRAM_PLUS_LOG_LEVEL=debug`: `tui-broker` lines show which adapter claimed the dialog and who owned it.
+- See **Not yet supported** for dialogs Telegram cannot drive yet.
 
 ### The bot says the host version is not supported
-- The plugin only runs on pi `1.4.0` and OMP `18.12.x` and stops on anything else (see **Compatibility**). Install a supported host version.
+- The plugin only runs on pi `1.4.0` and OMP `18.14.x` and stops on anything else (see **Compatibility**). Install a supported host version.
 
 ### `/tg` is missing
 - The extension must be registered as a pi package. Re-run `pi install npm:pi-telegram-plus` (or `pi packages add .` from source) and restart pi.

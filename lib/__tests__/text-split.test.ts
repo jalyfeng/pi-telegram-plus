@@ -216,3 +216,64 @@ describe("splitTelegramHtml — table consistency", () => {
     }
   });
 });
+
+describe("splitTelegramHtml — plain paragraph cut points (P2-7)", () => {
+  const MAX = 3600;
+
+  it("breaks a long line-per-sentence paragraph only at line ends", () => {
+    const lines = Array.from({ length: 150 }, (_, i) => {
+      const prefix = `Paragraph ${String(i).padStart(3, "0")}: the quick brown fox jumps`;
+      return prefix + "-".repeat(80 - prefix.length);
+    });
+    const text = lines.join("\n");
+    const chunks = splitTelegramHtml(text, MAX);
+    expect(chunks.length).toBeGreaterThan(1);
+    const lineSet = new Set(lines);
+    for (const chunk of chunks) {
+      expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(MAX);
+      for (const line of chunk.split("\n")) expect(lineSet.has(line)).toBe(true);
+    }
+    expect(chunks.join("\n")).toBe(text);
+  });
+
+  it("cuts a single long line at a space, not mid-word", () => {
+    const words = Array.from({ length: 1000 }, (_, i) => `word${i}`);
+    const text = words.join(" ");
+    const chunks = splitTelegramHtml(text, MAX);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(MAX);
+      for (const tok of chunk.split(" ")) expect(tok).toMatch(/^word\d+$/);
+    }
+    expect(chunks.join(" ")).toBe(text);
+  });
+
+  it("hard-cuts a space-free run without splitting an HTML entity", () => {
+    // "&amp;" starts at index 3598, so a 3600-byte head ends in "&a".
+    const text = "x".repeat(3598) + "&amp;" + "y".repeat(5000);
+    const chunks = splitTelegramHtml(text, MAX);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(MAX);
+      expect(chunk).not.toMatch(/&[#\w]*$/);
+    }
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("hard-cuts a space-free run without splitting an HTML tag", () => {
+    const text = "x".repeat(3598) + "<b>" + "y".repeat(5000);
+    const chunks = splitTelegramHtml(text, MAX);
+    for (const chunk of chunks) {
+      expect(chunk).not.toMatch(/<[^>]*$/);
+    }
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("hard-cuts base64-like text and keeps all content", () => {
+    const text = "QUJD".repeat(3000);
+    const chunks = splitTelegramHtml(text, MAX);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) expect(Buffer.byteLength(chunk, "utf8")).toBeLessThanOrEqual(MAX);
+    expect(chunks.join("")).toBe(text);
+  });
+});

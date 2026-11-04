@@ -8,13 +8,13 @@
 import { escapeHtml } from "../html.ts";
 import { log } from "../logger.ts";
 import type { TelegramTransport } from "../types.ts";
-import { checkpointCurrentUpdateCursor } from "../polling.ts";
 import { queuePendingNotice } from "../pending-notices.ts";
 import type { TuiBridgeAdapter } from "../tui-bridge.ts";
 import type { Origin, OriginTracker } from "./origin.ts";
 import type { OutputCapture } from "./output.ts";
 import type { FocusTracker } from "./focus.ts";
 import { currentHostName, currentHostState, installHostCapture, readEditorText, type HostState } from "./host.ts";
+import { runInCommand } from "./command-context.ts";
 import type { TuiHost } from "../tui-bridge.ts";
 
 const gatewayLog = log.child("tui-gateway");
@@ -33,6 +33,9 @@ export type GatewayTextRequest = {
   label: string;
   origin: Origin;
   transport: Pick<TelegramTransport, "sendText" | "editText">;
+  /** Edit this existing message (e.g. the confirmation the user just answered) into
+   *  the ack instead of sending a new one. Omitted: a new ack message is sent. */
+  reuseMessageId?: number;
 };
 
 export type GatewayDeps = {
@@ -102,7 +105,7 @@ export class CommandGateway {
    * only owns the ack, the scope, and the output capture. */
   async runText(request: GatewayTextRequest): Promise<boolean> {
     if (!(await this.hostReady(request.label))) return false;
-    return this.submitScoped(request.text, request.label, request.origin, request.transport);
+    return this.submitScoped(request.text, request.label, request.origin, request.transport, request.reuseMessageId);
   }
 
   private async hostReady(name: string): Promise<boolean> {
@@ -121,28 +124,40 @@ export class CommandGateway {
 
   /** Shared submit path (run/runText): ack the text, open the scope under
    * `label`, bind the output, submit to the editor, and let the scope settle
-   * on its own. */
+   * on its own. With `reuseMessageId` the ack edits that message instead of
+   * sending a new one. */
   private async submitScoped(
     commandText: string,
     label: string,
     origin: Origin,
     transport: GatewayRequest["transport"],
+    reuseMessageId?: number,
   ): Promise<boolean> {
     const draft = (this.deps.readDraft ?? readEditorText)();
     const ackHtml = `<b>▶️ ${escapeHtml(commandText)}</b>`;
-    const sent = await transport.sendText(
-      origin.chatId,
-      ackHtml,
-      origin.messageThreadId,
-      origin.sourceMessageId,
-    ).catch((err) => {
-      gatewayLog.debug("send gateway ack failed", { err, name: label });
-      return undefined;
-    });
-    const messageId = sent?.[0]?.message_id;
+    let messageId: number | undefined;
+    if (reuseMessageId !== undefined) {
+      await transport.editText(origin.chatId, reuseMessageId, ackHtml).catch((err) => {
+        gatewayLog.debug("edit gateway ack failed", { err, name: label });
+      });
+      messageId = reuseMessageId;
+    } else {
+      const sent = await transport.sendText(
+        origin.chatId,
+        ackHtml,
+        origin.messageThreadId,
+        origin.sourceMessageId,
+      ).catch((err) => {
+        gatewayLog.debug("send gateway ack failed", { err, name: label });
+        return undefined;
+      });
+      messageId = sent?.[0]?.message_id;
+    }
     if (messageId === undefined) return true;
 
     const scope = this.deps.origin.begin(origin, label, commandText, draft);
+    // One command, one message: a dialog the command opens is drawn on this ack.
+    scope.telegramMessageId = messageId;
     this.deps.output.bind(scope, {
       chatId: origin.chatId,
       messageThreadId: origin.messageThreadId,
@@ -150,15 +165,10 @@ export class CommandGateway {
       ackHtml,
     });
 
-    // Session-replacing commands (/fork, /clone, /resume, ...) reactivate the
-    // plugin in-process; the replacement runtime re-reads the on-disk cursor and
-    // Telegram re-serves this update while it is still unconfirmed, re-running the
-    // command. Commit the cursor before submitting. No-op outside an update.
-    await checkpointCurrentUpdateCursor();
     const submit = this.deps.bridge.submitResult ?? ((text: string) => ({ ok: this.deps.bridge.submit(text) }));
     let result: { ok: boolean; result?: unknown };
     try {
-      result = submit.call(this.deps.bridge, commandText);
+      result = runInCommand(scope, () => submit.call(this.deps.bridge, commandText));
     } catch (err) {
       result = { ok: false };
       gatewayLog.debug("gateway submit threw", { err, name: label });
@@ -198,10 +208,6 @@ export class CommandGateway {
     if (messageId === undefined) return true;
     const draft = (this.deps.readDraft ?? readEditorText)();
     try {
-      // /new replaces the session in-process; the replacement runtime re-reads
-      // the cursor, so commit this update before the destructive call or the
-      // unconfirmed /new is re-served and run a second time.
-      await checkpointCurrentUpdateCursor();
       const result = await this.deps.newSession!(request.origin);
       if (result && "cancelled" in result && result.cancelled) {
         await request.transport.editText(request.origin.chatId, messageId, `${ackHtml}\n\n<i>Cancelled</i>`).catch(() => undefined);

@@ -38,6 +38,32 @@ export function takeUtf8Prefix(text: string, maxBytes: number): { head: string; 
   return { head: text.slice(0, end), tail: text.slice(end) };
 }
 
+/**
+ * Pick the cut index inside `head` (the largest prefix that fits the limit).
+ * Prefers the last "\n", then the last " ", but only when it sits in the second
+ * half of `head`; otherwise hard-cuts at `head.length`. The result is moved back
+ * so it never lands inside an HTML tag or entity.
+ */
+function chooseCut(head: string): number {
+  const minCut = head.length / 2;
+  const nl = head.lastIndexOf("\n");
+  let cut: number;
+  if (nl >= 0 && nl >= minCut) {
+    cut = nl;
+  } else {
+    const sp = head.lastIndexOf(" ");
+    cut = sp >= 0 && sp >= minCut ? sp : head.length;
+  }
+  const before = head.slice(0, cut);
+  // Unfinished tag: "<..." with no ">" after its "<" (tags may contain spaces).
+  const tagStart = before.search(/<[^<>]*$/);
+  if (tagStart > 0) return tagStart;
+  // Unfinished entity: "&" plus at most a few name/number chars, no ";" yet.
+  const entityStart = before.search(/&[#\w]{0,12}$/);
+  if (entityStart > 0) return entityStart;
+  return cut;
+}
+
 export function splitTelegramText(text: string): string[] {
   if (byteLength(text) <= TELEGRAM_TEXT_LIMIT) return [text];
   const chunks: string[] = [];
@@ -45,8 +71,7 @@ export function splitTelegramText(text: string): string[] {
 
   while (byteLength(rest) > TELEGRAM_TEXT_LIMIT) {
     const { head: safeHead } = takeUtf8Prefix(rest, SAFE_TEXT_CHUNK);
-    let cut = Math.max(safeHead.lastIndexOf("\n"), safeHead.lastIndexOf(" "));
-    if (cut < 500) cut = safeHead.length;
+    let cut = chooseCut(safeHead);
 
     let head = rest.slice(0, cut);
     let tail = rest.slice(cut);
@@ -264,8 +289,7 @@ function splitPlainBytes(text: string, maxBytes: number): string[] {
   let rest = text;
   while (byteLength(rest) > maxBytes) {
     const { head } = takeUtf8Prefix(rest, maxBytes);
-    let cut = Math.max(head.lastIndexOf("\n"), head.lastIndexOf(" "));
-    if (cut <= 0) cut = head.length;
+    const cut = chooseCut(head);
     chunks.push(rest.slice(0, cut));
     rest = rest.slice(cut).replace(/^\s+/, "");
   }

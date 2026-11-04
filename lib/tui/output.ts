@@ -1,7 +1,10 @@
 /**
  * OutputCapture (stage 1): sends the host's own command output back to
- * Telegram. It only claims output while a Telegram-issued command scope is
- * active; agent messages stay with the existing renderer.
+ * Telegram. It claims a chat component only while a Telegram-issued command
+ * scope is active AND the component is added inside that command's call chain
+ * (command-context.ts, v8 §0.2). Agent messages and tool calls run in the agent
+ * loop's own context and stay with the existing renderer. Content is read from
+ * the component's data fields only; `render()` is never called.
  */
 import { existsSync } from "node:fs";
 import { escapeHtml } from "../html.ts";
@@ -9,8 +12,13 @@ import { markdownToTelegramHtml } from "../markdown.ts";
 import { splitTelegramHtml } from "../text-split.ts";
 import { stripAnsi } from "../ansi.ts";
 import { log, type LogFields } from "../logger.ts";
+import { queuePendingNotice } from "../pending-notices.ts";
 import type { TelegramTransport } from "../types.ts";
-import { hookMethod, isHostObject, onHostState, type HostState } from "./host.ts";
+import { hookMethod, hookOwnedMethod, isHostObject, onHostState, type HostState } from "./host.ts";
+import { installHook, removeOwnerHooks } from "./hooks.ts";
+import { clearCommandMessageRoute, currentCommandScope, runAsHistory, runOutsideCommand, setCommandMessageRoute, type CommandMessageRoute } from "./command-context.ts";
+import { describedText } from "./describe-text.ts";
+import { describeTree } from "./adapters/tsp.ts";
 import type { CommandScope, OriginTracker } from "./origin.ts";
 import type { SecretStore } from "./secrets.ts";
 
@@ -22,16 +30,18 @@ const MAX_COMPONENTS = 20;
 /** OMP keeps flushing PTY output asynchronously after `setComplete` returns;
  * render the final frame one beat later so that is what we push (3E). */
 const BASH_SETTLE_MS = 300;
-const AGENT_CTORS = /^(AssistantMessageComponent|UserMessageComponent|ToolExecutionComponent|BashExecutionComponent|qs|_Te|Aw)$/;
-const AGENT_FIELDS = ["lastMessage", "hasToolCalls", "toolCallId"];
-/** Commands that reset the transcript (`chat.clear()`) and then mount their
- * own result component in the same task: `/compact`'s summary, OMP's
- * `/clear` result (command-controller.ts 1349), `/delete` and the new-session
- * flow behind `/new` (command-controller.ts 1380). The `clear` hook marks the
- * chat as rebuilding until the next tick, so children added during that tick
- * are command output for these labels, not history; history components stay
- * excluded by identity (`isAgentComponent`) below. */
-const REBUILD_OUTPUT_LABELS = new Set(["compact", "clear", "delete", "new"]);
+/** Host methods that rebuild the transcript from session history (v8 §0.2):
+ * pi 1.4.0 interactive-mode.ts 3960/4060/4177/4229, OMP 18.12.5
+ * interactive-mode.ts 4049/8019/8030. Children they add are not command output. */
+const HISTORY_REBUILD_METHODS = [
+  "renderSessionItems",
+  "renderSessionEntries",
+  "renderInitialMessages",
+  "rebuildChatFromMessages",
+  "renderSessionContextIncrementally",
+] as const;
+/** Container depth read by `contentHtml`: the root plus this many nested levels. */
+const CONTENT_MAX_DEPTH = 3;
 
 /** The host's shell-execution component (D3b), claimed only by a "!" scope.
  * Minified host builds rename constructors, so the name match is only the
@@ -40,27 +50,73 @@ const REBUILD_OUTPUT_LABELS = new Set(["compact", "clear", "delete", "new"]);
 const BASH_EXECUTOR_CTORS = /^BashExecutionComponent$/;
 const BASH_EXECUTOR_METHODS = ["setExpanded", "appendOutput", "setComplete", "getOutput"] as const;
 
+/** Containers the host gives its live panels (/btw, /omfg, /cleanse; oh-my-pi@v18.14.1
+ * interactive-mode.ts 2134-2136). A panel streams its text, so only its settled
+ * result is output: it is read when the panel's terminal method runs. */
+const LIVE_PANEL_CONTAINERS = ["btwContainer", "omfgContainer", "cleanseContainer"] as const;
+/** Terminal methods of those panels (btw-panel.ts, omfg-panel.ts, cleanse-panel.ts). */
+const LIVE_PANEL_TERMINAL_METHODS = ["markComplete", "markError", "markAborted", "markSaved", "markRejected", "finish"] as const;
+
 export type OutputTelegram = {
   chatId: number;
   messageThreadId?: number;
   messageId: number;
-  /** Header already sent by the gateway; the first edit keeps it. */
+  /** Header already sent by the gateway; every render of the message starts with it. */
   ackHtml: string;
 };
 
+/** Shows a command's output that does not fit one message on that message, as
+ * pages (the DialogBroker draws them with its ◀ / ▶ buttons). */
+export type OutputPager = (target: { chatId: number; messageThreadId?: number; messageId: number }, title: string, html: string) => void;
+
 type OutputTransport = Pick<TelegramTransport, "sendText" | "editText" | "sendDocument">;
+
+/** The Telegram turn a host notice belongs to (the turn's chat, topic and source message). */
+export type NoticeTarget = {
+  chatId: number;
+  messageThreadId?: number;
+  sourceMessageId?: number;
+  /** Live: the final auto-retry error the turn already shows (see TelegramTurn.finalErrorShown). */
+  readonly finalErrorShown?: string;
+  /** Live: the last failed attempt's error in the turn (see TelegramTurn.failedAttemptError). */
+  readonly failedAttemptError?: string;
+};
+
+/** Host notices (`showStatus` / `showError` / `showWarning`) raised while a Telegram turn
+ * runs, outside any command scope. Without it they would be dropped (#33). */
+export type TurnNotice = {
+  /** The turn a notice raised now belongs to; undefined when no Telegram turn runs (the notice stays in the terminal). */
+  turn(): NoticeTarget | undefined;
+  /** Deliver one formatted notice (HTML) to that turn. */
+  send(target: NoticeTarget, html: string): void;
+};
+
+/** Key of a chat (or topic) in the SecretStore; the one place it is spelled out. */
+export function secretChatKey(chatId: number, messageThreadId?: number): string {
+  return `${chatId}:${messageThreadId ?? "main"}`;
+}
+
+/**
+ * A host component that updates itself after it is mounted (a `ChatBlock`, which has a public
+ * `isTranscriptBlockFinalized()`). `html` is what it showed when it was captured, used by the
+ * interim renders; the final render reads `block` again with the same reader (`contentHtml`).
+ */
+type LiveBlock = { block: Record<string, unknown>; html: string };
+
+/** One captured piece of output: a fixed text, or a self-updating block. */
+type OutputPart = string | LiveBlock;
 
 type Binding = {
   scope: CommandScope;
   telegram: OutputTelegram;
-  entries: string[];
+  entries: OutputPart[];
   dropped: number;
   /** BashExecutionComponents claimed by a "!" scope (D3b); final render once. */
   bashComponents: Record<string, unknown>[];
-  /** Output already rendered into the ack message (non-overflow case). */
-  outputHtml: string;
-  /** True once the ack message could not hold the output and tails were sent. */
-  overflowed: boolean;
+  /** All output collected so far, in order (one part per component). */
+  parts: OutputPart[];
+  /** True once the final content was handed to the pager (it no longer fits one message). */
+  paged: boolean;
   lastText?: string;
   lastEditAt: number;
   timer?: NodeJS.Timeout;
@@ -71,8 +127,12 @@ type Binding = {
 
 export class OutputCapture {
   private binding?: Binding;
-  private readonly rebuilding = new WeakSet<object>();
+  /** Bindings of scopes that have ended, kept so a dialog that opens after its command
+   * ended can redraw the message with its summary (§4.3 rule 1). */
+  private readonly finishedBindings = new WeakMap<CommandScope, Binding>();
   private readonly attached = new WeakSet<object>();
+  /** Objects that already carry the command-context stages (prompt, history). */
+  private readonly chainHooked = new WeakSet<object>();
   private statusDepth = 0;
   private unsubscribe?: () => void;
   /** Prototypes whose `exportToHtml`/`exportToJsonl` already carry the
@@ -81,6 +141,10 @@ export class OutputCapture {
   /** `attached` already holds `mode` from the status-hook loop; report hooks
    * need their own dedupe set. */
   private readonly reportHooked = new WeakSet<object>();
+  /** Nesting depth of `mode.showCommandReport` calls in progress. While it is
+   * above zero the report container's `addChild` is part of that report, which
+   * `showCommandReport` already pushes with its title (see `attach`). */
+  private reportDepth = 0;
   /** D3b: bash components claimed by the "!" scope, and the ones whose final
    * render already went out. */
   private readonly bashTracked = new WeakSet<object>();
@@ -88,22 +152,55 @@ export class OutputCapture {
   /** Components whose `setComplete` has fired; only these may owe a final
    * render at scope end (F2: an unfinished one never pushes its running frame). */
   private readonly bashCompleted = new WeakSet<object>();
+  /** The arguments each claimed bash component's `setComplete` received
+   * (exit code, cancelled flag), read by the final render (X-1). */
+  private readonly bashStatus = new WeakMap<object, BashStatus>();
+  /** Components claimed at call time by `presentCommandOutput` inside a command
+   * chain. A later mount of the same component (inside that chain, from
+   * `addChild`) is not pushed a second time. */
+  private readonly presentClaimed = new WeakSet<object>();
+  /** Mode objects that already carry the `presentCommandOutput` stage. */
+  private readonly presentHooked = new WeakSet<object>();
+  /** Live panels claimed inside a command chain, and the ones whose result already went out. */
+  private readonly livePanels = new WeakSet<object>();
+  private readonly livePanelDone = new WeakSet<object>();
+  private pager?: OutputPager;
+  /** Set by a teardown: this runtime's transport drops sends, so final renders are handed over. */
+  private handingOver = false;
+  /** Registered while this capture runs: a command's own lines (notices) and its message. */
+  private readonly route: CommandMessageRoute = {
+    notice: (scope, html) => {
+      const binding = this.binding;
+      if (!binding || binding.finished || binding.scope !== scope) return false;
+      this.push(html);
+      return true;
+    },
+  };
 
   constructor(
     private readonly transport: OutputTransport,
     private readonly origin: OriginTracker,
     private readonly secrets?: SecretStore,
+    private readonly turnNotice?: TurnNotice,
   ) {}
+
+  /** Where the final output goes when it does not fit one message. */
+  attachPager(pager: OutputPager): void {
+    this.pager = pager;
+  }
 
   start(): void {
     if (this.unsubscribe) return;
+    setCommandMessageRoute(this.route);
     this.unsubscribe = onHostState((state) => this.attach(state));
   }
 
   stop(): void {
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    clearCommandMessageRoute(this.route);
     this.finish();
+    removeOwnerHooks(this);
   }
 
   bind(scope: CommandScope, telegram: OutputTelegram): void {
@@ -114,8 +211,8 @@ export class OutputCapture {
       entries: [],
       dropped: 0,
       bashComponents: [],
-      outputHtml: "",
-      overflowed: false,
+      parts: [],
+      paged: false,
       lastEditAt: 0,
       flushing: false,
       finalPending: false,
@@ -133,6 +230,24 @@ export class OutputCapture {
     return binding.bashComponents.some((child) => !this.bashCompleted.has(child));
   }
 
+  /** A dialog closed on the message of a command whose scope had already ended: write the
+   * message again as header + dialog summaries + output (no "Done" once a summary exists). */
+  settleAfterDialog(scope: CommandScope): void {
+    const binding = this.finishedBindings.get(scope);
+    if (!binding) return;
+    void this.render(binding, true);
+  }
+
+  /**
+   * Teardown (P2-21): the runtime is about to lose its send lease. Its final render would be
+   * dropped by the transport, so from now on it is queued as a pending notice for the runtime
+   * that replaces this one (the same path /new and /reload use). Interim renders are not needed:
+   * the final content replaces them.
+   */
+  handOver(): void {
+    this.handingOver = true;
+  }
+
   /** Flush the active binding and stop claiming output for it. */
   finish(): void {
     const binding = this.binding;
@@ -145,6 +260,9 @@ export class OutputCapture {
       else outputLog.debug("bash component unfinished at scope end; running frame dropped", { scope: binding.scope.id });
     }
     binding.finished = true;
+    this.finishedBindings.set(binding.scope, binding);
+    // The scope is over: whatever dialog stood on the message has no say in its final content.
+    binding.scope.dialogOpen = false;
     if (binding.timer) {
       clearTimeout(binding.timer);
       binding.timer = undefined;
@@ -164,20 +282,82 @@ export class OutputCapture {
     if (!binding.bashComponents.includes(child)) binding.bashComponents.push(child);
     if (this.bashTracked.has(child)) return;
     this.bashTracked.add(child);
-    hookMethod(child, "setComplete", "output-bash-complete", undefined, () => {
+    hookMethod(child, "setComplete", "output-bash-complete", undefined, (args) => {
       this.bashCompleted.add(child);
+      this.bashStatus.set(child, { exitCode: args[0], cancelled: args[1] === true });
       // Postpone the idle end past the settle delay so `finish` cannot beat
       // the timer and render before the host's async output flush landed.
       this.origin.touch(binding.scope);
       const timer = setTimeout(() => this.emitBashOutput(child, binding, false), BASH_SETTLE_MS);
       timer.unref?.();
-    });
+    }, this);
+  }
+
+  /** Claim the component(s) a host `presentCommandOutput` call is given. Runs
+   * before the host call, so an `addChild` the host makes synchronously inside
+   * it finds the component already claimed. Only a call made inside this
+   * binding's command chain is output (v8 §0.2). */
+  private claimPresented(presented: unknown): void {
+    const binding = this.binding;
+    if (!binding || binding.finished || currentCommandScope() !== binding.scope) return;
+    const list = Array.isArray(presented) ? presented : [presented];
+    for (const child of list) {
+      if (!isHostObject(child) || this.presentClaimed.has(child)) continue;
+      this.presentClaimed.add(child);
+      const entry = this.captureOf(child);
+      if (entry) this.push(entry);
+    }
+  }
+
+  /** What a claimed component contributes: its text as read now (`contentHtml`). A self-updating
+   * block (it has a public `isTranscriptBlockFinalized`) is kept by reference too, so the final
+   * render reads it again. */
+  private captureOf(child: Record<string, unknown>): OutputPart | undefined {
+    const html = contentHtml(child, (raw) => this.redact(raw));
+    this.logCaptured(child, html);
+    if (!html) return undefined;
+    return typeof child.isTranscriptBlockFinalized === "function" ? { block: child, html } : html;
+  }
+
+  /** Claim a live panel added to a command's container. Its first terminal method call
+   * delivers the panel's one-line result to that command's message; nothing else of the
+   * panel is output. */
+  private claimLivePanel(panel: Record<string, unknown>, binding: Binding): void {
+    if (this.livePanels.has(panel)) return;
+    this.livePanels.add(panel);
+    for (const name of LIVE_PANEL_TERMINAL_METHODS) {
+      if (typeof panel[name] !== "function") continue;
+      hookMethod(panel, name, `output-live-panel-${name}`, undefined, (args) => {
+        if (this.livePanelDone.has(panel)) return;
+        this.livePanelDone.add(panel);
+        const html = livePanelResultHtml(name, args, panel, this.redactFor(binding));
+        outputLog.debug("live panel settled", { method: name, captured: !!html });
+        if (html) this.addPanelResult(binding, html);
+      }, this);
+    }
+  }
+
+  /** A panel's result while its command is live goes out with the normal output. Once the
+   * command has ended, it joins the entries and the message is written again with it. */
+  private addPanelResult(binding: Binding, html: string): void {
+    if (!binding.finished && !binding.scope.ended) {
+      this.push(html);
+      return;
+    }
+    binding.entries.push(html);
+    void this.flush(binding, true);
+  }
+
+  /** Redaction for one binding's chat, also after the binding has ended (`this.binding` is gone by then). */
+  private redactFor(binding: Binding): (text: string) => string {
+    const { chatId, messageThreadId } = binding.telegram;
+    return (text) => this.secrets?.redact(secretChatKey(chatId, messageThreadId), text) ?? text;
   }
 
   private emitBashOutput(child: Record<string, unknown>, binding: Binding, final: boolean): void {
     if (this.bashPushed.has(child)) return;
     this.bashPushed.add(child);
-    const html = renderComponent(child, (raw) => this.redact(raw));
+    const html = bashOutputHtml(child, (raw) => this.redact(raw), this.bashStatus.get(child));
     this.logCaptured(child, html);
     if (!html || this.binding !== binding || binding.finished) return;
     // At scope end `push` refuses (the scope no longer owns output), so the
@@ -191,7 +371,27 @@ export class OutputCapture {
     const binding = this.binding;
     if (!binding || !this.secrets) return text;
     const { chatId, messageThreadId } = binding.telegram;
-    return this.secrets.redact(`${chatId}:${messageThreadId ?? "main"}`, text);
+    return this.secrets.redact(secretChatKey(chatId, messageThreadId), text);
+  }
+
+  /** True when `push` would accept output now: a live binding whose scope is the active one. */
+  private ownsOutput(): boolean {
+    const binding = this.binding;
+    return !!binding && !binding.finished && !binding.scope.ended && this.origin.active() === binding.scope;
+  }
+
+  /** A host notice raised outside any command during a Telegram turn goes to that turn's chat.
+   * With no Telegram turn (a terminal turn) nothing is sent. */
+  private forwardTurnNotice(prefix: string, message: string): void {
+    const notice = this.turnNotice;
+    const target = notice?.turn();
+    if (!notice || !target) return;
+    const plain = stripAnsi(message);
+    const masked = this.secrets?.redact(secretChatKey(target.chatId, target.messageThreadId), plain) ?? plain;
+    const html = `${prefix}${escapeHtml(masked)}`;
+    if (html.trim().length === 0) return;
+    outputLog.debug("forward host notice to telegram turn", { length: html.length });
+    notice.send(target, html);
   }
 
   /** Debug trace of one claimed component: what it was and what the render
@@ -220,72 +420,128 @@ export class OutputCapture {
     for (const target of [state.mode, state.ui]) {
       if (!isHostObject(target) || this.attached.has(target)) continue;
       this.attached.add(target);
+      // `state.ui` may be pi's reference proxy, which needs the owner hook.
+      const install = target === state.ui ? hookOwnedMethod : hookMethod;
       for (const name of ["showStatus", "showError", "showWarning"]) {
-        hookMethod(target, name, `output-${name}`, () => { this.statusDepth += 1; }, (args) => {
+        install(target, name, `output-${name}`, () => { this.statusDepth += 1; }, (args) => {
           this.statusDepth = Math.max(0, this.statusDepth - 1);
           const message = args[0];
           if (typeof message !== "string" || message.trim().length === 0) return;
           const prefix = name === "showError" ? "❌ " : name === "showWarning" ? "⚠️ " : "";
-          this.push(`${prefix}${escapeHtml(this.redact(stripAnsi(message)))}`);
-        });
+          if (this.ownsOutput()) {
+            this.push(`${prefix}${escapeHtml(this.redact(stripAnsi(message)))}`);
+            return;
+          }
+          this.forwardTurnNotice(prefix, message);
+        }, this);
       }
+    }
+    // A short OMP report added straight to the report container, outside
+    // `showCommandReport`, is that command's output when it runs inside the
+    // command's chain (v8 §0.2). A report made by `showCommandReport` is skipped
+    // here: that hook pushes it once, with its title (see below).
+    const reports = isHostObject(state.mode) ? (state.mode as Record<string, unknown>).reportContainer : undefined;
+    if (isHostObject(reports) && !this.attached.has(reports)) {
+      this.attached.add(reports);
+      hookMethod(reports, "addChild", "output-report-add-child", undefined, (args) => {
+        if (this.reportDepth > 0) return;
+        const binding = this.binding;
+        if (!binding || binding.finished || currentCommandScope() !== binding.scope) return;
+        const child = args[0];
+        if (!isHostObject(child) || this.presentClaimed.has(child)) return;
+        this.presentClaimed.add(child);
+        const html = describedHtml(child, (raw) => this.redact(raw));
+        this.logCaptured(child, html);
+        if (html) this.push(html);
+      }, this);
     }
     // OMP reports (`/mcp` and friends) draw a titled block on the main screen
     // instead of opening a dialog: `showCommandReport({ title, body })`. It is
-    // command output (T3.1).
+    // command output (T3.1). In oh-my-pi@v18.14.1 the host builds the ReportPanel
+    // and calls `reportContainer.addChild` inside that same synchronous call
+    // (modes/controllers/command-controller.ts showCommandReport), so the
+    // depth counter marks that addChild as part of this report.
     const mode = state.mode;
     if (isHostObject(mode) && !this.reportHooked.has(mode)) {
       this.reportHooked.add(mode);
-      hookMethod(mode, "showCommandReport", "output-command-report", undefined, (args) => {
+      hookMethod(mode, "showCommandReport", "output-command-report", () => {
+        // `hookMethod` runs `after` even when the host throws, so this is balanced.
+        this.reportDepth += 1;
+      }, (args) => {
+        this.reportDepth = Math.max(0, this.reportDepth - 1);
+        // Only a report shown inside this binding's command chain is its output;
+        // an agent-triggered report during an open scope is not (v8 §0.2).
+        const binding = this.binding;
+        if (!binding || currentCommandScope() !== binding.scope) return;
         const report = args[0] as { title?: unknown; body?: unknown } | undefined;
         const title = typeof report?.title === "string" ? report.title.trim() : "";
         const body = isHostObject(report?.body)
-          ? renderComponent(report.body, (raw) => this.redact(raw))
+          ? contentHtml(report.body, (raw) => this.redact(raw))
           : undefined;
         if (!title && !body) return;
         this.push(title ? `<b>${escapeHtml(this.redact(title))}</b>\n${body ?? ""}` : body!);
-      });
+      }, this);
+    }
+    // /btw, /omfg and /cleanse: the host adds their live panel to its own container
+    // (btw-controller.ts 474/590, omfg-controller.ts 90, cleanse-command-controller.ts 83),
+    // which the chat hook never sees. A panel added inside a command's chain is claimed.
+    if (isHostObject(mode)) {
+      for (const name of LIVE_PANEL_CONTAINERS) {
+        const container = (mode as Record<string, unknown>)[name];
+        if (!isHostObject(container) || this.attached.has(container)) continue;
+        this.attached.add(container);
+        hookMethod(container, "addChild", "output-live-panel-add-child", undefined, (args) => {
+          const binding = this.binding;
+          if (!binding || binding.finished || currentCommandScope() !== binding.scope) return;
+          const child = args[0];
+          if (isHostObject(child)) this.claimLivePanel(child, binding);
+        }, this);
+      }
+    }
+    // OMP `presentCommandOutput` (oh-my-pi@v18.12.5 interactive-mode.ts
+    // presentCommandOutput ~7633) defers command output while the agent streams.
+    // The components are claimed here, at call time, inside the command chain.
+    if (isHostObject(mode) && !this.presentHooked.has(mode)
+      && installHook(mode, "presentCommandOutput", "output-present-command", (next, args) => {
+        try {
+          this.claimPresented(args[0]);
+        } catch (err) {
+          outputLog.debug("presentCommandOutput claim failed", { err });
+        }
+        return next(args);
+      }, { priority: 10, owner: this })) {
+      this.presentHooked.add(mode);
     }
 
     const chat = state.chat;
     if (isHostObject(chat) && !this.attached.has(chat)) {
       this.attached.add(chat);
-      hookMethod(chat, "clear", "output-clear", () => {
-        this.rebuilding.add(chat);
-        const timer = setTimeout(() => { this.rebuilding.delete(chat); }, 0);
-        timer.unref?.();
-      });
       hookMethod(chat, "addChild", "output-add-child", undefined, (args) => {
         if (this.statusDepth > 0) return;
-        // REBUILD_OUTPUT_LABELS commands clear the transcript and append
-        // their result in the same task; keep claiming children for those
-        // labels. History components are excluded by identity below.
-        const rebuildScope = REBUILD_OUTPUT_LABELS.has(this.binding?.scope.label ?? "");
-        if (this.rebuilding.has(chat) && !rebuildScope) return;
+        // Only a child added inside the call chain of this binding's command is
+        // its output. Agent events, history rebuilds and the turn a command
+        // starts run in other contexts (command-context.ts), so they never match.
+        const binding = this.binding;
+        if (!binding || currentCommandScope() !== binding.scope) return;
         const child = args[0];
         if (!isHostObject(child)) return;
+        // Already claimed by presentCommandOutput at call time: not pushed twice.
+        if (this.presentClaimed.has(child)) return;
         // A bash component claimed from the pending area (H34) moves into the
         // chat on the next user submit; it is already owned, so it is neither
         // tracked nor pushed a second time from here.
         if (this.bashTracked.has(child) || this.bashPushed.has(child)) return;
         // D3b: inside a "!" scope the host's bash executor is the command's
-        // own output, not agent history; everywhere else it stays excluded as
-        // before. The method-shape check runs before the agent gate: a
-        // minified OMP build renames the ctor out of AGENT_CTORS too, and the
-        // old name-only match let its running frame fall through to the
-        // plain-output push (3E).
-        if (this.binding?.scope.label === "!" && isBashExecutor(child)) {
+        // own output; its final text comes from getOutput().
+        if (binding.scope.label === "!" && isBashExecutor(child)) {
           this.trackBashComponent(child);
           return;
         }
-        const mode = state.mode;
-        if (isAgentComponent(child, mode)) return;
-        const html = renderComponent(child, (raw) => this.redact(raw));
-        this.logCaptured(child, html);
-        if (!html) return;
-        this.push(html);
-      });
+        const entry = this.captureOf(child);
+        if (entry) this.push(entry);
+      }, this);
     }
+    this.attachCommandChain(state);
     // H34: a `!` command run while the agent streams is parked in the host's
     // pending area (pi interactive-mode.js 5866, OMP command-controller.ts
     // #executeBashCommand) until the next submit moves it to the chat. Claim
@@ -299,7 +555,7 @@ export class OutputCapture {
         if (!isHostObject(child)) return;
         if (this.binding?.scope.label !== "!" || !isBashExecutor(child)) return;
         this.trackBashComponent(child);
-      });
+      }, this);
     }
     // T4.4: `/export` ends with a file on disk; the terminal prints its path,
     // the Telegram user gets the file itself (decision 20). The wrapper goes on
@@ -323,20 +579,50 @@ export class OutputCapture {
           const target = Object.prototype.hasOwnProperty.call(session, name) ? session : proto;
           hookMethod(target, name, `output-${name}`, undefined, (_args, result) => {
             this.captureExport(result);
-          });
+          }, this);
         }
       }
     }
   }
 
-  private push(html: string): void {
-    outputLog.debug("output push", { length: html.length });
+  /** v8 §0.2 cut-offs: the agent turn a command starts (`session.prompt`) and
+   * the host's history rebuilds leave the command call chain. Each target gets
+   * its stage once; installing the same kind again only replaces it. */
+  private attachCommandChain(state: HostState): void {
+    const session = state.session;
+    if (isHostObject(session)) {
+      const proto = Object.getPrototypeOf(session);
+      // Same own-property rule as the export wrapper below: a session that
+      // carries its own `prompt` (a probe shadow) takes the stage on itself.
+      const target = Object.prototype.hasOwnProperty.call(session, "prompt") ? session : proto;
+      if (isHostObject(target) && !this.chainHooked.has(target)) {
+        this.chainHooked.add(target);
+        installHook(target, "prompt", "output-prompt-outside", (next, args) => runOutsideCommand(() => next(args)), {
+          priority: 40,
+          owner: this,
+        });
+      }
+    }
+    const mode = state.mode;
+    if (isHostObject(mode) && !this.chainHooked.has(mode)) {
+      this.chainHooked.add(mode);
+      for (const name of HISTORY_REBUILD_METHODS) {
+        installHook(mode, name, "output-history", (next, args) => runAsHistory(() => next(args)), {
+          priority: 40,
+          owner: this,
+        });
+      }
+    }
+  }
+
+  private push(entry: OutputPart): void {
+    outputLog.debug("output push", { length: typeof entry === "string" ? entry.length : entry.html.length });
     const binding = this.binding;
     if (!binding || binding.finished) return;
     if (this.origin.active() !== binding.scope || binding.scope.ended) return;
     this.origin.touch(binding.scope);
-    const value = html.trim();
-    if (!value) return;
+    const value = typeof entry === "string" ? entry.trim() : entry;
+    if (value === "") return;
     if (binding.entries[binding.entries.length - 1] === value) return;
     if (binding.entries.length >= MAX_COMPONENTS) {
       binding.dropped += 1;
@@ -356,59 +642,26 @@ export class OutputCapture {
     binding.timer.unref?.();
   }
 
+  /** One command, one message (plan §0.0 #2): the ack message is the only
+   * place output goes. A dialog that owns the message keeps it, so output waits
+   * until the dialog closes; the final render composes the header, the dialog
+   * summaries and the output, and pages the result on the message when it
+   * does not fit. Nothing is ever sent as an extra message. */
   private async flush(binding: Binding, final: boolean): Promise<void> {
     if (binding.flushing) {
       if (final) binding.finalPending = true;
       return;
     }
     if (binding.entries.length === 0 && !final) return;
+    if (!final && binding.scope.dialogOpen) return;
     binding.flushing = true;
     try {
-      let added = binding.entries.splice(0).join("\n\n").trim();
+      const added = binding.entries.splice(0);
       const dropped = binding.dropped;
       binding.dropped = 0;
-      if (dropped > 0) {
-        const tail = `…${dropped} more output entries; see the terminal`;
-        added = added ? `${added}\n\n${tail}` : tail;
-      }
-      const combined = added
-        ? (binding.outputHtml ? `${binding.outputHtml}\n\n${added}` : added)
-        : binding.outputHtml;
-      const header = binding.telegram.ackHtml;
-      // Empty output must not append the separator: the final ack would
-      // otherwise carry three blank lines before `✓ Done`.
-      const single = splitTelegramHtml(combined ? `${header}\n\n${combined}` : header, 3400);
-      if (single.length === 1 && !binding.overflowed) {
-        let text = single[0];
-        if (final && !text.includes("✓ Done")) text += "\n\n<i>✓ Done</i>";
-        if (text !== binding.lastText) {
-          binding.lastText = text;
-          binding.lastEditAt = Date.now();
-          await this.transport.editText(binding.telegram.chatId, binding.telegram.messageId, text)
-            .catch(outputLog.swallow("debug", "edit command output failed", { chatId: binding.telegram.chatId }));
-        }
-        binding.outputHtml = combined;
-      } else {
-        const body = binding.overflowed ? added : combined;
-        if (body) {
-          for (const chunk of splitTelegramHtml(body, 3400)) {
-            await this.transport.sendText(
-              binding.telegram.chatId,
-              chunk,
-              binding.telegram.messageThreadId,
-            ).catch(outputLog.swallow("warn", "send command output tail failed", { chatId: binding.telegram.chatId }));
-          }
-        }
-        binding.overflowed = true;
-        binding.outputHtml = "";
-        if (final) {
-          await this.transport.sendText(
-            binding.telegram.chatId,
-            "<i>✓ Done</i>",
-            binding.telegram.messageThreadId,
-          ).catch(outputLog.swallow("debug", "send command completion failed", { chatId: binding.telegram.chatId }));
-        }
-      }
+      if (dropped > 0) added.push(`…${dropped} more output entries; see the terminal`);
+      binding.parts.push(...added);
+      await this.render(binding, final);
     } finally {
       binding.flushing = false;
       if (binding.finalPending) {
@@ -416,6 +669,75 @@ export class OutputCapture {
         void this.flush(binding, true);
       }
     }
+  }
+
+  /** The command output as Telegram HTML. Interim renders use what each block showed when captured.
+   * The final render reads a self-updating block again, and writes it only once it has finished:
+   * a block still running at the end has no final content (its spinner frame is not output). */
+  private outputText(binding: Binding, final: boolean): string {
+    const redact = this.redactFor(binding);
+    return binding.parts
+      .flatMap((part): string[] => {
+        if (typeof part === "string") return [part];
+        if (!final) return [part.html];
+        const block = part.block;
+        const finished = (block.isTranscriptBlockFinalized as () => boolean).call(block);
+        if (!finished) return [];
+        const html = contentHtml(block, redact);
+        return html ? [html] : [];
+      })
+      .join("\n\n");
+  }
+
+  private async render(binding: Binding, final: boolean): Promise<void> {
+    // Dialog summaries are Telegram HTML already (broker closeSummary): written as they are.
+    const summaries = binding.scope.dialogSummaries;
+    const body = [...summaries, this.outputText(binding, final)].filter((part) => part.length > 0).join("\n\n");
+    const header = binding.telegram.ackHtml;
+    const whole = body ? `${header}\n\n${body}` : header;
+    if (splitTelegramHtml(whole, 3400).length > 1) {
+      // Too long for one message: the final content is paged on the message itself.
+      // Interim renders wait for the final one.
+      if (!final || binding.paged) return;
+      binding.paged = true;
+      if (this.handingOver) {
+        // The pager's buttons belong to this runtime's broker, which is going away: the replacement
+        // runtime shows the full body with its own pager.
+        queuePendingNotice({
+          chatId: binding.telegram.chatId,
+          messageThreadId: binding.telegram.messageThreadId,
+          editMessageId: binding.telegram.messageId,
+          html: body,
+          paged: { title: `▶️ ${binding.scope.commandText}` },
+          createdAt: Date.now(),
+        });
+        return;
+      }
+      if (this.pager) {
+        this.pager(binding.telegram, `▶️ ${binding.scope.commandText}`, body);
+      } else {
+        outputLog.warn("no output pager attached; command output too long for one message", { scope: binding.scope.id });
+      }
+      return;
+    }
+    // ✓ Done only when there is nothing else to show.
+    const text = !body && final ? `${header}\n\n<i>✓ Done</i>` : whole;
+    if (text === binding.lastText) return;
+    binding.lastText = text;
+    binding.lastEditAt = Date.now();
+    if (final && this.handingOver) {
+      queuePendingNotice({
+        chatId: binding.telegram.chatId,
+        messageThreadId: binding.telegram.messageThreadId,
+        editMessageId: binding.telegram.messageId,
+        html: text,
+        createdAt: Date.now(),
+      });
+      return;
+    }
+    // The final content is what the user came for: kept across an outage and sent on reconnect.
+    await this.transport.editText(binding.telegram.chatId, binding.telegram.messageId, text, undefined, final ? { mustDeliver: true } : undefined)
+      .catch(outputLog.swallow("debug", "edit command output failed", { chatId: binding.telegram.chatId }));
   }
 
   /** Send the file an `/export` just produced back to the scope that asked for
@@ -443,6 +765,47 @@ export class OutputCapture {
   }
 }
 
+/** The one result line of a settled live panel, from the arguments of its terminal method
+ * and its public getters only. `undefined` for a method that carries no result. */
+function livePanelResultHtml(
+  method: string,
+  args: unknown[],
+  panel: Record<string, unknown>,
+  redact: (text: string) => string,
+): string | undefined {
+  switch (method) {
+    case "markComplete": {
+      // /btw: the answer is the panel's copy text (undefined until the panel is complete).
+      const getCopyText = panel.getCopyText;
+      const answer = typeof getCopyText === "function" ? (getCopyText as () => unknown).call(panel) : undefined;
+      if (typeof answer !== "string" || answer.trim().length === 0) return "✓ Done";
+      return markdownToTelegramHtml(redact(stripAnsi(answer)));
+    }
+    case "markError": {
+      const message = typeof args[0] === "string" ? stripAnsi(args[0]) : "";
+      return `❌ ${escapeHtml(redact(message.trim() || "Error"))}`;
+    }
+    case "markAborted":
+      return "✖ Cancelled";
+    case "markSaved": {
+      const path = typeof args[0] === "string" ? args[0] : "";
+      return `✅ Rule saved: ${escapeHtml(redact(path))}`;
+    }
+    case "markRejected":
+      return "✖ Rule rejected";
+    case "finish": {
+      // /cleanse: the status is a string; an object status is read by its kind or state.
+      const status = args[0];
+      let label = "finished";
+      if (typeof status === "string") label = status;
+      else if (isHostObject(status)) label = String(status.kind ?? status.state ?? "finished");
+      return `Cleanse ${escapeHtml(redact(label))}`;
+    }
+    default:
+      return undefined;
+  }
+}
+
 function ctorName(child: Record<string, unknown>): string {
   try {
     return Object.getPrototypeOf(child)?.constructor?.name ?? child.constructor?.name ?? "";
@@ -459,44 +822,140 @@ function isBashExecutor(child: Record<string, unknown>): boolean {
   return BASH_EXECUTOR_METHODS.every((name) => typeof child[name] === "function");
 }
 
-function isAgentComponent(child: Record<string, unknown>, mode: Record<string, unknown> | undefined): boolean {
-  if (mode && child === mode.streamingComponent) return true;
-  if (AGENT_CTORS.test(ctorName(child))) return true;
-  for (const field of AGENT_FIELDS) {
-    try {
-      if (Object.prototype.hasOwnProperty.call(child, field)) return true;
-    } catch {
-      // ignore
-    }
-  }
-  return false;
+/** Arguments of a finished host bash run: `setComplete(exitCode, cancelled, ...)`
+ * (pi 1.4.0 bash-execution.ts 101; OMP 18.12.5 tui/src/chat/bash-execution.ts 342). */
+type BashStatus = { exitCode: unknown; cancelled: boolean };
+
+/** Text of a host bash executor, read through its `getOutput()` (v8 §0.2:
+ * `render()` is never called). Redacted and ANSI-free before it is wrapped.
+ * A status line follows the output only when the run was not a plain success:
+ * `cancelled`, or `exit N` for a non-zero exit code (X-1). */
+function bashOutputHtml(
+  child: Record<string, unknown>,
+  redact: (text: string) => string,
+  status: BashStatus | undefined,
+): string | undefined {
+  const parts: string[] = [];
+  const output = bashOutputText(child, redact);
+  if (output) parts.push(`<pre>${escapeHtml(output)}</pre>`);
+  const statusLine = bashStatusLine(status);
+  if (statusLine) parts.push(`<i>${statusLine}</i>`);
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
-export function renderComponent(
+function bashOutputText(child: Record<string, unknown>, redact: (text: string) => string): string | undefined {
+  const getOutput = child.getOutput;
+  if (typeof getOutput !== "function") return undefined;
+  let raw: unknown;
+  try {
+    raw = (getOutput as () => unknown).call(child);
+  } catch {
+    return undefined;
+  }
+  if (typeof raw !== "string") return undefined;
+  const clean = redact(stripAnsi(raw)).trimEnd();
+  return clean.trim() ? clean : undefined;
+}
+
+/** `undefined` for a plain success (or no status yet): nothing extra is shown. */
+function bashStatusLine(status: BashStatus | undefined): string | undefined {
+  if (!status) return undefined;
+  if (status.cancelled) return "cancelled";
+  const code = status.exitCode;
+  if (typeof code === "number" && code !== 0) return `exit ${code}`;
+  return undefined;
+}
+
+/** `html` pieces are already Telegram HTML and redacted by `describedText`. */
+type ContentPiece = { kind: "markdown" | "text" | "html"; value: string };
+
+/** Telegram HTML of a described component (OMP `describe()`), falling back to the data
+ * fields; `render()` is never called. */
+function describedHtml(child: Record<string, unknown>, redact: (text: string) => string): string | undefined {
+  const root = describeTree(child);
+  if (root) {
+    const html = describedText(root, redact, child).html;
+    if (html) return html;
+  }
+  return contentHtml(child, redact);
+}
+
+/** Text of a command's output component, from its data only (v8 §0.2, never `render()`):
+ * - `markdown` string field, or a pi `Markdown` (its own `theme` field) `text` field: markdown source;
+ * - a pi `ThemedText` (`build` function, which returns the themed string): plain text;
+ * - a pi `Text` (`text` string): plain text;
+ * - an OMP semantic tree (`describe(cx)`), read through `describedText`;
+ * - a container's `children`, read in order up to CONTENT_MAX_DEPTH levels;
+ * - anything else (Spacer, DynamicBorder, ...) has no content and is skipped.
+ * The result is Telegram HTML, redacted; undefined when there is no content. */
+export function contentHtml(
   component: Record<string, unknown>,
   redact: (text: string) => string = (text) => text,
 ): string | undefined {
-  const markdown = component.markdown;
-  if (typeof markdown === "string" && markdown.trim()) return markdownToTelegramHtml(redact(markdown));
-  const text = component.text;
-  if (typeof text === "string" && text.trim()) {
-    const clean = redact(stripAnsi(text));
-    return clean.includes("\n") ? `<pre>${escapeHtml(clean)}</pre>` : escapeHtml(clean);
+  const pieces: ContentPiece[] = [];
+  collectContent(component, 0, pieces, redact);
+  if (pieces.length === 0) return undefined;
+  const html = pieces
+    .map((piece) => {
+      if (piece.kind === "html") return piece.value;
+      return piece.kind === "markdown"
+        ? markdownToTelegramHtml(redact(piece.value))
+        : plainHtml(redact(stripAnsi(piece.value)));
+    })
+    .filter((part) => part.length > 0);
+  return html.length > 0 ? html.join("\n\n") : undefined;
+}
+
+function plainHtml(clean: string): string {
+  if (!clean.trim()) return "";
+  return clean.includes("\n") ? `<pre>${escapeHtml(clean)}</pre>` : escapeHtml(clean);
+}
+
+function collectContent(
+  node: Record<string, unknown>,
+  depth: number,
+  out: ContentPiece[],
+  redact: (text: string) => string,
+): void {
+  const markdown = node.markdown;
+  if (typeof markdown === "string" && markdown.trim()) {
+    out.push({ kind: "markdown", value: markdown });
+    return;
   }
-  const content = component.content;
-  if (typeof content === "string" && content.trim()) return `<pre>${escapeHtml(redact(stripAnsi(content)))}</pre>`;
-  const render = component.render;
-  if (typeof render === "function") {
+  const build = node.build;
+  if (typeof build === "function") {
     try {
-      const value = (render as (width: number) => unknown).call(component, 80);
-      const textValue = Array.isArray(value)
-        ? value.map((line) => String(line)).join("\n")
-        : typeof value === "string" ? value : "";
-      const clean = redact(stripAnsi(textValue)).trim();
-      if (clean) return `<pre>${escapeHtml(clean)}</pre>`;
+      const value = (build as () => unknown).call(node);
+      if (typeof value === "string" && value.trim()) {
+        out.push({ kind: "text", value });
+        return;
+      }
     } catch {
-      return undefined;
+      // unreadable content: fall through to the other sources
     }
   }
-  return undefined;
+  const text = node.text;
+  if (typeof text === "string" && text.trim()) {
+    // pi's Markdown and Text both keep their string in `text`; only Markdown
+    // carries the `theme` field it renders with (markdown.ts 258-265).
+    const isMarkdown = Object.prototype.hasOwnProperty.call(node, "theme");
+    out.push({ kind: isMarkdown ? "markdown" : "text", value: text });
+    return;
+  }
+  // OMP semantic tree (`describe(cx)`): read through describedText, never render().
+  // Its own html is already Telegram HTML; the buttons are not output here.
+  const tree = describeTree(node);
+  if (tree) {
+    const html = describedText(tree, redact, node).html;
+    if (html) {
+      out.push({ kind: "html", value: html });
+      return;
+    }
+  }
+  const children = node.children;
+  if (Array.isArray(children) && depth < CONTENT_MAX_DEPTH) {
+    for (const child of children) {
+      if (isHostObject(child)) collectContent(child, depth + 1, out, redact);
+    }
+  }
 }

@@ -13,6 +13,7 @@
  * Search text is keystrokes too: unclaimed keys belong to the component's
  * own `searchInput`, so a `search` action types into it the same way.
  */
+import { stripAnsi } from "../../ansi.ts";
 import { findShape, isSelectList } from "../find-shape.ts";
 import { setInputValue } from "../keys.ts";
 import type { DialogAdapter, DialogModel } from "../model.ts";
@@ -65,6 +66,27 @@ function searchQuery(component: HostRecord): string {
   return typeof getValue === "function" ? text((getValue as () => unknown).call(input)) : "";
 }
 
+/**
+ * The line pi's `SelectSubmenu` draws under its title (e.g. a stepped
+ * submenu's "Step 1/2 · Select a model to configure"). The component keeps
+ * no field for it; it is the `Text` child at index 2 (title, Spacer, text),
+ * and only a description line can sit there: without one that slot holds
+ * the search Input or the list. Found through the component owning `list`.
+ */
+function submenuSubtitle(open: object, list: HostRecord): string | undefined {
+  const owner = findShape(
+    open,
+    (candidate: unknown): candidate is HostRecord =>
+      typeof candidate === "object" && candidate !== null && (candidate as HostRecord).selectList === list,
+    3,
+  );
+  const children = owner && Array.isArray(owner.children) ? owner.children : [];
+  const line = children[2];
+  if (!line || typeof line !== "object" || typeof (line as HostRecord).text !== "string") return undefined;
+  const subtitle = stripAnsi((line as HostRecord).text as string).trim();
+  return subtitle.length > 0 ? subtitle : undefined;
+}
+
 /** The open submenu as a nested model, or undefined while none is open. */
 function readSubmenu(component: HostRecord, rows: SettingRow[]): { itemKey: string; model: DialogModel } | undefined {
   const open = component.submenuComponent;
@@ -83,15 +105,20 @@ function readSubmenu(component: HostRecord, rows: SettingRow[]): { itemKey: stri
   const subRows = submenuRows(list);
   const cursor = readNumber(list.selectedIndex);
   const currentValue = text(opener?.raw.currentValue);
+  const subtitle = submenuSubtitle(open, list);
   return {
     itemKey,
     model: {
       kind: "select",
       title,
+      ...(subtitle !== undefined ? { subtitle } : {}),
       total: subRows.length,
       items: subRows.map((row, index) => ({
         key: row.key,
         label: row.label,
+        // pi draws a row's `description` beside its label (e.g. the model's thinking override);
+        // the Telegram button shows it as the row's value.
+        value: text(row.raw.description),
         focused: index === cursor,
         current: opener !== undefined && text(row.raw.value) === currentValue,
       })),

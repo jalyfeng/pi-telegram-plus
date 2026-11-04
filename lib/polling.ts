@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { AsyncLocalStorage } from "node:async_hooks";
 import { getAgentDir } from "./config.ts";
 import { getPendingTelegramUpdates, getTelegramUpdates } from "./telegram-api.ts";
 import type { TelegramConfig, TelegramUpdate } from "./types.ts";
 import { log } from "./logger.ts";
+import { runDetached } from "./tui/command-context.ts";
 
 const pollLog = log.child("polling");
 
@@ -257,43 +257,19 @@ export type TelegramUpdateBatchDeps = {
   onError: (error: unknown, context?: "polling" | "processing") => void;
 };
 
-type UpdateCursorContext = { update: TelegramUpdate; deps: TelegramUpdateBatchDeps };
-const updateCursorContext = new AsyncLocalStorage<UpdateCursorContext>();
-
 /**
- * Commit the cursor for the update currently being processed, before its
- * handler performs an irreversible side effect — a session replacement or
- * runtime reload. Those commands re-activate the plugin in-process; the
- * replacement runtime re-reads the on-disk cursor, and if this update is still
- * unconfirmed Telegram re-serves it and the command runs a second time (a
- * second new session, a second reload). Handlers that replace the session call
- * this immediately before the host's replacement method. No-op outside an
- * update context. Best-effort: a persist failure leaves the cursor where it
- * was, and the normal post-handler persist still runs.
+ * Process one getUpdates batch in strict order, at most once per update.
  *
- * @internal Exported for the session/reload handlers; not public API.
- */
-export async function checkpointCurrentUpdateCursor(): Promise<boolean> {
-  const ctx = updateCursorContext.getStore();
-  if (!ctx) return false;
-  const { update, deps } = ctx;
-  const cursor = deps.getConfig().lastUpdateId;
-  if (typeof cursor === "number" && update.update_id <= cursor) return true;
-  const nextConfig = { ...deps.getConfig(), lastUpdateId: update.update_id };
-  try {
-    if (deps.persistUpdate) await deps.persistUpdate(nextConfig, update);
-    else await deps.persistConfig(nextConfig);
-    deps.setConfig(nextConfig);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Process one getUpdates batch in strict order. If handling or persisting an
- * update fails, stop immediately: later updates must not advance lastUpdateId
- * past the failed update, otherwise Telegram will never deliver it again.
+ * The cursor moves past an update BEFORE its handler runs. The handler can replace the
+ * runtime (a session switch, /new, /reload, a session-replacing command): the replacement
+ * re-reads the cursor from disk, and an update whose cursor was not yet committed would be
+ * served to it again and run a second time. Committing first means no update is re-run,
+ * whatever the handler does. The cost is at-most-once: an update whose handler crashes the
+ * process mid-way is not retried.
+ *
+ * If persisting the cursor fails, the update is not handled and the batch stops, so the
+ * next fetch returns it again. If the handler throws, the batch stops and the update is not
+ * retried (its cursor is already committed).
  *
  * @internal Exported for tests; not part of the public package API.
  */
@@ -305,24 +281,24 @@ export async function processTelegramUpdatesBatch(
   const batchToken = deps.getConfig().botToken;
   for (const update of updates) {
     if (signal?.aborted || (deps.shouldProcess && !deps.shouldProcess())) return true;
+    // A token change means the batch belongs to a bot that is no longer configured.
+    if (deps.getConfig().botToken !== batchToken) return true;
     // Telegram re-serves updates that were processed but not yet confirmed
     // (a backlog probe with offset 0, or a fetch issued before the cursor
-    // advanced). Re-running one would repeat its side effects — fatally so for
-    // /reload, which would fire ctx.reload() again on every re-delivery.
+    // advanced). Re-running one would repeat its side effects.
     const cursor = deps.getConfig().lastUpdateId;
     if (typeof cursor === "number" && update.update_id <= cursor) continue;
-    try {
-      await updateCursorContext.run({ update, deps }, () => deps.handleUpdate(update));
-    } catch (error) {
-      deps.onError(error, "processing");
-      return false;
-    }
-    if (deps.getConfig().botToken !== batchToken) return true;
     const nextConfig = { ...deps.getConfig(), lastUpdateId: update.update_id };
     try {
       if (deps.persistUpdate) await deps.persistUpdate(nextConfig, update);
       else await deps.persistConfig(nextConfig);
       deps.setConfig(nextConfig);
+    } catch (error) {
+      deps.onError(error, "processing");
+      return false;
+    }
+    try {
+      await deps.handleUpdate(update);
     } catch (error) {
       deps.onError(error, "processing");
       return false;
@@ -492,7 +468,9 @@ export function createTelegramPollingRuntime(deps: TelegramUpdateBatchDeps & {
       if (abort || (deps.shouldPoll && !deps.shouldPoll())) return;
       const controller = new AbortController();
       abort = controller;
-      loopPromise = loop(controller.signal)
+      // The loop outlives whatever started it (a /resume re-running session_start, a
+      // /tg menu toggle): it must not carry that command's scope onto later updates.
+      loopPromise = runDetached(() => loop(controller.signal))
         .catch((error) => {
           deps.onError(error);
         })

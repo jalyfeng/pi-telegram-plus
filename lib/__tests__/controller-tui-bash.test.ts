@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { clipScreen, createTelegramController, type TelegramController } from "../controller.ts";
+import { createTelegramController, type TelegramController } from "../controller.ts";
 import { CommandGateway } from "../tui/gateway.ts";
+import { OriginTracker } from "../tui/origin.ts";
 import type { CapturedAgentSession, TelegramTransport } from "../types.ts";
 import { hostOwnsPrompts, type TuiBridgeAdapter } from "../tui-bridge.ts";
 
 type Call = { method: string; text?: string; messageId?: number; rows?: unknown };
+
+const CONFIRM_MESSAGE_ID = 7;
 
 function createTransport(calls: Call[]): TelegramTransport {
   const text = (value: string, messageId?: number): void => { calls.push({ method: "text", text: value, messageId }); };
@@ -57,12 +60,10 @@ function createBridge(overrides: Partial<TuiBridgeAdapter> = {}): TuiBridgeAdapt
     getHost: () => "pi",
     getCommands: async () => [{ name: "settings", description: "Open settings", source: "builtin" }],
     submit: vi.fn(() => true),
-    snapshot: vi.fn(() => ({ text: "Settings\n> Theme", interactive: false, host: "pi" as const, width: 100 })),
     key: vi.fn(() => true),
     write: vi.fn(() => true),
     isEditorFocused: () => true,
     isInteractiveFocus: () => false,
-    onLocalSubmit: () => () => undefined,
     ...overrides,
   };
 }
@@ -88,11 +89,15 @@ function createHarness(options: {
     getSession: () => session,
     transport,
     ui: {
-      create: () => ({
+      // The confirmation is sent as message 7; confirm() reports that id before it waits.
+      create: (_chatId: number, _threadId?: number, _sourceId?: number, _onMenu?: unknown, onConfirmMessage?: (messageId: number) => void) => ({
         notify: async (message: string) => {
           if (options.notifySendsToChat) calls.push({ method: "text", text: String(message) });
         },
-        confirm,
+        confirm: async (...args: unknown[]) => {
+          onConfirmMessage?.(CONFIRM_MESSAGE_ID);
+          return (confirm as (...a: unknown[]) => unknown)(...args);
+        },
       }) as never,
       resolveInput: () => ({ handled: false }),
       isSensitiveInput: () => false,
@@ -143,6 +148,25 @@ describe("Telegram shell commands", () => {
     }
   });
 
+  it("a Telegram prompt sent while the command is still in its idle window supersedes that command's scope", async () => {
+    const endSpy = vi.spyOn(OriginTracker.prototype, "end");
+    // No captured host in this harness: let the real gateway run the scope and submit.
+    const ready = vi.spyOn(CommandGateway.prototype as unknown as { hostReady(name: string): Promise<boolean> }, "hostReady").mockResolvedValue(true);
+    try {
+      const harness = createHarness();
+      await send(harness.controller, "!echo hi", 13);
+      await vi.waitFor(() => expect(harness.bridge.submit).toHaveBeenCalledWith("!echo hi"));
+
+      await send(harness.controller, "please run the probe", 14);
+
+      await vi.waitFor(() => expect(endSpy).toHaveBeenCalledWith(expect.objectContaining({ label: "!" }), "superseded"));
+      expect(harness.session.prompt).toHaveBeenCalled();
+    } finally {
+      ready.mockRestore();
+      endSpy.mockRestore();
+    }
+  });
+
   it("keeps the !! prefix so the host excludes the output from context", async () => {
     const runText = vi.spyOn(CommandGateway.prototype, "runText").mockResolvedValue(true);
     try {
@@ -171,6 +195,40 @@ describe("Telegram shell commands", () => {
       );
       await vi.waitFor(() => expect(harness.calls.some((call) => call.text?.includes("cancelled"))).toBe(true));
       expect(runText).not.toHaveBeenCalled();
+    } finally {
+      runText.mockRestore();
+    }
+  });
+
+  it("a refused command edits its confirmation message instead of sending a new one", async () => {
+    const runText = vi.spyOn(CommandGateway.prototype, "runText").mockResolvedValue(true);
+    try {
+      const harness = createHarness({ confirmResult: false });
+      await send(harness.controller, "!rm -rf /tmp/example", 12);
+
+      await vi.waitFor(() => expect(harness.calls.some((call) => call.messageId === CONFIRM_MESSAGE_ID)).toBe(true));
+      expect(harness.calls).toContainEqual(expect.objectContaining({
+        method: "text",
+        messageId: CONFIRM_MESSAGE_ID,
+        text: expect.stringContaining("✖ Shell command cancelled."),
+      }));
+      expect(harness.calls.some((call) => call.messageId === undefined && call.text?.includes("cancelled"))).toBe(false);
+      expect(runText).not.toHaveBeenCalled();
+    } finally {
+      runText.mockRestore();
+    }
+  });
+
+  it("an approved command runs on its confirmation message", async () => {
+    const runText = vi.spyOn(CommandGateway.prototype, "runText").mockResolvedValue(true);
+    try {
+      const harness = createHarness({ confirmResult: true });
+      await send(harness.controller, "!rm -rf /tmp/example", 12);
+
+      await vi.waitFor(() => expect(runText).toHaveBeenCalledWith(expect.objectContaining({
+        text: "!rm -rf /tmp/example",
+        reuseMessageId: CONFIRM_MESSAGE_ID,
+      })));
     } finally {
       runText.mockRestore();
     }
@@ -335,23 +393,6 @@ describe("Telegram shell commands", () => {
       runText.mockRestore();
     }
   });
-});
-
-describe("Mirror text fitting", () => {
-  it("collapses the host's blank padding before the byte budget", () => {
-    const screen = ["header https://auth.example/start", "", "", "", "", "footer legend"].join("\n");
-    expect(clipScreen(screen, 3000)).toBe("header https://auth.example/start\n\nfooter legend");
-  });
-
-  it("keeps both ends and elides the middle of a long screen", () => {
-    const screen = Array.from({ length: 80 }, (_, i) => `row ${i} ${"█".repeat(90)}`).join("\n");
-    const clipped = clipScreen(screen, 3000);
-    expect(Buffer.byteLength(clipped, "utf8")).toBeLessThanOrEqual(3000);
-    expect(clipped.split("\n")[0]).toContain("row 0 ");
-    expect(clipped.trimEnd().split("\n").at(-1)).toContain("row 79");
-    expect(clipped).toContain("\n…\n");
-  });
-
 });
 
 describe("Host capability routing", () => {

@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "./config.ts";
+import { escapeHtml } from "./html.ts";
 import { log } from "./logger.ts";
 
 const coordinatorLog = log.child("instance-coordinator");
@@ -30,6 +31,8 @@ export type TelegramReplayRequest = {
     chatId: number;
     messageThreadId?: number;
     sourceMessageId?: number;
+    /** The /tg menu message the switch was picked on; the new active instance edits it into the result. */
+    menuMessageId?: number;
     requestedAt: string;
 };
 
@@ -39,6 +42,13 @@ export type TelegramActiveInstance = {
     updatedAt: string;
     reason: "initial" | "explicit" | "failover";
     replay?: TelegramReplayRequest;
+    /** Working directory and project name (basename of cwd) of the active instance. */
+    cwd?: string;
+    label?: string;
+    /** Set on a failover: the active instance that was replaced, and its cwd and project name when recorded. */
+    previousInstanceId?: string;
+    previousCwd?: string;
+    previousLabel?: string;
 };
 
 export type TelegramInstanceSnapshot = {
@@ -239,6 +249,13 @@ export class TelegramInstanceCoordinator {
                     generation: (previous?.generation ?? 0) + 1,
                     updatedAt: new Date(this.now()).toISOString(),
                     reason: previous ? "failover" : "initial",
+                    cwd: candidate.cwd,
+                    label: instanceLabel(candidate),
+                    ...(previous ? {
+                        previousInstanceId: previous.instanceId,
+                        ...(previous.cwd === undefined ? {} : { previousCwd: previous.cwd }),
+                        ...(previous.label === undefined ? {} : { previousLabel: previous.label }),
+                    } : {}),
                 };
                 await this.writeJsonAtomic(this.activePath, active);
                 changed = true;
@@ -271,11 +288,14 @@ export class TelegramInstanceCoordinator {
                 if (previous) this.cacheActive(previous);
                 throw new Error("Telegram active instance changed while the switch was pending; retry via /tg → Switch instance");
             }
+            const target = instances.find((instance) => instance.id === instanceId)!;
             const active: TelegramActiveInstance = {
                 instanceId,
                 generation: previous.generation + 1,
                 updatedAt: new Date(this.now()).toISOString(),
                 reason: "explicit",
+                cwd: target.cwd,
+                label: instanceLabel(target),
                 ...(replay ? { replay: { ...replay, requestedAt: new Date(this.now()).toISOString() } } : {}),
             };
             await this.writeJsonAtomic(this.activePath, active);
@@ -579,16 +599,30 @@ export class TelegramInstanceCoordinator {
     }
 }
 
+function instanceLabel(instance: Pick<TelegramInstanceMetadata, "cwd">): string {
+    return basename(instance.cwd) || instance.cwd;
+}
+
 /**
- * Whether a failover snapshot represents a genuine multi-instance handoff that
- * deserves a user-facing notice. Returns true only when at least one OTHER live
- * instance is registered besides the newly-active self. A single-instance
- * restart (self alone) returns false, so no spurious "failover" notice is sent
- * every time pi is restarted.
+ * Whether an active record is a real takeover from another instance that
+ * deserves a user-facing notice. It must be a failover whose replaced active
+ * instance was not self, and that instance must have been in a different
+ * working directory. A restart of the same project (same cwd, e.g. after a
+ * crash left the old record behind) returns false. A record without the
+ * previous cwd (written by an older version) also returns false: a missed
+ * notice is preferred over a wrong one.
  */
-export function failoverHasOtherLiveInstances(
-    snapshot: TelegramInstanceSnapshot,
-    selfInstanceId: string,
-): boolean {
-    return snapshot.instances.some((instance) => instance.id !== selfInstanceId);
+export function isGenuineFailover(active: TelegramActiveInstance, selfInstanceId: string): boolean {
+    return active.reason === "failover"
+        && active.previousInstanceId !== undefined
+        && active.previousInstanceId !== selfInstanceId
+        && active.previousCwd !== undefined
+        && active.previousCwd !== active.cwd;
+}
+
+/** The failover notice sent by the instance that took over. Labels are omitted when not recorded. */
+export function formatFailoverNotice(active: TelegramActiveInstance, host: string): string {
+    const previous = active.previousLabel ? ` (${escapeHtml(active.previousLabel)})` : "";
+    const self = active.label ? ` (${escapeHtml(active.label)})` : "";
+    return `⚠️ <b>Telegram instance failover</b>\nThe previous active ${host} instance${previous} went offline. This instance${self} is now active.`;
 }

@@ -190,6 +190,11 @@ export function isOmpHost(): boolean {
   return HOST.AgentRegistry !== undefined;
 }
 
+/** The host's name as users see it in its own UI and commands. */
+export function hostCommandName(): "omp" | "pi" {
+  return isOmpHost() ? "omp" : "pi";
+}
+
 export function installAgentSessionCapture(): boolean {
   const state = getState();
   if (state.installed) return true;

@@ -18,13 +18,19 @@
  *   button, never a mirrored frame or a guessed key sequence; if no adapter can
  *   perform an action, the button reports failure rather than guessing.
  */
+import { appendFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { log } from "../logger.ts";
+import { runInCommand } from "./command-context.ts";
 import type { DialogCallback } from "../callback-protocol.ts";
 import type { TelegramTransport, TelegramTurn } from "../types.ts";
 import { pickAdapter, unsupportedAdapter } from "./adapters/index.ts";
-import { currentHostState } from "./host.ts";
+import { isCustomAnswerPrompt } from "./adapters/ask.ts";
+import { describeTree } from "./adapters/tsp.ts";
+import { currentHostState, sendNativeText } from "./host.ts";
 import { sendKeyTo } from "./keys.ts";
 import type { FocusInfo, FocusTracker } from "./focus.ts";
+import { confirmDeclineLabel } from "./model.ts";
 import type {
   AdapterContext,
   DialogAction,
@@ -34,11 +40,44 @@ import type {
   DialogOrigin,
   DialogSession,
 } from "./model.ts";
-import type { OriginTracker } from "./origin.ts";
+import type { CommandScope, OriginTracker } from "./origin.ts";
 import type { SecretStore } from "./secrets.ts";
-import { renderDialog, type RenderedDialog } from "./render-telegram.ts";
+import { closedPanelHtml, renderDialog, type RenderedDialog } from "./render-telegram.ts";
+import { escapeHtml } from "../html.ts";
+import { queuePendingNotice } from "../pending-notices.ts";
 
 const brokerLog = log.child("tui-broker");
+
+/** Action keys that leave a panel without running anything: its Close and Back buttons. */
+const CLOSE_KEYS: ReadonlySet<string> = new Set(["close", "back"]);
+
+/** Models a person can answer; an information page, a progress line or a placeholder is not one. */
+const ANSWERABLE_KINDS: ReadonlySet<DialogModel["kind"]> = new Set(["select", "settings", "questionnaire", "approval", "confirm", "input", "editor"]);
+
+/**
+ * E2E diagnostic (issue #18 inventory): with PITG_TREE_DUMP set to a file path,
+ * every dialog read appends the component's described tree and the model the
+ * adapter produced as one JSON line. Unset in normal runs, so nothing is written.
+ */
+const TREE_DUMP = process.env.PITG_TREE_DUMP ? resolve(process.env.PITG_TREE_DUMP) : "";
+
+function dumpDescribedTree(component: Record<string, unknown>, adapterId: string, model: DialogModel): void {
+  if (!TREE_DUMP) return;
+  try {
+    // A repeated object is reported as a cycle; describe trees are plain data, so this only guards the dump.
+    const seen = new WeakSet<object>();
+    const line = JSON.stringify({ at: Date.now(), adapter: adapterId, component: ctorName(component), tree: describeTree(component), model }, (_key, value: unknown) => {
+      if (typeof value !== "object" || value === null) return value;
+      if (seen.has(value)) return "[cycle]";
+      seen.add(value);
+      if (typeof (value as { describe?: unknown }).describe === "function") return `[component ${ctorName(value as Record<string, unknown>)}]`;
+      return value;
+    });
+    appendFileSync(TREE_DUMP, `${line}\n`);
+  } catch (err) {
+    brokerLog.debug("tree dump failed", { err });
+  }
+}
 
 /** §4.5 rule 2: at most one message edit per chat per second. */
 export const EDIT_THROTTLE_MS = 1_000;
@@ -52,13 +91,26 @@ export const REFRESH_MS = 1_000;
 /** §4.7.1: only the last few generations of button identity are kept. */
 const KEEP_GENERATIONS = 3;
 
+/**
+ * A dialog id unique within the process, across broker instances and runtime replacements, so a
+ * dialog never shares an id with an earlier one. The counter lives on globalThis for the same reason.
+ */
+const DIALOG_SEQUENCE = Symbol.for("pi-telegram-plus.dialog-sequence");
+
+function nextDialogId(): string {
+  const g = globalThis as typeof globalThis & Record<symbol, number | undefined>;
+  const sequence = g[DIALOG_SEQUENCE] ?? 0;
+  g[DIALOG_SEQUENCE] = sequence + 1;
+  return `${Date.now().toString(36)}.${sequence.toString(36)}`;
+}
+
 export type TextPurpose = "input" | "editor" | "search";
 
 /**
  * The slice of the focus view the broker reads (§4.4). The real FocusTracker
  * satisfies this; naming it here keeps the broker's dependency explicit.
  */
-export type FocusSource = Pick<FocusTracker, "onChange" | "current" | "entryFor">;
+export type FocusSource = Pick<FocusTracker, "onChange" | "current" | "entryFor" | "validate">;
 
 export type BrokerDeps = {
   transport: Pick<
@@ -76,6 +128,9 @@ export type BrokerDeps = {
   secrets?: SecretStore;
   /** True while the bridge runs in `full` mode; when off nothing is tracked. */
   enabled(): boolean;
+  /** A dialog on an already-ended command's message closed: the output side redraws the
+   * message as header + summaries (no "Done"). */
+  settleScope?(scope: CommandScope): void;
 };
 
 type Owner = {
@@ -84,6 +139,8 @@ type Owner = {
   fromScope: boolean;
   /** Message the scope already owns, to be edited in place (§4.7.3). */
   reuseMessageId?: number;
+  /** The running command scope, when it is the owner. */
+  scope?: CommandScope;
 };
 
 type Placement = { chatId: number; messageThreadId?: number; messageId: number };
@@ -104,6 +161,27 @@ function isDialogKind(kind: FocusInfo["kind"]): boolean {
   return kind === "dialog" || kind === "progress";
 }
 
+/** The label the Telegram button for a yes/no answer shows (mirrors render-telegram's confirm rows). */
+function confirmButtonLabel(model: DialogModel, yes: boolean): string {
+  if (model.kind === "confirm" && model.confirmLabel) {
+    return yes ? model.confirmLabel : confirmDeclineLabel(model);
+  }
+  return yes ? "Yes" : "No";
+}
+
+/** An item's label as one line of plain text: no edge whitespace, no runs of spaces. */
+const plainLabel = (label: string): string => label.replace(/\s+/g, " ").trim();
+
+/** The text of the key button the tap came from; the internal key is only the fallback. */
+function keyButtonLabel(model: DialogModel, key: string): string {
+  if (model.kind === "select" || model.kind === "input") {
+    const label = model.extraActions?.find((extra) => extra.key === key)?.label;
+    if (label) return label;
+  }
+  if (model.kind === "settings" && model.submenu) return keyButtonLabel(model.submenu.model, key);
+  return "Done";
+}
+
 function activeQuestion(model: Extract<DialogModel, { kind: "questionnaire" }>) {
   const index = Math.max(0, Math.min(model.active, model.questions.length - 1));
   return model.questions[index];
@@ -121,6 +199,9 @@ function activeItems(model: DialogModel): DialogItem[] {
       return activeQuestion(model)?.items ?? [];
     case "approval":
       return model.options.map((option) => ({ key: option.key, label: option.label }));
+    case "info":
+      // A panel's own buttons (describe() action nodes) answer like list rows.
+      return (model.actions ?? []).map((action) => ({ key: action.key, label: action.label }));
     default:
       return [];
   }
@@ -145,6 +226,9 @@ function sameList(previous: DialogModel | undefined, next: DialogModel): boolean
   return before.length === after.length && before.every((key, index) => key === after[index]);
 }
 
+/** The card's closing line when a Telegram message denied a tool approval and became its instructions (P2-39). */
+const DENIED_BY_TEXT = "✖ Denied — sent as new instructions";
+
 /** Where free text belongs, if it belongs to the dialog at all (§4.5.1). */
 export function textPurpose(model: DialogModel): TextPurpose | undefined {
   switch (model.kind) {
@@ -152,6 +236,9 @@ export function textPurpose(model: DialogModel): TextPurpose | undefined {
       return "input";
     case "editor":
       return "editor";
+    case "approval":
+      // A tool approval takes typed text as the answer that denies the call and steers the turn (P2-39).
+      return "input";
     case "select":
       return model.search ? "search" : undefined;
     case "settings":
@@ -237,7 +324,12 @@ export class DialogBroker {
   private readonly deferred = new Map<string, ReturnType<typeof setTimeout>>();
   /** The background-refresh tick, alive between start() and stop(). */
   private refreshTimer?: ReturnType<typeof setInterval>;
-  private sequence = 0;
+  /** Sessions drawn on a command's own message, and the scope that owns it. */
+  private readonly scopes = new WeakMap<DialogSession, CommandScope>();
+  /** Sessions with no focus behind them: a command's paged output (`showPaged`). */
+  private readonly detached = new WeakSet<DialogSession>();
+  /** Set by a teardown: this runtime's transport drops sends, so edits go to the replacement runtime. */
+  private handingOver = false;
 
   constructor(private readonly deps: BrokerDeps) {}
 
@@ -248,7 +340,16 @@ export class DialogBroker {
     this.refreshTimer.unref?.();
   }
 
-  stop(): void {
+  /**
+   * Tear the broker down. With `handOver` (the runtime is being replaced or shut down) a dialog
+   * that Telegram has already answered is settled first: its summary goes onto the command's
+   * message, which OutputCapture writes as the final content before the runtime stops.
+   */
+  stop(options: { handOver?: boolean } = {}): void {
+    if (options.handOver) {
+      this.handingOver = true;
+      this.settleForTeardown();
+    }
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     clearInterval(this.refreshTimer);
@@ -273,6 +374,8 @@ export class DialogBroker {
     const session = this.current();
     const telegram = session?.telegram;
     if (!session || !telegram) return undefined;
+    // A paged output is not a dialog: it takes no text and no abandon/cancel.
+    if (this.detached.has(session)) return undefined;
     if (telegram.chatId !== chatId) return undefined;
     if ((telegram.messageThreadId ?? undefined) !== (messageThreadId ?? undefined)) return undefined;
     return session;
@@ -301,6 +404,10 @@ export class DialogBroker {
     }
     const component = info.component;
     const session = this.session;
+    // A paged output keeps its message while the editor has the focus; only a
+    // dialog that actually opens takes the message over (retire below).
+    if (session && session.state !== "closed" && this.detached.has(session)
+      && !(isDialogKind(info.kind) && component && info.kind !== "progress")) return;
     if (isDialogKind(info.kind) && component) {
       if (session && session.state !== "closed" && session.focus === component) {
         // Same component, different kind (dialog -> progress): redraw in place.
@@ -317,6 +424,20 @@ export class DialogBroker {
         // it is still open. Retiring here withdraws a keyboard the user is about to press,
         // so only the *drawing* rule applies: never mirror the spinner itself (§4.5 rule 1).
         return;
+      }
+      // A prompt opened over a live ask dialog (OMP's "Other"/note input, a HookEditorComponent) takes
+      // focus while the ask call is still open, and restoreAskDialog hands focus back to the SAME ask
+      // object afterwards (oh-my-pi@v18.12.5 packages/coding-agent/src/modes/controllers/extension-ui-controller.ts,
+      // #showLocalAskDialog / openPrompt / restoreAskDialog). The question is still the one on screen, so the
+      // session, its message and its focus stay as they are; the same-component branch redraws when focus returns.
+      if (session && session.state !== "closed" && session.focus !== component) {
+        const race = session.entry?.kind === "ask" ? session.entry.race : undefined;
+        if (race && !race.settled && this.deps.focus.entryFor(component) === undefined) return;
+        // A hosted ask (no race handle) opens the same custom-answer prompt for `Other`, and its
+        // call is still open, so the session and its message stay as they are. A settled race
+        // means the call is over and the prompt opens its own message (see the S4 test).
+        if (session.entry?.kind === "ask" && !race && isCustomAnswerPrompt(component)
+          && this.deps.focus.entryFor(component) === undefined) return;
       }
       // Same question, different object: the host moved focus from the dialog to the
       // overlay wrapper that holds it, and the wrapper is what receives keys from then
@@ -345,11 +466,24 @@ export class DialogBroker {
    */
   private retire(session: DialogSession | undefined, next: FocusInfo): DialogSession["closedBy"] | undefined {
     if (!session || session.state === "closed") return undefined;
-    const byTelegram = session.state === "resolving";
+    // A tap the broker sent stays the close's cause until the dialog changes (see show): the host may
+    // close it long after the tap, and a close before any change is still that tap's.
+    const byTelegram = session.state === "resolving" || session.telegramAction !== undefined;
     session.state = "closed";
     this.forgetPending(session);
+    // The host reports a dialog's result after the dialog closes. The owning command's scope
+    // may have been idle for its whole dialog, so restart its idle window here, or it ends on
+    // the next tick and that result lands after the scope is gone.
+    if (session.ownerScope) this.deps.origin.touch(session.ownerScope);
     const telegram = session.telegram;
     if (!telegram) return undefined;
+    if (this.detached.has(session)) {
+      // A paged output has no answer and no summary: only its keyboard goes.
+      this.rate(telegram, () => {
+        void this.deps.transport.removeInlineKeyboard(telegram.chatId, telegram.messageId).catch(() => undefined);
+      });
+      return undefined;
+    }
 
     // Rule 4.1: a new dialog that belongs to the same command scope replaces
     // this one, so no summary line — the message keeps being the dialog.
@@ -363,15 +497,94 @@ export class DialogBroker {
       && sameTarget(telegram, { chatId: owner.origin.chatId, messageThreadId: owner.origin.messageThreadId });
     if (replaced) {
       session.closedBy = "replaced";
+      // The message is handed to the next dialog, so an answer Telegram already gave must leave its
+      // line in the command's summaries now. A dialog nobody answered leaves none.
+      const scope = this.scopes.get(session);
+      if (byTelegram && scope) scope.dialogSummaries.push(escapeHtml(this.redact(session, this.telegramSummary(session))));
       return session.closedBy;
     }
 
     session.closedBy = byTelegram ? "telegram" : "terminal";
-    const summary = byTelegram
-      ? `✅ ${isSecretSession(session) ? "Submitted (hidden)" : session.lastAction ?? "Done"}`
-      : "Answered in the terminal";
-    this.publish(session, summary);
+    this.publish(session, this.closeSummary(session, byTelegram));
     return session.closedBy;
+  }
+
+  /**
+   * What a closed dialog leaves on its message, as Telegram HTML (rules 4.2/4.3). A read-only panel
+   * keeps the page the user last saw and says how it ended; a dialog with answers gets its one line.
+   * A dialog counts as read-only only if it never showed an answerable model and no hidden answer was
+   * typed. A Close tap on a panel is its close: any tap on an answerable model already marked the session.
+   * `null` means no line at all: a progress wait the host ended on its own was never answered, so
+   * there is nothing to report (an upload that finished, a spinner that stopped).
+   */
+  private closeSummary(session: DialogSession, byTelegram: boolean): string | null {
+    const redact = (text: string) => this.redact(session, text);
+    // A panel button the user ran (not Close, which is a cancel tap) is an answer: its line is the
+    // button's label, and the panel's text is not kept.
+    const tapped = session.telegramAction;
+    const ranAction = tapped !== undefined && !tapped.cancelled && !(tapped.key !== undefined && CLOSE_KEYS.has(tapped.key));
+    const answered = session.interactive === true || session.answeredSecret === true || ranAction;
+    if (session.model.kind === "info" && !answered) {
+      return closedPanelHtml(session.model, session.page, byTelegram ? "✖ Closed" : "Closed in the terminal", redact);
+    }
+    if (!byTelegram) {
+      // Nothing was asked on a progress wait or an unsupported dialog, so nothing is answered in the terminal.
+      if ((session.model.kind === "progress" || session.model.kind === "unsupported") && !answered) return null;
+      return "Answered in the terminal";
+    }
+    return escapeHtml(redact(this.telegramSummary(session)));
+  }
+
+  /** The one-line result of a dialog that Telegram answered (rule 4.2). */
+  private telegramSummary(session: DialogSession): string {
+    if (session.telegramAction?.cancelled) return "✖ Cancelled";
+    if (session.telegramAction?.summary !== undefined) return session.telegramAction.summary;
+    if (session.answeredSecret || isSecretSession(session)) return "✅ Submitted (hidden)";
+    return `✅ ${session.lastAction ?? "Done"}`;
+  }
+
+  /**
+   * Teardown (P2-21): a session switch removes the runtime while a Telegram answer may still be
+   * waiting for the host to close its dialog. The answer is written now, not by the next focus
+   * change, which this runtime will never see. Any unanswered Telegram tap still on the session
+   * is the one that closes it, so the time window used for focus changes does not apply here.
+   */
+  private settleForTeardown(): void {
+    const session = this.session;
+    if (!session || session.state === "closed") return;
+    const telegram = session.telegram;
+    if (!telegram || telegram.messageId <= 0) return;
+    const answered = session.state === "resolving" || session.telegramAction !== undefined;
+    session.state = "closed";
+    session.closedBy = answered ? "telegram" : "terminal";
+    this.forgetPending(session);
+    if (answered && !this.detached.has(session)) {
+      // Through publish, so a command's own message gets the summary and an ordinary dialog
+      // message is handed over (see `handingOver`).
+      this.publish(session, this.closeSummary(session, true));
+      return;
+    }
+    // Nothing answered it, or it is a paged output: the message keeps the dialog's text without
+    // its buttons, because no runtime will answer those buttons any more. A command's own message
+    // is written by OutputCapture after this, and the later final render wins.
+    const rendered = renderDialog(session.model, {
+      sessionId: session.id,
+      generation: session.generation,
+      page: session.page,
+      redact: this.deps.secrets ? (text) => this.redact(session, text) : undefined,
+    });
+    this.handOverMessage(telegram, rendered.text);
+  }
+
+  /** Queue an edit of the dialog's message for the replacement runtime; the edit drops the keyboard. */
+  private handOverMessage(telegram: { chatId: number; messageThreadId?: number; messageId: number }, html: string): void {
+    queuePendingNotice({
+      chatId: telegram.chatId,
+      messageThreadId: telegram.messageThreadId,
+      editMessageId: telegram.messageId,
+      html,
+      createdAt: Date.now(),
+    });
   }
 
   /** Open a session for a freshly focused component and show it (§4.5 rule 1). */
@@ -380,9 +593,9 @@ export class DialogBroker {
     // One adapter for the life of the dialog: the one that read it owns the
     // actions on it (§4.6.1, a dialog is only ever handed to one adapter).
     const adapter = pickAdapterSafely(component, ctx) ?? unsupportedAdapter;
-    const owner = this.owner();
+    const owner = this.owner(info.commandScope);
     const session: DialogSession = {
-      id: `${Date.now().toString(36)}.${(this.sequence++).toString(36)}`,
+      id: nextDialogId(),
       generation: 0,
       openedAt: Date.now(),
       focus: component,
@@ -393,6 +606,7 @@ export class DialogBroker {
       model: this.read(component, ctx, adapter) ?? { kind: "unsupported", what: `${adapter.id}: read failed` },
       owner: owner.origin,
       ownerFromScope: owner.fromScope,
+      ownerScope: owner.fromScope && owner.scope ? owner.scope : undefined,
       entry: ctx.entry,
       keyMap: new Map(),
       page: 0,
@@ -426,8 +640,11 @@ export class DialogBroker {
     if (carriedMessage && !session.ownerFromScope) {
       // Rule 4.1: the replacement keeps the message of the dialog it replaced.
       messageId = carriedMessage.messageId;
-    } else if (session.ownerFromScope && owner.reuseMessageId !== undefined) {
+    } else if (session.ownerFromScope && owner.reuseMessageId !== undefined && owner.scope) {
       messageId = owner.reuseMessageId;
+      // The command's message now belongs to this dialog until it closes.
+      this.scopes.set(session, owner.scope);
+      owner.scope.dialogOpen = true;
     }
     session.telegram = { chatId, messageThreadId, messageId };
     this.show(session);
@@ -442,8 +659,14 @@ export class DialogBroker {
    */
   handleCallback(chatId: number, messageThreadId: number | undefined, callback: DialogCallback):
     { handled: boolean; toast?: string; clear?: boolean } {
+    // The host may have moved focus since the last read (§4.1.3): settle it before judging the tap.
+    this.deps.focus.validate();
     const session = this.session;
-    if (!session || session.state === "closed") return { handled: true, toast: "Answered in the terminal", clear: true };
+    if (!session || session.state === "closed") {
+      // Only a tap that reaches a dialog already closed or replaced is "Answered in the terminal".
+      brokerLog.debug("callback refused: no open dialog", { reason: session ? "closed" : "none", state: session?.state ?? null, callbackId: callback.sessionId, op: callback.op });
+      return { handled: true, toast: "Answered in the terminal", clear: true };
+    }
     // Every way a tap can be refused is a user-visible dead button, so say which one
     // fired and what focus looked like at that moment.
     const refuse = (reason: string, toast: string, clear = true) => {
@@ -452,6 +675,7 @@ export class DialogBroker {
       brokerLog.debug("callback refused", {
         reason,
         toast,
+        state: session.state,
         sessionId: session.id,
         callbackId: callback.sessionId,
         generation: session.generation,
@@ -518,18 +742,38 @@ export class DialogBroker {
     session.model = model;
     session.state = "resolving";
     session.lastAction = resolved.label;
-    const done = this.act(subject, resolved.action, ctx);
+    // The host may close the dialog inside the act below, before it returns (a selector's Esc or
+    // Enter closes synchronously), so the marker is set before the act, as handleText does for a
+    // typed answer. It is taken back if the host refuses the tap.
+    const previousAction = session.telegramAction;
+    const cancelled = resolved.action.type === "cancel";
+    // The baseline (`drawn`) is taken after the act, from the model it leaves behind: what the act
+    // itself changes is part of this tap. Until then the marker has no baseline and no draw judges it.
+    const buttonKey = resolved.action.type === "key" ? resolved.action.name : resolved.action.type === "choose" ? resolved.action.key : undefined;
+    session.telegramAction = { cancelled, ...(buttonKey !== undefined ? { key: buttonKey } : {}) };
+    const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
+      session.telegramAction = previousAction;
       session.state = "open";
       this.redraw(session);
       return refuse("act-refused", "This button does nothing here", false);
     }
+    // The host call may have moved focus already (a selector opens its next list inside Enter):
+    // read it now, so the message follows the dialog that is open, not the one the tap closed.
+    this.deps.focus.validate();
+    // The host may close the dialog after this tap returns (the Esc it received is handled
+    // asynchronously), so the close is attributed to Telegram by this marker, not by state.
     // Rule 3.5: the component may already be gone (selectors resolve inline),
     // or it may stay open (multi-select, settings rows).
     if (this.session === session && session.state === "resolving") {
       if (this.canDrive(session)) {
         session.state = "open";
-        this.redraw(session);
+        // A toggle or a settings row keeps the same dialog open on purpose: its later close
+        // is not this tap's, so forget the tap.
+        if (resolved.action.type === "toggle" || resolved.action.type === "cycle" || resolved.action.type === "submenu") {
+          session.telegramAction = undefined;
+        }
+        this.redrawAnswered(session);
       } else {
         this.retire(session, this.deps.focus.current());
       }
@@ -563,13 +807,29 @@ export class DialogBroker {
     // search box (or the editor), which the user never asked for.
     const subject = (session.subject ?? session.focus) as Record<string, unknown>;
     const ctx = this.context(subject, this.deps.focus.current());
-    const driven = purpose === "input" || purpose === "editor"
+    // A typed answer closes the dialog just like a tap does. The host may close it inside the
+    // submit below, before this function returns, so the marker is set before the write; it is
+    // put back if the write is refused.
+    const answered = purpose === "input" || purpose === "editor";
+    const before = { telegramAction: session.telegramAction, lastAction: session.lastAction, answeredSecret: session.answeredSecret };
+    if (answered) {
+      // Text sent to a tool approval denies the call and becomes the next instruction: the card says so.
+      const summary = session.model.kind === "approval" ? DENIED_BY_TEXT : undefined;
+      session.telegramAction = summary === undefined ? { cancelled: false } : { cancelled: false, summary };
+      // Decided here, while the input is still the secret field: by the time the dialog closes,
+      // the model may already show the progress that the submit started.
+      session.answeredSecret = secret;
+      session.lastAction = secret ? "Submitted (hidden)" : "Sent an answer";
+    }
+    const driven = this.inOwnerScope(session, () => purpose === "input" || purpose === "editor"
       ? this.act(subject, { type: "submit", text }, ctx)
       : purpose === "search"
         ? this.act(subject, { type: "search", query: text }, ctx)
-        : false;
-    const modeledField = effectiveInput(session.model) !== undefined;
-    const written = driven || (!modeledField && this.deps.writeText(purpose === "search" ? text : `${text}\r`));
+        : false);
+    // A tool approval's text goes only to the composer: it is never typed into the terminal.
+    const modeledField = effectiveInput(session.model) !== undefined || session.model.kind === "approval";
+    const written = driven || (!modeledField && this.inOwnerScope(session, () =>
+      this.deps.writeText(purpose === "search" ? text : `${text}\r`)));
     const telegram = session.telegram;
     // The secret travelled in a Telegram message either way: it is deleted even
     // when the host refused it, because the chat is the one place it is readable.
@@ -578,13 +838,34 @@ export class DialogBroker {
       void this.deps.transport.deleteMessage(telegram.chatId, messageId).catch(() => undefined);
     }
     if (!written) {
+      if (answered) {
+        session.telegramAction = before.telegramAction;
+        session.lastAction = before.lastAction;
+        session.answeredSecret = before.answeredSecret;
+      }
       return { handled: true, toast: "The host did not accept this input" };
     }
     if (this.session === session && session.state !== "closed") {
-      if (this.canDrive(session)) this.redraw(session);
+      if (this.canDrive(session)) this.redrawAnswered(session);
       else this.retire(session, this.deps.focus.current());
     }
     return { handled: true };
+  }
+
+  /**
+   * The redraw after a tap or a typed answer. Its own change belongs to that answer, so the marker is
+   * set aside while the model is re-read and drawn, then re-anchored to what this draw says: a later
+   * draw that says something different is the dialog moving on.
+   */
+  private redrawAnswered(session: DialogSession): void {
+    const action = session.telegramAction;
+    if (action === undefined) {
+      this.redraw(session);
+      return;
+    }
+    session.telegramAction = undefined;
+    this.redraw(session);
+    if (session.state !== "closed") session.telegramAction = { ...action, drawn: this.contentOf(session) };
   }
 
   /** `/stop` (§4.5 rule 6): cancel the dialog this chat owns, if any. */
@@ -594,7 +875,7 @@ export class DialogBroker {
     if (!this.canDrive(session)) return false;
     const subject = (session.subject ?? session.focus) as Record<string, unknown>;
     const ctx = this.context(subject, this.deps.focus.current());
-    const done = this.act(subject, { type: "cancel" }, ctx);
+    const done = this.inOwnerScope(session, () => this.act(subject, { type: "cancel" }, ctx));
     this.forgetPending(session);
     if (done && this.session === session) this.retire(session, this.deps.focus.current());
     return done;
@@ -610,6 +891,10 @@ export class DialogBroker {
   abandonFor(chatId: number, messageThreadId?: number): AbandonOutcome {
     const session = this.session;
     if (!session || session.state === "closed") return { kind: "nothing" };
+    if (this.detached.has(session)) {
+      this.retire(session, this.deps.focus.current());
+      return { kind: "nothing" };
+    }
     const telegram = session.telegram;
     const forThisChat = telegram !== undefined
       && telegram.chatId === chatId
@@ -655,6 +940,37 @@ export class DialogBroker {
     return { kind: "closed", title };
   }
 
+  /**
+   * Draw a command's output that does not fit one message (OutputCapture's pager)
+   * on the command's own message, as read-only pages with ◀ / ▶ buttons. No
+   * focus stands behind it: the page is a session of its own, takes no text, and
+   * is retired by the next dialog or command in the chat.
+   */
+  showPaged(target: { chatId: number; messageThreadId?: number; messageId: number }, title: string, html: string): void {
+    if (this.session && this.session.state !== "closed") this.retire(this.session, this.deps.focus.current());
+    const model: DialogModel = { kind: "info", title, text: html, closable: false, html: true };
+    const focus = {};
+    const adapter: DialogAdapter = { id: "paged-output", detect: () => false, read: () => model, act: () => false };
+    const session: DialogSession = {
+      id: nextDialogId(),
+      generation: 0,
+      openedAt: Date.now(),
+      focus,
+      subject: focus,
+      kind: "dialog",
+      adapter,
+      model,
+      ownerFromScope: false,
+      keyMap: new Map(),
+      page: 0,
+      state: "open",
+      telegram: { chatId: target.chatId, messageThreadId: target.messageThreadId, messageId: target.messageId },
+    };
+    this.detached.add(session);
+    this.session = session;
+    this.show(session);
+  }
+
   // --- plumbing --------------------------------------------------------------
 
   /**
@@ -663,6 +979,7 @@ export class DialogBroker {
    * question is open either way, and keys go to the dialog's own component.
    */
   private canDrive(session: DialogSession): boolean {
+    if (this.detached.has(session)) return true;
     const info = this.deps.focus.current();
     if (!info.component) return false;
     return info.component === session.focus || info.kind === "progress";
@@ -679,6 +996,7 @@ export class DialogBroker {
       const session = this.current();
       if (!session || !session.telegram) return;
       if (session.state === "resolving") return;
+      if (this.detached.has(session)) return;
       if (!this.canDrive(session)) return;
       this.redraw(session);
     } catch (err) {
@@ -737,11 +1055,24 @@ export class DialogBroker {
   private read(component: Record<string, unknown>, ctx: AdapterContext, adapter?: DialogAdapter): DialogModel | undefined {
     const picked = adapter ?? pickAdapterSafely(component, ctx) ?? unsupportedAdapter;
     try {
-      return picked.read(component, ctx);
+      const model = picked.read(component, ctx);
+      dumpDescribedTree(component, picked.id, model);
+      return model;
     } catch (err) {
       brokerLog.debug("adapter read failed", { err, ctor: ctorName(component) });
       return undefined;
     }
+  }
+
+  /**
+   * Runs `fn` (a host call made for a Telegram answer) in the call chain of the command that
+   * opened the session, so the host output it adds is that command's (see command-context.ts).
+   * A command that has already ended has no message to write to: `fn` runs without a scope.
+   */
+  private inOwnerScope<T>(session: DialogSession, fn: () => T): T {
+    const scope = session.ownerScope;
+    if (scope && !scope.ended) return runInCommand(scope, fn);
+    return fn();
   }
 
   private act(component: Record<string, unknown>, action: DialogAction, ctx: AdapterContext): boolean {
@@ -787,7 +1118,10 @@ export class DialogBroker {
       host: state.host === "omp" ? "omp" : "pi",
       root: info.root,
       entry,
+      commandName: info.commandScope?.commandText.trim().split(/\s+/)[0] || undefined,
+      redact: (text: string) => this.redactForTarget(text),
       sendKey: (name: string) => sendKeyTo(component, name),
+      sendText: (text: string) => sendNativeText(text),
       requestRender: () => {
         const render = state.ui?.requestRender;
         if (typeof render !== "function") return;
@@ -800,24 +1134,24 @@ export class DialogBroker {
     };
   }
 
+  /** Redacts with the secrets of the chat this dialog is (or will be) shown in. */
+  private redactForTarget(text: string): string {
+    if (!this.deps.secrets) return text;
+    const target = this.session?.telegram ?? this.owner().origin;
+    return target ? this.deps.secrets.redact(targetKey(target), text) : text;
+  }
+
   /**
    * Who the dialog belongs to (§4.3): the running command scope, else the most
    * recent Telegram turn (preferring the chat the user last touched), else
    * nobody — a purely local dialog is tracked but never mirrored.
    */
-  private owner(): Owner {
+  private owner(captured?: CommandScope): Owner {
+    // The command whose call chain made the host open this dialog owns it, even when
+    // that command's scope has already ended (a dialog opened after the command's idle end).
+    if (captured) return this.scopeOwner(captured);
     const scope = this.deps.origin.active();
-    if (scope && !scope.ended) {
-      return {
-        origin: {
-          chatId: scope.origin.chatId,
-          messageThreadId: scope.origin.messageThreadId,
-          sourceMessageId: scope.origin.sourceMessageId,
-        },
-        fromScope: true,
-        reuseMessageId: scope.telegramMessageId,
-      };
-    }
+    if (scope && !scope.ended) return this.scopeOwner(scope);
     const turns = this.deps.activeTurns();
     if (turns.length === 0) return { fromScope: false };
     const chatId = this.deps.activeChatId();
@@ -830,8 +1164,32 @@ export class DialogBroker {
     };
   }
 
+  private scopeOwner(scope: CommandScope): Owner {
+    return {
+      origin: {
+        chatId: scope.origin.chatId,
+        messageThreadId: scope.origin.messageThreadId,
+        sourceMessageId: scope.origin.sourceMessageId,
+      },
+      fromScope: true,
+      reuseMessageId: scope.telegramMessageId,
+      scope,
+    };
+  }
+
+  /**
+   * What the dialog says, for "did the dialog change after this tap" (telegramAction). The terminal
+   * cursor (`focused`) is left out: it moves on keys the host handles, and a cursor move is not a new
+   * state. Everything else (kind, title, items, labels, checked/current/value, buttons) counts.
+   * Not the same as the de-duplication signature in show(), which must see the cursor.
+   */
+  private contentOf(session: DialogSession): string {
+    return `${session.page}|${JSON.stringify(session.model, (key, value: unknown) => (key === "focused" ? undefined : value))}`;
+  }
+
   /** Draw the session's current model onto its message. */
   private show(session: DialogSession): void {
+    if (ANSWERABLE_KINDS.has(session.model.kind)) session.interactive = true;
     const telegram = session.telegram;
     if (!telegram) return;
     const rendered = renderDialog(session.model, {
@@ -843,19 +1201,49 @@ export class DialogBroker {
     session.surface = this.surfaceOf(rendered);
     this.rememberKeys(session, rendered.keyMap);
     const signature = `${session.page}|${rendered.text}|${JSON.stringify(rendered.rows)}`;
+    // A tap whose dialog says something different from what it said when the tap was made has been
+    // answered by the host: the dialog moved on, so a later close is the terminal's, not that tap's.
+    if (session.telegramAction?.drawn !== undefined && session.telegramAction.drawn !== this.contentOf(session)) {
+      session.telegramAction = undefined;
+    }
     const fresh = telegram.messageId <= 0;
+    // While the first send is pending the message id is still 0; the send's own completion
+    // redraws the live model, so nothing else is needed here.
+    if (fresh && session.sending) return;
     if (!fresh && session.published === signature) return;
     session.published = signature;
 
     if (fresh) {
       const chatId = telegram.chatId;
+      session.sending = true;
       void this.deps.transport
         .sendButtons(chatId, rendered.text, rendered.rows, telegram.messageThreadId, session.owner?.sourceMessageId)
         .then((sent) => {
-          // The message may have been retired while the send was in flight.
-          if (this.session === session) session.telegram = { ...telegram, messageId: sent.message_id };
+          session.sending = false;
+          // The active transport answers message_id 0 without sending when its instance is inactive or
+          // Telegram is disconnected. The dialog never reached Telegram, so stop mirroring it; otherwise
+          // show() sees a fresh message again and resends in a microtask loop that starves the event loop.
+          if (sent.message_id <= 0) {
+            session.telegram = undefined;
+            session.pendingSummary = undefined;
+            return;
+          }
+          // Keep the id even when the session was replaced or closed meanwhile: the sent message still needs closing.
+          session.telegram = { ...telegram, messageId: sent.message_id };
+          if (session.state === "closed") {
+            const summary = session.pendingSummary;
+            session.pendingSummary = undefined;
+            if (summary !== undefined) this.publish(session, summary);
+            return;
+          }
+          // Content may have changed while the send was pending. `published` still holds what was
+          // sent, so show() edits only when the live content differs from it.
+          if (this.session === session) this.show(session);
         })
-        .catch((err) => brokerLog.debug("sendButtons failed", { err, chatId }));
+        .catch((err) => {
+          session.sending = false;
+          brokerLog.debug("sendButtons failed", { err, chatId });
+        });
       return;
     }
     this.rate(telegram, () => {
@@ -871,17 +1259,46 @@ export class DialogBroker {
     });
   }
 
-  /** The one-line replacement for a finished dialog (rules 4.2/4.3). */
-  private publish(session: DialogSession, summary: string): void {
+  /** The replacement for a finished dialog (rules 4.2/4.3); `summary` is Telegram HTML, already redacted. */
+  private publish(session: DialogSession, summary: string | null): void {
     const telegram = session.telegram;
-    if (!telegram || telegram.messageId <= 0) return;
-    session.published = `${summary}|closed`;
+    if (!telegram) return;
+    if (telegram.messageId <= 0) {
+      // The first send is still in flight: keep the summary until its message id arrives.
+      if (session.sending) session.pendingSummary = summary;
+      return;
+    }
+    session.published = `${summary ?? ""}|closed`;
+    const scope = this.scopes.get(session);
+    if (scope) {
+      // The command's own message: its text is the command's final content, which
+      // OutputCapture writes (header, summaries, output). While the scope runs the
+      // summary is only recorded; once it has ended, the message is redrawn now.
+      scope.dialogOpen = false;
+      if (summary !== null) scope.dialogSummaries.push(summary);
+      if (scope.ended) this.deps.settleScope?.(scope);
+      this.rate(telegram, () => {
+        void this.deps.transport.removeInlineKeyboard(telegram.chatId, telegram.messageId).catch(() => undefined);
+      });
+      return;
+    }
+    if (summary === null) {
+      // Nothing to say and nothing answered: the progress message has no reason to stay in the chat.
+      this.rate(telegram, () => {
+        void this.deps.transport.deleteMessage(telegram.chatId, telegram.messageId).catch(() => undefined);
+      });
+      return;
+    }
+    if (this.handingOver) {
+      this.handOverMessage(telegram, summary);
+      return;
+    }
     this.rate(telegram, () => {
       // Telegram only guarantees keyboard removal through editMessageReplyMarkup,
       // so the summary edit is followed by an explicit strip: a finished dialog
       // must never leave a tappable dead menu behind.
       void this.deps.transport
-        .editButtons(telegram.chatId, telegram.messageId, summary, [])
+        .editButtons(telegram.chatId, telegram.messageId, summary, [], { mustDeliver: true })
         .catch((err) => brokerLog.debug("summary edit failed", { err }))
         .then(() => this.deps.transport.removeInlineKeyboard(telegram.chatId, telegram.messageId))
         .catch(() => undefined);
@@ -889,21 +1306,24 @@ export class DialogBroker {
   }
 
   /** One edit per chat per second; a newer model replaces a queued older one. */
-  private rate(target: { chatId: number; messageThreadId?: number }, edit: () => void): void {
-    const key = targetKey(target);
-    const last = this.lastEditAt.get(key) ?? 0;
+  private rate(target: { chatId: number; messageThreadId?: number; messageId?: number }, edit: () => void): void {
+    // The spacing is per chat; the queued edit is per message, so an edit for one message
+    // never replaces a queued edit for another message in the same chat.
+    const chat = targetKey(target);
+    const key = `${chat}#${target.messageId ?? ""}`;
+    const last = this.lastEditAt.get(chat) ?? 0;
     const wait = EDIT_THROTTLE_MS - (Date.now() - last);
     const pending = this.deferred.get(key);
     if (pending !== undefined) clearTimeout(pending);
     if (wait <= 0) {
       this.deferred.delete(key);
-      this.lastEditAt.set(key, Date.now());
+      this.lastEditAt.set(chat, Date.now());
       edit();
       return;
     }
     const timer = setTimeout(() => {
       this.deferred.delete(key);
-      this.lastEditAt.set(key, Date.now());
+      this.lastEditAt.set(chat, Date.now());
       edit();
     }, wait);
     timer.unref?.();
@@ -954,7 +1374,7 @@ export class DialogBroker {
         return {
           kind: "action",
           action: { type: "confirm", yes: callback.op === "y" },
-          label: callback.op === "y" ? "Confirm" : "Cancel",
+          label: confirmButtonLabel(model, callback.op === "y"),
         };
       case "x":
         return { kind: "action", action: { type: "cancel" }, label: "Cancel" };
@@ -963,7 +1383,7 @@ export class DialogBroker {
         // adapters act on `submit`, the mirror on the raw key.
         return arg === "enter"
           ? { kind: "action", action: { type: "submit" }, label: "Submit" }
-          : { kind: "action", action: { type: "key", name: arg }, label: `Key ${arg}` };
+          : { kind: "action", action: { type: "key", name: arg }, label: keyButtonLabel(model, arg) };
       case "q": {
         const index = Number.parseInt(arg, 10);
         if (!Number.isFinite(index)) return { kind: "none" };
@@ -981,14 +1401,16 @@ export class DialogBroker {
       case "t": {
         const item = items.find((entry) => entry.key === key);
         if (!item) return { kind: "none" };
-        return callback.op === "c"
-          ? { kind: "action", action: { type: "choose", key }, label: `Choose ${item.label}` }
-          : { kind: "action", action: { type: "toggle", key }, label: `Toggle ${item.label}` };
+        // The closing summary names what was picked, as the row reads; a toggle also names the
+        // state the tap set (`checked` is the state before the tap).
+        if (callback.op === "c") return { kind: "action", action: { type: "choose", key }, label: plainLabel(item.label) };
+        const state = item.checked === undefined ? "" : `: ${item.checked ? "off" : "on"}`;
+        return { kind: "action", action: { type: "toggle", key }, label: `${plainLabel(item.label)}${state}` };
       }
       case "m": {
         const item = items.find((entry) => entry.key === key);
         if (!item) return { kind: "none" };
-        return { kind: "action", action: { type: "submenu", key }, label: `Open ${item.label}` };
+        return { kind: "action", action: { type: "submenu", key }, label: plainLabel(item.label) };
       }
       case "a": {
         const option = model.kind === "approval" ? model.options.find((entry) => entry.key === key) : undefined;

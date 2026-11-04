@@ -15,6 +15,8 @@ type HostClass = { prototype: Record<string, { __ptpBridgePatched?: boolean }> }
 const holders = vi.hoisted(() => ({
   pi: null as HostClass | null,
   omp: null as HostClass | null,
+  controller: null as HostClass | null,
+  statusCalls: [] as unknown[][],
 }));
 
 const SHARED_STATE_KEY = "__piTelegramPlusTuiBridgeState";
@@ -24,6 +26,8 @@ function mockHosts(opts: { piVersion?: string; ompVersion?: string }): void {
   delete (globalThis as Record<string, unknown>)[SHARED_STATE_KEY];
   holders.pi = null;
   holders.omp = null;
+  holders.controller = null;
+  holders.statusCalls = [];
   vi.doMock("@earendil-works/pi-coding-agent", () => {
     const cls = class InteractiveMode {
       setupEditorSubmitHandler() {}
@@ -41,6 +45,16 @@ function mockHosts(opts: { piVersion?: string; ompVersion?: string }): void {
     };
     holders.omp = cls as unknown as HostClass;
     return { InteractiveMode: cls };
+  });
+  vi.doMock("@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller", () => {
+    class ExtensionUiController {
+      constructor(public ctx: unknown) {}
+      setHookStatus(key: unknown, text: unknown) {
+        holders.statusCalls.push([key, text]);
+      }
+    }
+    holders.controller = ExtensionUiController as unknown as HostClass;
+    return { ExtensionUiController };
   });
 }
 
@@ -84,19 +98,19 @@ describe("installTuiBridge version gate", () => {
   });
 
   it("patches the OMP entry points on a supported OMP version", async () => {
-    mockHosts({ piVersion: "1.4.0", ompVersion: "18.12.5" });
+    mockHosts({ piVersion: "1.4.0", ompVersion: "18.14.1" });
     const mod = await installFresh();
     expect(mod.tuiBridge.getUnsupportedReason()).toBeUndefined();
     expect(patched(holders.omp, "render")).toBe(true);
     expect(patched(holders.omp, "initHooksAndCustomTools")).toBe(true);
   });
 
-  it("refuses an OMP version outside the supported range", async () => {
-    mockHosts({ piVersion: "1.4.0", ompVersion: "18.13.0" });
+  it.each(["18.12.5", "18.15.0"])("refuses OMP %s, which is outside the supported range", async (ompVersion) => {
+    mockHosts({ piVersion: "1.4.0", ompVersion });
     const mod = await installFresh();
     const reason = mod.tuiBridge.getUnsupportedReason();
-    expect(reason).toContain("18.12.x");
-    expect(reason).toContain("18.13.0");
+    expect(reason).toContain("18.14.x");
+    expect(reason).toContain(ompVersion);
     expect(patched(holders.omp, "render")).toBe(false);
     expect(patched(holders.pi, "init")).toBe(false);
   });
@@ -107,6 +121,37 @@ describe("installTuiBridge version gate", () => {
     const reason = mod.tuiBridge.getUnsupportedReason();
     expect(reason).toContain("unknown");
     expect(patched(holders.pi, "init")).toBe(false);
+  });
+});
+
+describe("installTuiBridge with an extension loaded after OMP startup", () => {
+  it("patches setHookStatus on a supported OMP version", async () => {
+    mockHosts({ piVersion: "1.4.0", ompVersion: "18.14.1" });
+    const mod = await installFresh();
+    expect(mod.tuiBridge.getUnsupportedReason()).toBeUndefined();
+    expect(patched(holders.controller, "setHookStatus")).toBe(true);
+  });
+
+  it("captures the mode on the first status update without initHooksAndCustomTools", async () => {
+    mockHosts({ piVersion: "1.4.0", ompVersion: "18.14.1" });
+    const mod = await installFresh();
+    expect(mod.tuiBridge.isAvailable()).toBe(false);
+
+    const Controller = holders.controller as unknown as new (ctx: unknown) => { setHookStatus(key: string, text: string): void };
+    const mode = { editor: {}, ui: {} };
+    const controller = new Controller(mode);
+    controller.setHookStatus("k", "v");
+
+    expect(mod.tuiBridge.isAvailable()).toBe(true);
+    expect(mod.tuiBridge.getHost()).toBe("omp");
+    expect(holders.statusCalls).toEqual([["k", "v"]]);
+  });
+
+  it("does not patch setHookStatus on an unsupported OMP version", async () => {
+    mockHosts({ piVersion: "1.4.0", ompVersion: "18.12.5" });
+    const mod = await installFresh();
+    expect(mod.tuiBridge.getUnsupportedReason()).toContain("18.12.5");
+    expect(patched(holders.controller, "setHookStatus")).toBe(false);
   });
 });
 
@@ -121,12 +166,10 @@ describe("controller sends the version refusal instead of the generic outage not
       getHost: () => "pi" as const,
       getCommands: async () => [],
       submit: () => false,
-      snapshot: () => undefined,
       key: () => false,
       write: () => false,
       isEditorFocused: () => false,
       isInteractiveFocus: () => false,
-      onLocalSubmit: () => () => undefined,
       ...overrides,
     } as unknown as TuiBridgeAdapter;
   }

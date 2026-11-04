@@ -7,10 +7,11 @@
  * with the host.
  * The prefs tests pin the settings-page mapping and the §4.12 race hand-off.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { pickAdapter } from "../tui/adapters/index.ts";
 import { describesLoginSheet, describesTextInput, findPicker, tspInputAdapter, tspLoginAdapter, tspPickerAdapter, tspPrefsAdapter } from "../tui/adapters/tsp.ts";
 import type { AdapterContext, DialogModel } from "../tui/model.ts";
+import { renderDialog } from "../tui/render-telegram.ts";
 
 type Node = { k: string; p?: unknown; c?: unknown[]; key?: string };
 
@@ -204,11 +205,11 @@ describe("tsp picker read", () => {
     expect(model.total).toBe(2);
     expect(model.items).toEqual([
       { key: "a", label: "alpha", current: true, focused: false },
-      { key: "b", label: "beta", description: "the {t} one", current: false, focused: true },
+      { key: "b", label: "beta", description: "the {t} one", note: "the {t} one", current: false, focused: true },
     ]);
   });
 
-  it("skips disabled rows and defaults the title", () => {
+  it("keeps disabled rows listed and marked, and defaults the title", () => {
     const props = {
       items: [
         { id: "a", label: "alpha", disabled: "needs a key" },
@@ -218,8 +219,85 @@ describe("tsp picker read", () => {
     };
     const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
     expect(model.title).toBe("Select");
-    expect(model.items.map((item) => item.key)).toEqual(["c"]);
-    expect(model.total).toBe(1);
+    expect(model.items.map((item) => item.key)).toEqual(["a", "b", "c"]);
+    expect(model.items.map((item) => item.label)).toEqual(["alpha (disabled)", "beta (disabled)", "gamma"]);
+    expect(model.total).toBe(3);
+  });
+
+  it("shows an extension's status dot and category, from the host's own dot and facts", () => {
+    // The three rows an /extensions picker sends (real OMP 18.14.1 data): enabled, shadowed, disabled.
+    const props = {
+      title: "Extensions",
+      items: [
+        { id: "iw4iz75jiyl7", label: "deskvnc", dot: "muted", tone: "muted", facts: { kind: "Skills" } },
+        {
+          id: "cmqiua1rv6z1",
+          label: "hf-cli",
+          dot: "warning",
+          tone: "warning",
+          badges: [{ text: "shadowed", tone: "warning" }],
+          facts: { kind: "Skills" },
+        },
+        { id: "1i3hwdoo7tpkv", label: "go-add-cleanup", dot: "success", facts: { kind: "Rules" } },
+      ],
+    };
+    // The dashboard declares its kind column; facts show only for declared columns.
+    const withColumns = { ...props, columns: [{ id: "kind", format: "dim" }] };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: withColumns }), ctxFor()));
+    expect(model.items).toEqual([
+      { key: "iw4iz75jiyl7", label: "⦸ deskvnc", description: "kind: Skills", note: "kind: Skills", current: false, focused: false },
+      {
+        key: "cmqiua1rv6z1",
+        label: "○ hf-cli",
+        description: "kind: Skills",
+        note: "kind: Skills",
+        badges: ["shadowed"],
+        current: false,
+        focused: false,
+      },
+      { key: "1i3hwdoo7tpkv", label: "● go-add-cleanup", description: "kind: Rules", note: "kind: Rules", current: false, focused: false },
+    ]);
+    const rendered = renderDialog(model, { sessionId: "s1", generation: 1 });
+    expect(rendered.text).toContain("⦸ deskvnc");
+    expect(rendered.text).toContain("kind: Skills");
+    expect(rendered.text).toContain("● go-add-cleanup");
+    expect(rendered.text).toContain("kind: Rules");
+  });
+
+  it("leaves out bar columns: a 0-1 bar is a drawing, not a value to print", () => {
+    const item = { id: "a", label: "alpha", facts: { depth: 0.5, kind: "Skills" } };
+    const props = {
+      items: [item],
+      columns: [
+        { id: "depth", format: "bar" },
+        { id: "kind", format: "dim" },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
+    expect(model.items[0]?.description).toBe("kind: Skills");
+  });
+
+  it("shows facts only for the picker's declared columns, under the column's heading", () => {
+    const item = { id: "a", label: "alpha", facts: { model: "auto", kind: "Skills" } };
+    // No columns: the picker shows no facts at all (an agents row with four facts would flood the line).
+    const bare = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: { items: [item] } }), ctxFor()));
+    expect(bare.items[0]?.description).toBeUndefined();
+    // Declared columns: only those, in column order, labelled by the column's heading.
+    const declared = {
+      items: [item],
+      columns: [
+        { id: "kind", head: "Category" },
+        { id: "model", head: "Model" },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: declared }), ctxFor()));
+    expect(model.items[0]?.description).toBe("Category: Skills · Model: auto");
+  });
+
+  it("lists a disabled agent row so the user can still pick it", () => {
+    const props = { title: "Agents", items: [{ id: "reviewer", label: "reviewer", disabled: "Disabled · space to enable" }] };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
+    expect(model.items).toEqual([{ key: "reviewer", label: "reviewer (disabled)", current: false, focused: false }]);
   });
 
   it("follows an open action strip instead of the list", () => {
@@ -264,9 +342,9 @@ describe("tsp picker read", () => {
     const component = makeComponent({ k: "picker", p: { title: "Agents", items: [], empty: "No agents are running." } });
     const model = asInfo(tspPickerAdapter.read(component, ctxFor()));
     expect(model).toEqual({ kind: "info", title: "Agents", text: "No agents are running.", closable: true });
-    // A list that is only disabled rows is invisible too.
-    const disabled = asInfo(tspPickerAdapter.read(makeComponent({ k: "picker", p: { items: [{ id: "a", label: "a", disabled: true }] } }), ctxFor()));
-    expect(disabled.text).toBe("Nothing to show");
+    // Disabled rows are still rows: a picker with only disabled items is a list, not an info card.
+    const disabled = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: { items: [{ id: "a", label: "a", disabled: true }] } }), ctxFor()));
+    expect(disabled.items.map((item) => item.label)).toEqual(["a (disabled)"]);
   });
 
   it("prefers empty over message, flattens span text, and keeps a non-empty list a select", () => {
@@ -492,7 +570,8 @@ describe("tsp picker empty state with controls", () => {
       tab: "default",
     };
     const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
-    expect(model.title).toBe("Tree — 2 entries hidden by the filter");
+    expect(model.title).toBe("Tree");
+    expect(model.notice).toBe("2 entries hidden by the filter");
     expect(model.items).toEqual([]);
     expect(model.total).toBe(0);
     expect(model.extraActions).toEqual([
@@ -512,6 +591,99 @@ describe("tsp picker empty state with controls", () => {
       tspPickerAdapter.read(makeComponent({ k: "picker", p: { title: "Agents", items: [], empty: "No agents." } }), ctxFor()),
     );
     expect(model).toEqual({ kind: "info", title: "Agents", text: "No agents.", closable: true });
+  });
+});
+
+describe("tsp search: total, Clear search and Cancel", () => {
+  /** A filtered picker: `order` shows 3 of the 39-item catalogue; `total` is the count before filtering. */
+  const filteredProps = (query: string | null) => ({
+    title: "Models",
+    items: Array.from({ length: 39 }, (_, index) => ({ id: `m${index}`, label: index < 3 ? `mock-${index}` : `model-${index}` })),
+    order: ["m0", "m1", "m2"],
+    total: 39,
+    query,
+  });
+
+  /** A picker whose search box is a string the host keeps: ctrl+u clears it, typing appends. Every call lands in `log`. */
+  function queryPicker(query: string, log: string[]) {
+    const state = { query };
+    return {
+      state,
+      describe: () => ({ k: "picker", p: { ...filteredProps(state.query), query: state.query } }),
+      handleNativeEvent: (event: { type?: string; act?: string }) => {
+        log.push(`event:${event.type}:${event.act ?? ""}`);
+      },
+      handleInput: (data: string) => {
+        log.push(data === "\x15" ? "clear" : `type:${data}`);
+        state.query = data === "\x15" ? "" : state.query + data;
+      },
+    };
+  }
+
+  it("counts the filtered rows against the total before filtering", () => {
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: filteredProps("mock") }), ctxFor()));
+    expect(model.items.map((item) => item.key)).toEqual(["m0", "m1", "m2"]);
+    expect(model.total).toBe(39);
+    expect(model.search).toEqual({ query: "mock" });
+  });
+
+  it("offers Clear search only while the query is non-empty", () => {
+    const filtered = asSelect(tspPickerAdapter.read(queryPicker("mock", []), ctxFor()));
+    expect(filtered.extraActions).toContainEqual({ label: "✖ Clear search", key: "clear-search" });
+    const plain = asSelect(tspPickerAdapter.read(queryPicker("", []), ctxFor()));
+    expect(plain.extraActions ?? []).not.toContainEqual({ label: "✖ Clear search", key: "clear-search" });
+  });
+
+  it("Clear search empties the box and sends no close", () => {
+    const log: string[] = [];
+    const component = queryPicker("mock", log);
+    expect(tspPickerAdapter.act(component, { type: "key", name: "clear-search" }, ctxFor())).toBe(true);
+    expect(component.state.query).toBe("");
+    expect(log).toEqual(["clear"]);
+  });
+
+  it("Cancel with a query clears the box first, then closes", () => {
+    const log: string[] = [];
+    const component = queryPicker("mock", log);
+    expect(tspPickerAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["clear", "event:action:close"]);
+  });
+
+  it("Cancel with an empty box closes at once", () => {
+    const log: string[] = [];
+    expect(tspPickerAdapter.act(queryPicker("", log), { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["event:action:close"]);
+  });
+
+  it("Cancel does not close while the host still shows a query; the next Cancel does", () => {
+    const log: string[] = [];
+    const component = queryPicker("mock", log);
+    // A host that applies the clear later: the box still reads "mock" right after the write.
+    component.handleInput = (data: string) => {
+      log.push(`input:${data}`);
+    };
+    expect(tspPickerAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["input:\x15"]);
+    component.state.query = "";
+    expect(tspPickerAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["input:\x15", "event:action:close"]);
+  });
+
+  it("Cancel on a settings page with a query clears the box first, then closes", () => {
+    const log: string[] = [];
+    const props = { ...structuredClone(prefsProps), query: "think" };
+    const component = {
+      describe: () => ({ k: "prefs", p: props }),
+      handleNativeEvent: (event: { type?: string; act?: string }) => {
+        log.push(`event:${event.type}:${event.act ?? ""}`);
+      },
+      handleInput: (data: string) => {
+        log.push(data === "\x15" ? "clear" : `type:${data}`);
+        props.query = data === "\x15" ? "" : props.query + data;
+      },
+    };
+    expect(tspPrefsAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(log).toEqual(["clear", "event:action:close"]);
   });
 });
 
@@ -543,10 +715,10 @@ describe("tsp prefs read", () => {
     expect(model.title).toBe("Settings");
     // The current page and every disabled page/row is left out.
     expect(model.items).toEqual([
-      { key: "page:general", label: "📄 General", hasSubmenu: true },
-      { key: "think", label: "Thinking", value: "On", values: ["On", "Off"] },
-      { key: "theme", label: "Theme", value: "Dark", values: ["Dark", "Light"] },
-      { key: "width", label: "Width", value: "80", hasSubmenu: true },
+      { key: "page:general", label: "📄 General", hasSubmenu: true, shortcut: true },
+      { key: "think", label: "Thinking", value: "On", values: ["On", "Off"], group: "Inference" },
+      { key: "theme", label: "Theme", value: "Dark", values: ["Dark", "Light"], group: "Appearance" },
+      { key: "width", label: "Width", value: "80", hasSubmenu: true, group: "Appearance" },
     ]);
   });
 
@@ -645,6 +817,66 @@ describe("tsp prefs act", () => {
   });
 });
 
+describe("tsp prefs choice list", () => {
+  const themes = ["alabaster", "amethyst", "anthracite", "dark", "light"];
+  const themeProps = (options: string[], value: string) => ({
+    title: "Settings",
+    pages: [],
+    page: "general",
+    sections: [
+      {
+        id: "s",
+        title: "Appearance",
+        rows: [
+          { id: "theme", label: "Dark Theme", control: { k: "choice", value, options: options.map((v) => ({ value: v, label: v })) } },
+        ],
+      },
+    ],
+  });
+
+  it("opens a list on the row for a choice with more than two options", () => {
+    const host = makePrefsHost(themeProps(themes, "dark"));
+    const row = asSettings(tspPrefsAdapter.read(host, ctxFor())).items.find((item) => item.key === "theme");
+    expect(row).toEqual({ key: "theme", label: "Dark Theme", value: "dark", hasSubmenu: true, group: "Appearance" });
+  });
+
+  it("shows every option in the submenu with the current one marked", () => {
+    const host = makePrefsHost(themeProps(themes, "dark"));
+    expect(tspPrefsAdapter.act(host, { type: "submenu", key: "theme" }, ctxFor())).toBe(true);
+    const model = asSettings(tspPrefsAdapter.read(host, ctxFor()));
+    expect(model.submenu?.itemKey).toBe("theme");
+    const list = model.submenu?.model;
+    if (list?.kind !== "select") throw new Error("expected a select submenu");
+    expect(list.multi).toBeFalsy();
+    expect(list.items.map((item) => item.key)).toEqual(themes);
+    expect(list.items.filter((item) => item.current).map((item) => item.key)).toEqual(["dark"]);
+  });
+
+  it("sends the chosen option's value and closes the submenu", () => {
+    const host = makePrefsHost(themeProps(themes, "dark"));
+    tspPrefsAdapter.act(host, { type: "submenu", key: "theme" }, ctxFor());
+    expect(tspPrefsAdapter.act(host, { type: "choose", key: "anthracite" }, ctxFor())).toBe(true);
+    expect(host.events).toEqual([{ type: "change", key: "", item: "theme", value: "anthracite" }]);
+    const model = asSettings(tspPrefsAdapter.read(host, ctxFor()));
+    expect(model.submenu).toBeUndefined();
+    expect(model.items.find((item) => item.key === "theme")?.value).toBe("anthracite");
+  });
+
+  it("refuses a choose key that is not one of the options", () => {
+    const host = makePrefsHost(themeProps(themes, "dark"));
+    tspPrefsAdapter.act(host, { type: "submenu", key: "theme" }, ctxFor());
+    expect(tspPrefsAdapter.act(host, { type: "choose", key: "purple" }, ctxFor())).toBe(false);
+    expect(host.events).toEqual([]);
+  });
+
+  it("keeps a two-option choice as a pair of values with no submenu", () => {
+    const host = makePrefsHost(themeProps(["dark", "light"], "dark"));
+    const row = asSettings(tspPrefsAdapter.read(host, ctxFor())).items.find((item) => item.key === "theme");
+    expect(row).toEqual({ key: "theme", label: "Dark Theme", value: "dark", values: ["dark", "light"], group: "Appearance" });
+    expect(tspPrefsAdapter.act(host, { type: "submenu", key: "theme" }, ctxFor())).toBe(false);
+  });
+});
+
 /** A page holding one row of each editable control kind, plus a read-only `keys` row. */
 function controlProps() {
   return {
@@ -688,6 +920,7 @@ describe("tsp prefs number controls", () => {
       label: "Temperature",
       value: "0.5",
       values: ["0", "0.25", "0.5", "0.75", "1"],
+      group: "S",
     });
     const level = model.items.find((item) => item.key === "level");
     expect(level?.value).toBe("low");
@@ -701,6 +934,7 @@ describe("tsp prefs number controls", () => {
       label: "Width",
       value: "80",
       hasSubmenu: true,
+      group: "S",
     });
   });
 
@@ -744,6 +978,7 @@ describe("tsp prefs text controls", () => {
       label: "Name",
       value: "opus",
       hasSubmenu: true,
+      group: "S",
     });
     expect(tspPrefsAdapter.act(component, { type: "submenu", key: "name" }, ctxFor())).toBe(true);
     expect(component.events).toEqual([]);
@@ -804,7 +1039,7 @@ describe("tsp prefs multi controls", () => {
 
   it("shows selected labels and a checked multi-select submenu", () => {
     const model = asSettings(tspPrefsAdapter.read(liveMulti(), ctxFor()));
-    expect(model.items[0]).toEqual({ key: "langs", label: "Languages", value: "TypeScript", hasSubmenu: true });
+    expect(model.items[0]).toEqual({ key: "langs", label: "Languages", value: "TypeScript", hasSubmenu: true, group: "S" });
     const component = liveMulti();
     tspPrefsAdapter.act(component, { type: "submenu", key: "langs" }, ctxFor());
     expect(asSettings(tspPrefsAdapter.read(component, ctxFor())).submenu).toEqual({
@@ -853,6 +1088,7 @@ describe("tsp prefs action controls and search", () => {
       label: "Edit…",
       value: "",
       hasSubmenu: true,
+      group: "S",
     });
     expect(tspPrefsAdapter.act(component, { type: "submenu", key: "limits" }, ctxFor())).toBe(true);
     expect(component.events).toEqual([{ type: "action", key: "", act: "edit", value: "limits", mods: [] }]);
@@ -1304,5 +1540,758 @@ describe("tsp login read descends into describe-only form fields (H13)", () => {
   it("still reads the older shape where the field also has handleNativeEvent", () => {
     expect(tspInputAdapter.read(makeLoginDialog(), ctxFor())).toMatchObject({ kind: "input", title: "Paste your API key", placeholder: "sk-..." });
     expect(describesTextInput(makeLoginDialog())).toBe(true);
+  });
+});
+
+describe("tsp picker pending confirmation (OMP session Delete)", () => {
+  const confirmProps = {
+    ...pickerProps,
+    confirm: { text: "Delete “notes” ? This removes the session file.", act: "delete-confirm", label: "Delete" },
+  };
+
+  it("reads an open confirmation as a yes/no dialog instead of the list", () => {
+    const component = makeComponent({ k: "frame", c: [{ key: "picker", k: "picker", p: confirmProps }] });
+    const model = tspPickerAdapter.read(component, ctxFor());
+    expect(model).toEqual({
+      kind: "confirm",
+      title: "Delete “notes” ? This removes the session file.",
+      confirmLabel: "Delete",
+    });
+  });
+
+  it("sends the host's confirm action on yes and keeps the picker open on no", () => {
+    const component = makeComponent({ k: "frame", c: [{ key: "picker", k: "picker", p: confirmProps }] });
+    expect(tspPickerAdapter.act(component, { type: "confirm", yes: true }, ctxFor())).toBe(true);
+    expect(tspPickerAdapter.act(component, { type: "confirm", yes: false }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([
+      { type: "action", key: "picker", act: "delete-confirm", mods: [] },
+      { type: "action", key: "picker", act: "close", mods: [] },
+    ]);
+  });
+
+  it("answers Cancel with close and refuses list actions while the confirmation is open", () => {
+    const component = makeComponent({ k: "frame", c: [{ key: "picker", k: "picker", p: confirmProps }] });
+    expect(tspPickerAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(tspPickerAdapter.act(component, { type: "choose", key: "a" }, ctxFor())).toBe(false);
+    expect(tspPickerAdapter.act(component, { type: "key", name: "act:1" }, ctxFor())).toBe(false);
+    expect(component.events).toEqual([{ type: "action", key: "picker", act: "close", mods: [] }]);
+  });
+
+  it("reads the list again once the confirmation is null", () => {
+    const component = makeComponent({ k: "frame", c: [{ key: "picker", k: "picker", p: { ...confirmProps, confirm: null } }] });
+    expect(asSelect(tspPickerAdapter.read(component, ctxFor())).kind).toBe("select");
+  });
+});
+
+describe("tsp picker text the host shows (Y-2)", () => {
+  it("carries the subtitle, the search hint and each item's detail and badges", () => {
+    const props = {
+      title: "Models",
+      subtitle: "Pick a model",
+      query: "",
+      placeholder: "Search models…",
+      items: [
+        {
+          id: "a",
+          label: "alpha",
+          detail: "Not configured",
+          badges: [
+            { text: "default", title: "Default · thinking high" },
+            { text: "vision" },
+            { text: "vision", title: "Vision" },
+          ],
+        },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
+    expect(model.subtitle).toBe("Pick a model");
+    expect(model.search).toEqual({ query: "", placeholder: "Search models…" });
+    expect(model.items[0]).toMatchObject({
+      key: "a",
+      note: "Not configured",
+      // A tooltip equal to its badge text (ignoring case) adds nothing and is dropped.
+      badges: ["default (Default · thinking high)", "vision", "vision"],
+    });
+  });
+
+  it("moves an empty list's text into the notice and keeps the subtitle", () => {
+    const props = {
+      title: "Hub",
+      subtitle: "No usage reported yet",
+      items: [],
+      tabs: [{ id: "a", label: "All" }],
+      tab: "a",
+      empty: "No agent activity recorded yet.",
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
+    expect(model.title).toBe("Hub");
+    expect(model.subtitle).toBe("No usage reported yet");
+    expect(model.notice).toBe("No agent activity recorded yet.");
+  });
+
+  it("answers a confirmation with the host's own action label", () => {
+    const props = { items: [{ id: "a", label: "a" }], confirm: { text: "Delete it?", act: "delete-confirm", label: "Delete" } };
+    expect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor())).toEqual({
+      kind: "confirm",
+      title: "Delete it?",
+      confirmLabel: "Delete",
+    });
+  });
+});
+
+describe("tsp settings text the host shows (Y-2)", () => {
+  it("shows the page label, the lead, the row hint and a choice's current detail", () => {
+    const props = {
+      title: "Settings",
+      pages: [{ id: "general", label: "General" }, { id: "models", label: "Models" }],
+      page: "models",
+      lead: "Pick the models pi uses.",
+      sections: [
+        {
+          id: "s1",
+          title: "Inference",
+          rows: [
+            { id: "think", label: "Thinking", hint: "How hard to think", control: { k: "switch", on: true } },
+            {
+              id: "theme",
+              label: "Theme",
+              control: {
+                k: "choice",
+                value: "dark",
+                options: [
+                  { value: "dark", label: "Dark", detail: "Dark palette" },
+                  { value: "light", label: "Light", detail: "Light palette" },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const model = asSettings(tspPrefsAdapter.read(makeComponent({ k: "prefs", p: props }), ctxFor()));
+    expect(model.subtitle).toBe("Models");
+    expect(model.notice).toBe("Pick the models pi uses.");
+    expect(model.items).toEqual([
+      { key: "page:general", label: "📄 General", hasSubmenu: true, shortcut: true },
+      { key: "think", label: "Thinking", value: "On", values: ["On", "Off"], note: "How hard to think", group: "Inference" },
+      { key: "theme", label: "Theme", value: "Dark", values: ["Dark", "Light"], note: "Dark palette", group: "Inference" },
+    ]);
+  });
+
+  it("drops the lead while a search is active", () => {
+    const props = { title: "Settings", pages: [], page: "general", lead: "Lead", query: "th", sections: [] };
+    const model = asSettings(tspPrefsAdapter.read(makeComponent({ k: "prefs", p: props }), ctxFor()));
+    expect(model.notice).toBeUndefined();
+  });
+
+  it("gives each option of a multi-select submenu its detail", () => {
+    const props = {
+      title: "Settings",
+      pages: [],
+      page: "general",
+      sections: [
+        {
+          id: "s",
+          title: "S",
+          rows: [
+            {
+              id: "langs",
+              label: "Languages",
+              control: {
+                k: "multi",
+                values: ["ts"],
+                options: [
+                  { value: "ts", label: "TypeScript", detail: "Typed JS" },
+                  { value: "py", label: "Python" },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const component = makeComponent({ k: "prefs", p: props });
+    tspPrefsAdapter.act(component, { type: "submenu", key: "langs" }, ctxFor());
+    const model = asSettings(tspPrefsAdapter.read(component, ctxFor()));
+    expect(model.submenu?.model).toMatchObject({
+      kind: "select",
+      items: [
+        { key: "ts", label: "TypeScript", checked: true, note: "Typed JS" },
+        { key: "py", label: "Python", checked: false },
+      ],
+    });
+  });
+});
+
+describe("tsp input wizard step (Y-2)", () => {
+  const wizard = (title: string, lead: string) => ({
+    k: "frame",
+    c: [
+      {
+        k: "row",
+        p: { role: "omp.mcpAdd.progress" },
+        c: [
+          { k: "col", p: { role: "omp.mcpAdd.phase", tone: "accent" }, c: [{ k: "text", p: { text: "Name" } }] },
+          { k: "col", p: { role: "omp.mcpAdd.phase", tone: "muted" }, c: [{ k: "text", p: { text: "Transport" } }] },
+        ],
+      },
+      {
+        k: "col",
+        c: [
+          { k: "text", p: { text: title, role: "omp.mcpAdd.title" } },
+          { k: "text", p: { text: lead, role: "omp.mcpAdd.lead" } },
+        ],
+      },
+      { k: "input", p: { text: "", placeholder: "github" } },
+    ],
+  });
+
+  it("reads the step title, the lead as detail and the phase strip with the current step marked", () => {
+    const component = makeComponent(wizard("Name the server", "A unique name: it labels the server."));
+    expect(tspInputAdapter.read(component, ctxFor())).toEqual({
+      kind: "input",
+      title: "Name the server",
+      detail: "A unique name: it labels the server.",
+      placeholder: "github",
+      secret: false,
+      steps: [
+        { label: "Name", current: true },
+        { label: "Transport", current: false },
+      ],
+    });
+  });
+
+  it("keeps the label rule for a login prompt without wizard roles", () => {
+    const component = makeComponent({ k: "frame", c: [{ k: "text", p: { text: "Paste your API key:" } }, { k: "input", p: { text: "" } }] });
+    expect(tspInputAdapter.read(component, ctxFor())).toMatchObject({ kind: "input", title: "Paste your API key" });
+    expect(tspInputAdapter.read(component, ctxFor())).not.toHaveProperty("steps");
+  });
+});
+
+describe("tsp picker row-scoped actions", () => {
+  const sessionProps = () => ({
+    title: "Resume",
+    noun: "sessions",
+    items: [
+      { id: "s1", label: "charlie" },
+      { id: "s2", label: "bravo" },
+      { id: "s3", label: "alpha" },
+    ],
+    selected: "s1",
+    current: ["s1"],
+    actions: [
+      { id: "resume", label: "Resume", primary: true },
+      { id: "delete", label: "Delete" },
+      { id: "scope", label: "All projects" },
+      { id: "close", label: "Close" },
+    ],
+  });
+
+  /**
+   * A session picker that answers like OMP's: `select` moves the highlight,
+   * `delete` opens the confirmation for the highlighted row, and the confirm
+   * action removes that row. It records every event it receives.
+   */
+  function makeSessionHost() {
+    const props: Record<string, unknown> = sessionProps();
+    const events: unknown[] = [];
+    const removed: string[] = [];
+    const component = {
+      events,
+      removed,
+      props,
+      describe: () => ({ k: "picker", p: props }),
+      handleNativeEvent: (event: Record<string, unknown>) => {
+        events.push(event);
+        if (event.type === "select") props.selected = event.item;
+        else if (event.type === "action" && event.act === "delete") {
+          props.confirm = { text: "Delete it? This removes the session file.", act: "delete-confirm", label: "Delete" };
+        } else if (event.type === "action" && event.act === "delete-confirm") {
+          removed.push(String(props.selected));
+          props.items = (props.items as { id: string }[]).filter((item) => item.id !== props.selected);
+          props.confirm = null;
+        }
+      },
+    };
+    return component;
+  }
+
+  const keyOf = (model: ReturnType<typeof asSelect>, label: string) =>
+    model.extraActions?.find((extra) => extra.label === label)?.key ?? expect.fail(`no ${label} action`);
+
+  it("keeps the primary and list-wide actions firing at once", () => {
+    const host = makeSessionHost();
+    const model = asSelect(tspPickerAdapter.read(host, ctxFor()));
+    expect(model.extraActions).toEqual([
+      { label: "Resume", key: "act:0" },
+      { label: "Delete", key: "act:1" },
+      { label: "All projects", key: "act:2" },
+    ]);
+    expect(tspPickerAdapter.act(host, { type: "key", name: "act:2" }, ctxFor())).toBe(true);
+    expect(tspPickerAdapter.act(host, { type: "key", name: "act:0" }, ctxFor())).toBe(true);
+    expect(host.events).toEqual([
+      { type: "action", key: "", act: "scope", mods: [] },
+      { type: "action", key: "", act: "resume", mods: [] },
+    ]);
+  });
+
+  it("answers Delete with a row choice instead of firing at the host's highlight", () => {
+    const host = makeSessionHost();
+    const { ctx, renders } = countingCtx();
+    const press = tspPickerAdapter.act(host, { type: "key", name: keyOf(asSelect(tspPickerAdapter.read(host, ctx)), "Delete") }, ctx);
+    expect(press).toBe(true);
+    expect(host.events).toEqual([]);
+    expect(renders()).toBe(1);
+    const model = asSelect(tspPickerAdapter.read(host, ctx));
+    expect(model.subtitle).toBe("Delete: choose a session");
+    expect(model.items.map((item) => item.key)).toEqual(["s1", "s2", "s3"]);
+    // The action bar steps aside; only the way back stays beside the rows.
+    expect(model.extraActions).toEqual([{ label: "Back", key: "pick:back" }]);
+  });
+
+  it("selects the chosen row, then fires the action at it", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    expect(tspPickerAdapter.act(host, { type: "choose", key: "s2" }, ctx)).toBe(true);
+    expect(host.events).toEqual([
+      { type: "select", key: "", item: "s2" },
+      { type: "action", key: "", act: "delete", mods: [] },
+    ]);
+    // The host now asks; the mode is spent, so the confirmation shows.
+    expect(tspPickerAdapter.read(host, ctx)).toMatchObject({ kind: "confirm" });
+  });
+
+  it("deletes exactly the picked session through the confirmation", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    tspPickerAdapter.act(host, { type: "choose", key: "s3" }, ctx);
+    expect(tspPickerAdapter.act(host, { type: "confirm", yes: true }, ctx)).toBe(true);
+    expect(host.removed).toEqual(["s3"]);
+    const model = asSelect(tspPickerAdapter.read(host, ctx));
+    expect(model.items.map((item) => item.key)).toEqual(["s1", "s2"]);
+    expect(model.subtitle).toBeUndefined();
+  });
+
+  it("leaves pick mode with Back without touching the host", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    expect(tspPickerAdapter.act(host, { type: "key", name: "pick:back" }, ctx)).toBe(true);
+    expect(host.events).toEqual([]);
+    const model = asSelect(tspPickerAdapter.read(host, ctx));
+    expect(model.subtitle).toBeUndefined();
+    expect(model.extraActions?.map((extra) => extra.label)).toEqual(["Resume", "Delete", "All projects"]);
+    // A row tap is a plain activation again.
+    expect(tspPickerAdapter.act(host, { type: "choose", key: "s2" }, ctx)).toBe(true);
+    expect(host.events).toEqual([{ type: "activate", key: "", item: "s2" }]);
+  });
+
+  it("refuses a row the list no longer holds and drops the mode", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    expect(tspPickerAdapter.act(host, { type: "choose", key: "gone" }, ctx)).toBe(false);
+    expect(host.events).toEqual([]);
+    expect(asSelect(tspPickerAdapter.read(host, ctx)).subtitle).toBeUndefined();
+  });
+
+  it("drops the mode when the host stops offering the action", () => {
+    const host = makeSessionHost();
+    const ctx = ctxFor();
+    tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctx);
+    host.props.actions = [{ id: "resume", label: "Resume", primary: true }];
+    const model = asSelect(tspPickerAdapter.read(host, ctx));
+    expect(model.subtitle).toBeUndefined();
+    expect(tspPickerAdapter.act(host, { type: "choose", key: "s2" }, ctx)).toBe(true);
+    expect(host.events).toEqual([{ type: "activate", key: "", item: "s2" }]);
+  });
+
+  it("does not enter pick mode on an empty list", () => {
+    const host = makeSessionHost();
+    host.props.items = [];
+    expect(tspPickerAdapter.act(host, { type: "key", name: "act:1" }, ctxFor())).toBe(false);
+    expect(host.events).toEqual([]);
+  });
+
+  it("keeps the mode per picker component", () => {
+    const first = makeSessionHost();
+    const second = makeSessionHost();
+    tspPickerAdapter.act(first, { type: "key", name: "act:1" }, ctxFor());
+    expect(asSelect(tspPickerAdapter.read(second, ctxFor())).subtitle).toBeUndefined();
+    expect(asSelect(tspPickerAdapter.read(first, ctxFor())).subtitle).toBe("Delete: choose a session");
+  });
+});
+
+describe("tsp input wizard choice step", () => {
+  /** The MCP add wizard's transport step (`omp.mcpAdd.choices`), as OMP describes it. */
+  const choiceWizard = (selected = "0", withBack = true) => ({
+    k: "col",
+    c: [
+      {
+        k: "overlay",
+        p: { role: "omp.overlay.mcpAdd", head: "Add MCP server" },
+        c: [
+          {
+            k: "col",
+            c: [
+              { k: "text", p: { text: "How does omp reach it?", role: "omp.mcpAdd.title" } },
+              { k: "text", p: { text: "Pick how the server is started.", role: "omp.mcpAdd.lead" } },
+              {
+                k: "list",
+                key: "choices-transport",
+                p: { selected, role: "omp.mcpAdd.choices" },
+                c: [
+                  { k: "item", key: "0", p: { label: "Local command (stdio)", detail: "Runs a process" } },
+                  { k: "item", key: "1", p: { label: "Remote server (http)" } },
+                  { k: "item", key: "2", p: { label: "Server-sent events (sse)" } },
+                ],
+              },
+              {
+                k: "row",
+                p: { role: "omp.actions" },
+                c: [
+                  { k: "row", p: { role: "omp.btn", actions: { click: "cancel" } }, c: [{ k: "text", p: { text: "Cancel" } }] },
+                  ...(withBack ? [{ k: "row", p: { role: "omp.btn", actions: { click: "back" } }, c: [{ k: "text", p: { text: "Back" } }] }] : []),
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  it("reads the choice step as a single-choice list with the highlight on the selected item", () => {
+    const component = makeComponent(choiceWizard("0"));
+    expect(tspInputAdapter.read(component, ctxFor())).toEqual({
+      kind: "select",
+      title: "How does omp reach it?",
+      subtitle: "Pick how the server is started.",
+      items: [
+        { key: "0", label: "Local command (stdio)", note: "Runs a process", focused: true },
+        { key: "1", label: "Remote server (http)", focused: false },
+        { key: "2", label: "Server-sent events (sse)", focused: false },
+      ],
+      total: 3,
+      extraActions: [{ label: "Back", key: "wizard:back" }],
+    });
+  });
+
+  it("answers a tapped choice with the host's activate event on the list", () => {
+    const component = makeComponent(choiceWizard());
+    expect(tspInputAdapter.act(component, { type: "choose", key: "1" }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([{ type: "activate", key: expect.stringMatching(/choices-transport$/), item: "1" }]);
+  });
+
+  it("refuses a choice the list does not hold", () => {
+    const component = makeComponent(choiceWizard());
+    expect(tspInputAdapter.act(component, { type: "choose", key: "9" }, ctxFor())).toBe(false);
+    expect(component.events).toEqual([]);
+  });
+
+  it("sends Back and Cancel as the host's action events", () => {
+    const component = makeComponent(choiceWizard());
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:back" }, ctxFor())).toBe(true);
+    expect(tspInputAdapter.act(component, { type: "cancel" }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([
+      { type: "action", key: "", act: "back", mods: [] },
+      { type: "action", key: "", act: "cancel", mods: [] },
+    ]);
+  });
+
+  it("offers no Back when the host shows no back button", () => {
+    const component = makeComponent(choiceWizard("0", false));
+    const model = tspInputAdapter.read(component, ctxFor());
+    expect(model).toMatchObject({ kind: "select" });
+    expect(model).not.toHaveProperty("extraActions");
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:back" }, ctxFor())).toBe(false);
+  });
+});
+
+describe("tsp input wizard review step", () => {
+  /** The MCP add wizard's review step: a summary body and a footer with Back and Save, no field or list. */
+  const reviewWizard = () => ({
+    k: "col",
+    c: [
+      {
+        k: "overlay",
+        p: { role: "omp.overlay.mcpAdd", head: "Add MCP server" },
+        c: [
+          {
+            k: "col",
+            c: [
+              { k: "row", p: { role: "omp.mcpAdd.progress" }, c: [{ k: "col", p: { role: "omp.mcpAdd.phase" }, c: [{ k: "text", p: { text: "Name" } }] }] },
+              { k: "text", p: { text: "Save this configuration?", role: "omp.mcpAdd.title" } },
+              {
+                k: "col",
+                p: { role: "omp.mcpAdd.body" },
+                c: [
+                  { k: "text", p: { text: "Name: github" } },
+                  { k: "text", p: { text: "Transport: stdio" } },
+                  { k: "text", p: { text: "Command: npx" } },
+                ],
+              },
+              {
+                k: "row",
+                p: { role: "omp.actions" },
+                c: [
+                  { k: "row", p: { role: "omp.btn", actions: { click: "back" } }, c: [{ k: "text", p: { text: "Back" } }] },
+                  { k: "row", p: { role: "omp.btn", actions: { click: "next" } }, c: [{ k: "text", p: { text: "Save" } }] },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  it("reads the review as a confirmation with the body text and the footer's labels", () => {
+    const component = makeComponent(reviewWizard());
+    expect(tspInputAdapter.read(component, ctxFor())).toEqual({
+      kind: "confirm",
+      title: "Save this configuration?",
+      message: "Name: github\nTransport: stdio\nCommand: npx",
+      confirmLabel: "Save",
+      cancelLabel: "Back",
+    });
+  });
+
+  it("sends the footer's next on yes and back on no", () => {
+    const component = makeComponent(reviewWizard());
+    expect(tspInputAdapter.act(component, { type: "confirm", yes: true }, ctxFor())).toBe(true);
+    expect(tspInputAdapter.act(component, { type: "confirm", yes: false }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([
+      { type: "action", key: "", act: "next", mods: [] },
+      { type: "action", key: "", act: "back", mods: [] },
+    ]);
+  });
+
+  it("refuses a no when the footer has no back button", () => {
+    const tree = reviewWizard();
+    const footer = tree.c[0].c[0].c[3] as { c: unknown[] };
+    footer.c = footer.c.slice(1);
+    const component = makeComponent(tree);
+    expect(tspInputAdapter.act(component, { type: "confirm", yes: false }, ctxFor())).toBe(false);
+    expect(component.events).toEqual([]);
+  });
+});
+
+describe("tsp input wizard review summary", () => {
+  it("puts every summary entry on its own line of the confirmation body", () => {
+    const tree = {
+      k: "col",
+      c: [
+        {
+          k: "overlay",
+          p: { role: "omp.overlay.mcpAdd", head: "Add MCP server" },
+          c: [
+            {
+              k: "col",
+              c: [
+                { k: "text", p: { text: "Review and save", role: "omp.mcpAdd.title" } },
+                { k: "text", p: { text: "omp connects to the server as soon as it is saved.", role: "omp.mcpAdd.lead" } },
+                {
+                  k: "kv",
+                  p: {
+                    role: "omp.mcpAdd.summary",
+                    items: [
+                      { k: "Name", v: "localfs" },
+                      { k: "Transport", v: [{ t: "Local command  " }, { t: "stdio" }] },
+                      { k: "Arguments", v: "hello" },
+                      { k: "Auth", v: [{ t: "None" }] },
+                      { k: "Saved in", v: [{ t: "This project  " }, { t: ".omp/mcp.json" }] },
+                    ],
+                  },
+                },
+                {
+                  k: "row",
+                  p: { role: "omp.actions" },
+                  c: [
+                    { k: "row", p: { role: "omp.btn", actions: { click: "back" } }, c: [{ k: "text", p: { text: "Back" } }] },
+                    { k: "row", p: { role: "omp.btn", actions: { click: "next" } }, c: [{ k: "text", p: { text: "Save server" } }] },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    expect(tspInputAdapter.read(makeComponent(tree), ctxFor())).toEqual({
+      kind: "confirm",
+      title: "Review and save",
+      message: [
+        "omp connects to the server as soon as it is saved.",
+        ["Name: localfs", "Transport: Local command · stdio", "Arguments: hello", "Auth: None", "Saved in: This project · .omp/mcp.json"].join("\n"),
+      ].join("\n\n"),
+      confirmLabel: "Save server",
+      cancelLabel: "Back",
+    });
+  });
+});
+
+describe("tsp input wizard optional step", () => {
+  /** A text step of the MCP add wizard: title row with an Optional tag, a footer with Continue and Back. */
+  const optionalStep = (optional: boolean) => {
+    const title: { k: string; p: { text: string; role: string } }[] = [{ k: "text", p: { text: "Arguments", role: "omp.mcpAdd.title" } }];
+    if (optional) title.push({ k: "text", p: { text: "Optional", role: "omp.mcpAdd.tag" } });
+    return {
+      k: "frame",
+      c: [
+        { k: "row", p: { role: "omp.mcpAdd.head" }, c: title },
+        { k: "input", p: { text: "", placeholder: "hello" } },
+        {
+          k: "row",
+          p: { role: "omp.actions" },
+          c: [
+            { k: "row", p: { role: "omp.btn", actions: { click: "back" } }, c: [{ k: "text", p: { text: "Back" } }] },
+            { k: "row", p: { role: "omp.btn", actions: { click: "next" } }, c: [{ k: "text", p: { text: "Continue" } }] },
+          ],
+        },
+      ],
+    };
+  };
+
+  /** The step's text field, as a nested object the adapter reaches by shape. */
+  const withField = (tree: object) => {
+    const component = makeComponent(tree);
+    const field = {
+      input: { mask: false },
+      getValue: vi.fn(() => ""),
+      setValue: vi.fn(),
+      submit: vi.fn(),
+    };
+    return Object.assign(component, { field });
+  };
+
+  it("offers Skip on an optional step, labelled with the footer's Continue", () => {
+    const component = withField(optionalStep(true));
+    expect(tspInputAdapter.read(component, ctxFor())).toMatchObject({
+      kind: "input",
+      extraActions: [{ label: "Continue", key: "wizard:skip" }],
+    });
+  });
+
+  it("skips an optional step by submitting its field empty", () => {
+    const component = withField(optionalStep(true));
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:skip" }, ctxFor())).toBe(true);
+    expect(component.field.setValue).toHaveBeenCalledWith("");
+    expect(component.field.submit).toHaveBeenCalledTimes(1);
+    expect(component.field.setValue.mock.invocationCallOrder[0]).toBeLessThan(component.field.submit.mock.invocationCallOrder[0]);
+  });
+
+  it("gives a required step no Skip, and refuses one", () => {
+    const component = withField(optionalStep(false));
+    expect(tspInputAdapter.read(component, ctxFor())).not.toHaveProperty("extraActions");
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:skip" }, ctxFor())).toBe(false);
+    expect(component.field.submit).not.toHaveBeenCalled();
+  });
+
+  it("skips an optional step without a field by sending the footer's next", () => {
+    // The input node stays; no TextFormField is nested, so the footer's next answers the step.
+    const component = makeComponent(optionalStep(true));
+    expect(tspInputAdapter.act(component, { type: "key", name: "wizard:skip" }, ctxFor())).toBe(true);
+    expect(component.events).toEqual([{ type: "action", key: "", act: "next", mods: [] }]);
+  });
+});
+
+describe("tsp picker model browser (agents hub model override)", () => {
+  /** OMP's ModelBrowser embedded in the agents hub: its list holds two models and a separator rule. */
+  function modelBrowser() {
+    return {
+      query: "",
+      describe: () => ({
+        k: "col",
+        c: [
+          { k: "text", key: "search", p: { text: "" } },
+          {
+            k: "list",
+            key: "list",
+            p: { role: "omp.model-browser.list", selected: "mock/mock-model", filter: "", empty: "", virtual: true },
+            c: [
+              { k: "item", key: "mock/other-model", p: { label: [{ t: "mock/" }, { t: "other-model" }], value: [{ t: "32k" }] } },
+              { k: "rule", key: "separator" },
+              { k: "item", key: "mock/mock-model", p: { label: [{ t: "mock/" }, { t: "mock-model" }], value: [{ t: "128k" }] } },
+            ],
+          },
+        ],
+      }),
+      handleNativeEvent: vi.fn(),
+      onCancel: vi.fn(),
+      setQuery: vi.fn(),
+    };
+  }
+
+  /** The agents hub: a scope list beside a body that shows the status line and embeds the model browser. */
+  function agentsHub(browser: object) {
+    return {
+      events: [] as unknown[],
+      describe: () => ({
+        k: "card",
+        p: { role: "omp.hub.agents", head: "Agents" },
+        c: [
+          {
+            k: "row",
+            key: "split",
+            c: [
+              { k: "list", key: "scopes", p: {}, c: [] },
+              {
+                k: "col",
+                key: "body",
+                c: [{ k: "text", key: "status", p: { spans: [{ t: "Picking model override for " }, { t: "reviewer" }] } }, browser],
+              },
+            ],
+          },
+          { k: "rule" },
+          { k: "col", key: "footer", c: [] },
+        ],
+      }),
+      handleNativeEvent(event: unknown) {
+        this.events.push(event);
+      },
+    };
+  }
+
+  it("reads the embedded model list as a select with the picked model focused", () => {
+    const hub = agentsHub(modelBrowser());
+    const model = asSelect(tspPickerAdapter.read(hub, ctxFor()));
+    expect(model.title).toBe("Picking model override for reviewer");
+    expect(model.items).toEqual([
+      { key: "mock/other-model", label: "mock/other-model", description: "32k", focused: false },
+      { key: "mock/mock-model", label: "mock/mock-model", description: "128k", focused: true },
+    ]);
+    expect(model.total).toBe(2);
+    expect(model.search).toEqual({ query: "" });
+  });
+
+  it("activates the chosen model on the browser itself, not on the hub", () => {
+    const browser = modelBrowser();
+    const hub = agentsHub(browser);
+    expect(tspPickerAdapter.act(hub, { type: "choose", key: "mock/other-model" }, ctxFor())).toBe(true);
+    expect(browser.handleNativeEvent).toHaveBeenCalledWith({ type: "activate", key: "list", item: "mock/other-model" });
+    expect(hub.events).toEqual([]);
+  });
+
+  it("refuses a choice that is not in the browser's list", () => {
+    const browser = modelBrowser();
+    expect(tspPickerAdapter.act(agentsHub(browser), { type: "choose", key: "mock/unknown" }, ctxFor())).toBe(false);
+    expect(browser.handleNativeEvent).not.toHaveBeenCalled();
+  });
+
+  it("cancels the browser's assignment and asks for a redraw", () => {
+    const browser = modelBrowser();
+    const { ctx, renders } = countingCtx();
+    expect(tspPickerAdapter.act(agentsHub(browser), { type: "cancel" }, ctx)).toBe(true);
+    expect(browser.onCancel).toHaveBeenCalledTimes(1);
+    expect(renders()).toBe(1);
+  });
+
+  it("types a search into the browser's query", () => {
+    const browser = modelBrowser();
+    expect(tspPickerAdapter.act(agentsHub(browser), { type: "search", query: "mock" }, ctxFor())).toBe(true);
+    expect(browser.setQuery).toHaveBeenCalledWith("mock");
   });
 });

@@ -3,7 +3,10 @@
  * input to a host component (§4.1.3): the host input pipeline, or the focused
  * component's own `handleInput`.
  */
+import { log } from "../logger.ts";
 import { findShape, isInteractiveShape } from "./find-shape.ts";
+
+const keysLog = log.child("tui-keys");
 
 export const KEY_SEQUENCES: Record<string, string> = {
   up: "\x1b[A",
@@ -62,7 +65,10 @@ export function writeTextTo(component: unknown, text: string): boolean {
   try {
     handleInput.call(component, text);
     return true;
-  } catch {
+  } catch (err) {
+    // The host's own handler threw on this key: the key did not land. Say so, so a refused
+    // tap can be told apart from a key the component ignored.
+    keysLog.debug("host handleInput threw", { err, ctor: (component as object).constructor?.name ?? "" });
     return false;
   }
 }

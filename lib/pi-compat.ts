@@ -26,6 +26,22 @@ export function isRoutedUi(ui: unknown): boolean {
   return typeof ui === "object" && ui !== null && (ui as any).__piTelegramPlusRoutedUi === true;
 }
 
+/**
+ * The host UI underneath a Telegram routed/dispatch UI. Code that captures a UI
+ * for later reads (e.g. a TUI base for forwarding) must hold this, not a routed
+ * wrapper: a wrapper resolves back to the Telegram turn's UI, which forwards to
+ * the captured value, and every read of that property recurses without end.
+ */
+export function hostUiBehindRouted(ui: unknown): unknown {
+  let current = ui;
+  for (let depth = 0; isRoutedUi(current) && depth < 8; depth += 1) {
+    const base = (current as any).__piTelegramPlusRoutedBaseUi;
+    if (typeof base !== "object" || base === null || base === current) break;
+    current = base;
+  }
+  return current;
+}
+
 function createPromptPreservingRoutedUi(routedUi: object, wrappedUi: object): unknown {
   return new Proxy({}, {
     get(_target, prop, receiver) {
@@ -33,7 +49,7 @@ function createPromptPreservingRoutedUi(routedUi: object, wrappedUi: object): un
         const value = Reflect.get(wrappedUi, prop);
         return typeof value === "function" ? value.bind(wrappedUi) : value;
       }
-      return Reflect.get(routedUi, prop, receiver);
+      return Reflect.get(routedUi, prop);
     },
     set(_target, prop, value, receiver) {
       if (typeof prop === "string" && PI_PROMPT_METHODS.has(prop)) {

@@ -260,6 +260,142 @@ describe("createTelegramController media message behavior", () => {
     expect(prompts[0]).toContain("[telegram message]\nWhat do you think?");
   });
 
+  it("includes the Rich Message body of a replied-to bot message", async () => {
+    const prompts: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async () => [{ message_id: 1 }],
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 2,
+      chat: { id: 999 },
+      from: { id: 100, username: "alice" },
+      text: "What do you think?",
+      reply_to_message: {
+        message_id: 1,
+        from: { id: 200, is_bot: true, username: "jaly_claw_bot" },
+        rich_message: {
+          blocks: [
+            { type: "paragraph", text: "Here is the table:" },
+            {
+              type: "table",
+              cells: [
+                [{ text: "Name", is_header: true }, { text: "Score", is_header: true }],
+                [{ text: "alice" }, { text: "9" }],
+              ],
+            },
+          ],
+        },
+      },
+    } as any);
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain("from: @jaly_claw_bot id:200");
+    expect(prompts[0]).toContain("text:\nHere is the table:\nName | Score\nalice | 9");
+    expect(prompts[0]).not.toContain("content: unavailable from Telegram update");
+    expect(prompts[0]).toContain("[telegram message]\nWhat do you think?");
+  });
+
+  it("reports unavailable content when a replied-to message has no readable body", async () => {
+    const prompts: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async () => [{ message_id: 1 }],
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 2,
+      chat: { id: 999 },
+      from: { id: 100, username: "alice" },
+      text: "What do you think?",
+      reply_to_message: {
+        message_id: 1,
+        from: { id: 200, username: "bob" },
+      },
+    } as any);
+
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]).toContain("from: @bob id:200");
+    expect(prompts[0]).toContain("content: unavailable from Telegram update");
+  });
+
   it("includes Telegram selected quote text even without reply_to_message", async () => {
     const prompts: string[] = [];
     const session = {
@@ -516,13 +652,169 @@ describe("createTelegramController media message behavior", () => {
     });
 
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain("photo (2 photo frame(s))");
-    expect(prompts[0]).toContain("photo-large");
-    expect(prompts[0]).toContain("/tmp/saved/photo-large.jpg");
+    expect(prompts[0]).toContain("- photo: photo-large.jpg => /tmp/saved/photo-large.jpg");
+    expect(prompts[0].match(/^- photo:/gm)).toHaveLength(1);
     expect(saved).toEqual([{ fileId: "photo-large", kind: "photo", fileName: undefined }]);
     expect(transportSendText).toHaveBeenCalledTimes(1);
     expect(sent[0]).toContain("✅ Saved attachments (local paths):");
     expect(sent[0]).toContain("/tmp/saved/photo-large.jpg");
+  });
+
+  it("lists a saved document once in the prompt, after the caption", async () => {
+    const prompts: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+    const sent: string[] = [];
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async (_chatId, text) => {
+          sent.push(text);
+          return [{ message_id: 1 }];
+        },
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      saveIncomingTelegramAttachment: async () => "/project/.pi/telegram-attachments/report.txt",
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 1,
+      chat: { id: 999 },
+      caption: "please read this file",
+      document: { file_id: "doc-file-1", file_name: "report.txt" },
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toBe([
+      "please read this file",
+      "",
+      "[telegram attachment]",
+      "- document: report.txt => /project/.pi/telegram-attachments/report.txt",
+    ].join("\n"));
+    expect(sent[0]).not.toContain("doc-file-1");
+  });
+
+  it("lists a failed document once in the prompt with the reason", async () => {
+    const prompts: string[] = [];
+    const sent: string[] = [];
+    const session = {
+      prompt: async (text: string) => {
+        prompts.push(text);
+      },
+      isStreaming: false,
+      extensionRunner: {
+        getUIContext: () => undefined,
+        setUIContext: () => undefined,
+        getCommand: () => undefined,
+        createCommandContext: () => ({} as any),
+      },
+    } as any;
+
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard: async () => undefined,
+        sendText: async (_chatId, text) => {
+          sent.push(text);
+          return [{ message_id: 1 }];
+        },
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput: () => ({ handled: false }),
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      saveIncomingTelegramAttachment: async () => {
+        throw new Error("disk full");
+      },
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({
+      message_id: 1,
+      chat: { id: 999 },
+      caption: "please read this file",
+      document: { file_id: "doc-file-1", file_name: "report.txt" },
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0].match(/report\.txt/g)).toHaveLength(1);
+    expect(prompts[0]).toContain("- document: report.txt -> failed to save (disk full)");
+    expect(prompts[0]).not.toContain("=>");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("⚠️ Attachments not saved:");
+    expect(sent[0]).not.toContain("doc-file-1");
+  });
+
+  it("saves incoming files under .pi/telegram-attachments with the original name and numbers duplicates", async () => {
+    const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { saveIncomingAttachment } = await import("../controller.ts");
+    const root = await mkdtemp(join(tmpdir(), "pi-tg-incoming-"));
+    try {
+      const first = await saveIncomingAttachment(root, "report.txt", "documents/file_7.txt", new Uint8Array([1]));
+      const second = await saveIncomingAttachment(root, "report.txt", "documents/file_8.txt", new Uint8Array([2]));
+      const third = await saveIncomingAttachment(root, "report.txt", "documents/file_9.txt", new Uint8Array([3]));
+      const photo = await saveIncomingAttachment(root, "photo", "photos/file_1.jpg", new Uint8Array([4]));
+
+      expect(first).toBe(join(root, ".pi", "telegram-attachments", "report.txt"));
+      expect(second).toBe(join(root, ".pi", "telegram-attachments", "report (2).txt"));
+      expect(third).toBe(join(root, ".pi", "telegram-attachments", "report (3).txt"));
+      expect(photo).toBe(join(root, ".pi", "telegram-attachments", "photo.jpg"));
+      expect(await readFile(second, "utf8")).toBe("\u0002");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("does not block message handling while waiting for prompt completion", async () => {
@@ -857,7 +1149,10 @@ describe("createTelegramController media message behavior", () => {
     expect(prompts).toEqual(["A"]);
     expect(firstResolved).toBe(true);
     expect(session.abort).toHaveBeenCalledTimes(1);
-    expect(sendText).toHaveBeenCalledWith(999, "⏹️ Interrupt requested.", undefined, 3);
+    // This mock never reports isStreaming (queued-prompt routing reads it), so
+    // the reply names no turn; abort() is still requested above.
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "Nothing to stop.", undefined, 3);
   });
 
   it("does not block message handling while a command handler is waiting", async () => {
@@ -1399,5 +1694,105 @@ describe("createTelegramController — callback keyboard cleanup ownership", () 
     } as any);
     expect(transport.sendText).toHaveBeenCalledWith(1, "This prompt is no longer active.", undefined, 55);
     expect(transport.removeInlineKeyboard).not.toHaveBeenCalled();
+  });
+});
+
+describe("createTelegramController /stop reply", () => {
+  const stopHarness = (session: any, resolveInput: (...args: any[]) => any) => {
+    const sendText = vi.fn(async () => [{ message_id: 1 }]);
+    const removeInlineKeyboard = vi.fn(async () => undefined);
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport: {
+        removeInlineKeyboard,
+        sendText,
+        sendButtons: async () => ({ message_id: 1 }),
+        editText: async () => undefined,
+        editButtons: async () => undefined,
+        answerCallbackQuery: async () => undefined,
+        deleteMessage: async () => undefined,
+        sendDocument: async () => undefined,
+        sendPhoto: async () => undefined,
+        sendChatAction: async () => undefined,
+      },
+      ui: {
+        create: () => ({ notify: async () => undefined }) as any,
+        resolveInput,
+        isSensitiveInput: () => false,
+        hasPendingInput: () => false,
+        dispose: async () => undefined,
+      },
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: new Map(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId: number, replaceMessageId?: number) => ({ chatId, queuedAttachments: [], replaceMessageId }),
+      endTelegramTurn: () => undefined,
+    } as any);
+    const stop = () => controller.handleMessage({ message_id: 3, chat: { id: 999 }, text: "/stop" } as any);
+    return { sendText, removeInlineKeyboard, stop };
+  };
+
+  const idleSession = (overrides: Record<string, unknown> = {}): any => ({
+    prompt: vi.fn(async () => undefined),
+    isStreaming: false,
+    isBashRunning: false,
+    extensionRunner: {
+      getUIContext: () => undefined,
+      setUIContext: () => undefined,
+      getCommand: () => undefined,
+      createCommandContext: () => ({} as any),
+    },
+    abort: vi.fn(() => Promise.resolve()),
+    ...overrides,
+  });
+
+  it("closes a pending dialog and stops a running turn with one reply", async () => {
+    const session = idleSession({ isStreaming: true });
+    const resolveInput = vi.fn(() => ({ handled: true, promptMessageId: 77 }));
+    const { sendText, removeInlineKeyboard, stop } = stopHarness(session, resolveInput);
+
+    await stop();
+
+    expect(resolveInput).toHaveBeenCalled();
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(removeInlineKeyboard).toHaveBeenCalledWith(999, 77);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "⏹️ Stopped. Closed the open dialog.", undefined, 3);
+  });
+
+  it("stops a running bash command and a running turn in one reply", async () => {
+    const abortBash = vi.fn();
+    const session = idleSession({ isStreaming: true, isBashRunning: true, abortBash });
+    const { sendText, stop } = stopHarness(session, () => ({ handled: false }));
+
+    await stop();
+
+    expect(abortBash).toHaveBeenCalledTimes(1);
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "⏹️ Stopped.", undefined, 3);
+  });
+
+  it("says Nothing to stop when idle with no dialog", async () => {
+    const session = idleSession();
+    const { sendText, stop } = stopHarness(session, () => ({ handled: false }));
+
+    await stop();
+
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "Nothing to stop.", undefined, 3);
+  });
+
+  it("says Cancelled when only a dialog was open and the session is idle", async () => {
+    const session = idleSession();
+    const { sendText, stop } = stopHarness(session, () => ({ handled: true, promptMessageId: 5 }));
+
+    await stop();
+
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(999, "Cancelled.", undefined, 3);
   });
 });

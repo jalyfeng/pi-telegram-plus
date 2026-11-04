@@ -66,3 +66,38 @@ describe("origin draft restore", () => {
     expect(editor()).toBe("");
   });
 });
+
+describe("a new Telegram prompt supersedes a finished command's idle window", () => {
+  function trackerWithEditor() {
+    const tracker = new OriginTracker({
+      isEditorFocused: () => true,
+      readDraft: () => "",
+      writeDraft: () => true,
+    });
+    return tracker;
+  }
+
+  it("ends a scope whose submit completed, with reason superseded", () => {
+    const tracker = trackerWithEditor();
+    const scope = tracker.begin(origin, "agents", "/agents", "");
+    tracker.markSubmitDone(scope);
+    expect(tracker.supersede()).toBe(true);
+    expect(scope.ended).toBe(true);
+    expect(scope.endReason).toBe("superseded");
+    expect(tracker.active()).toBeUndefined();
+  });
+
+  it("leaves a scope whose command is still running", () => {
+    const tracker = trackerWithEditor();
+    const scope = tracker.begin(origin, "goal", "/goal", "");
+    expect(tracker.supersede()).toBe(false);
+    expect(scope.ended).toBe(false);
+    expect(tracker.active()).toBe(scope);
+    tracker.dispose();
+  });
+
+  it("does nothing when no scope is active", () => {
+    const tracker = trackerWithEditor();
+    expect(tracker.supersede()).toBe(false);
+  });
+});

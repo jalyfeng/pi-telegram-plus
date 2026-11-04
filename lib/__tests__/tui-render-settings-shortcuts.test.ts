@@ -1,0 +1,149 @@
+import { describe, expect, it } from "vitest";
+import { renderDialog, type RenderContext } from "../tui/render-telegram.ts";
+import type { DialogModel } from "../tui/model.ts";
+
+const CTX: RenderContext = { sessionId: "s1", generation: 1 };
+
+type SettingsModel = Extract<DialogModel, { kind: "settings" }>;
+
+/** Twelve setting rows plus ten page switches, the way OMP's settings page reports them. */
+function settingsWithPages(): SettingsModel {
+  const rows = Array.from({ length: 12 }, (_, index) => ({
+    key: `row${index}`,
+    label: `Row ${index}`,
+    value: "On",
+    values: ["On", "Off"],
+  }));
+  const shortcuts = Array.from({ length: 10 }, (_, index) => ({
+    key: `page:p${index}`,
+    label: `📄 Page ${index}`,
+    hasSubmenu: true,
+    shortcut: true,
+  }));
+  return { kind: "settings", title: "Settings", subtitle: "General", items: [...rows, ...shortcuts] };
+}
+
+/** The button texts of each keyboard row, in order. */
+function labels(rows: { text: string }[][]): string[][] {
+  return rows.map((row) => row.map((button) => button.text));
+}
+
+describe("settings page switches as a compact block", () => {
+  it("starts page 1 with the first row and counts only the rows", () => {
+    const rendered = renderDialog(settingsWithPages(), { ...CTX, page: 0 });
+    expect(rendered.pages).toBe(2);
+    expect(rendered.text).toContain("Page 1/2 · 12 items");
+    expect(labels(rendered.rows)[0]).toEqual(["Row 0: On"]);
+  });
+
+  it("keeps the page switches below the nav row and above Cancel, three per row", () => {
+    const flat = labels(renderDialog(settingsWithPages(), { ...CTX, page: 0 }).rows);
+    const cancel = flat.length - 1;
+    expect(flat[cancel]).toEqual(["Cancel"]);
+    const block = flat.slice(cancel - 4, cancel);
+    expect(block.map((row) => row.length)).toEqual([3, 3, 3, 1]);
+    expect(block.flat()).toEqual(Array.from({ length: 10 }, (_, index) => `📄 Page ${index}`));
+    // The nav row (1/2 and Next) comes right before the block.
+    expect(flat[cancel - 5].map((text) => text.trim())).toContain("Next ▶");
+    // A page switch is not drawn as a row (no submenu marker).
+    expect(block.flat().some((text) => text.startsWith("▸"))).toBe(false);
+  });
+
+  it("does not list the page switches in the message body", () => {
+    const text = renderDialog(settingsWithPages(), { ...CTX, page: 0 }).text;
+    expect(text).not.toContain("Page 0");
+    expect(text).toContain("Row 0");
+  });
+
+  it("shows the same page-switch block on page 2", () => {
+    const rendered = renderDialog(settingsWithPages(), { ...CTX, page: 1 });
+    expect(rendered.text).toContain("Page 2/2 · 12 items");
+    expect(labels(rendered.rows)[0]).toEqual(["Row 10: On"]);
+    const flat = labels(rendered.rows).flat();
+    for (let index = 0; index < 10; index++) expect(flat).toContain(`📄 Page ${index}`);
+  });
+
+  it("maps each page-switch button to its page key through a keyMap arg outside the row args", () => {
+    const rendered = renderDialog(settingsWithPages(), { ...CTX, page: 0 });
+    expect(rendered.keyMap.get("g0")).toBe("page:p0");
+    expect(rendered.keyMap.get("g9")).toBe("page:p9");
+    // A two-valued row is one button; its press asks for the other value.
+    expect(rendered.keyMap.get("0.0")).toBe("row0=Off");
+    expect(rendered.keyMap.get("0.0.0")).toBeUndefined();
+  });
+});
+
+describe("two-valued settings rows", () => {
+  const row = (value: string): SettingsModel => ({
+    kind: "settings",
+    title: "Settings",
+    items: [{ key: "auto-compact", label: "Auto-compact", value, values: ["true", "false"] }],
+  });
+
+  it("draws one button with the current value, not one per value", () => {
+    const rendered = renderDialog(row("true"), { ...CTX, page: 0 });
+    // One row button, then the Cancel row.
+    expect(labels(rendered.rows)).toEqual([["Auto-compact: true"], ["Cancel"]]);
+  });
+
+  it("presses toward the other value from either side", () => {
+    expect(renderDialog(row("true"), { ...CTX, page: 0 }).keyMap.get("0.0")).toBe("auto-compact=false");
+    expect(renderDialog(row("false"), { ...CTX, page: 0 }).keyMap.get("0.0")).toBe("auto-compact=true");
+  });
+
+  it("shows the current value on the button for a two-valued row", () => {
+    expect(labels(renderDialog(row("false"), { ...CTX, page: 0 }).rows)[0]).toEqual(["Auto-compact: false"]);
+  });
+});
+
+describe("settings submenu rows", () => {
+  it("draws each row with its current value after the label", () => {
+    const model: SettingsModel = {
+      kind: "settings",
+      title: "Settings",
+      items: [{ key: "model-thinking", label: "Default thinking level per model", value: "", hasSubmenu: true }],
+      submenu: {
+        itemKey: "model-thinking",
+        model: {
+          kind: "select",
+          title: "Per-Model Thinking Level",
+          total: 2,
+          items: [
+            { key: "0:mock-model", label: "mock-model [mock]", value: "off", focused: true, current: false },
+            { key: "1:other", label: "other [mock]", current: false },
+          ],
+        },
+      },
+    };
+    const rendered = renderDialog(model, { ...CTX, page: 0 });
+    expect(labels(rendered.rows)[0]).toEqual(["▸ mock-model [mock]: off"]);
+    expect(labels(rendered.rows)[1]).toEqual(["other [mock]"]);
+  });
+});
+
+describe("settings submenu text", () => {
+  const submenu = (): SettingsModel => ({
+    kind: "settings",
+    title: "Settings",
+    items: [{ key: "model-thinking", label: "Default thinking level per model", value: "", hasSubmenu: true }],
+    submenu: {
+      itemKey: "model-thinking",
+      model: {
+        kind: "select",
+        title: "Per-Model Thinking Level",
+        total: 1,
+        subtitle: "Step 1/2 · Select a model to configure",
+        items: [{ key: "0:Model A", label: "Model A", focused: true, current: false }],
+      },
+    },
+  });
+
+  it("carries the step line and no plugin-internal note about Esc", () => {
+    const rendered = renderDialog(submenu(), { ...CTX, page: 0 });
+    expect(rendered.text).toContain("Step 1/2 · Select a model to configure");
+    expect(rendered.text).not.toContain("Back sends Esc");
+    expect(rendered.text).not.toContain("Submenu");
+    // The way back is the Back button itself.
+    expect(labels(rendered.rows).flat()).toContain("↩ Back");
+  });
+});

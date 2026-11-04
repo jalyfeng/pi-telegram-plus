@@ -8,13 +8,31 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import * as host from "@earendil-works/pi-coding-agent";
 import { TrustSelectorComponent as RealTrustSelectorComponent } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/trust-selector.js";
+import { ModelSelectorComponent as RealModelSelectorComponent } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/model-selector.js";
+import { OAuthSelectorComponent as RealOAuthSelectorComponent } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/oauth-selector.js";
+import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
+import { setKeybindings } from "@earendil-works/pi-tui";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pickAdapter } from "../tui/adapters/index.ts";
 import { piListAdapter } from "../tui/adapters/pi-lists.ts";
 import { sendKeyTo } from "../tui/keys.ts";
 import type { AdapterContext, DialogModel } from "../tui/model.ts";
 
+/** A host-shaped search box: `\x15` clears it (ctrl+u), other keys type into it. */
+const typedSearch = {
+  typed: "",
+  handleInput(this: { typed: string }, data: string) {
+    this.typed = data === "\x15" ? "" : this.typed + data;
+  },
+};
+
 /** Fake components with pi's field names; the adapter keys on the class name. */
 class ModelSelectorComponent {
+  typed = "";
+  handleInput = typedSearch.handleInput;
+  searchInput = { getValue: () => this.typed };
   filteredModels = [
     { provider: "anthropic", id: "claude-opus", model: {} },
     { provider: "openai", id: "gpt-5", model: {} },
@@ -26,6 +44,9 @@ class ModelSelectorComponent {
 }
 
 class ScopedModelsSelectorComponent {
+  typed = "";
+  handleInput = typedSearch.handleInput;
+  searchInput = { getValue: () => this.typed };
   filteredItems = [
     { fullId: "anthropic/claude-opus", model: {}, enabled: true },
     { fullId: "openai/gpt-5", model: {}, enabled: false },
@@ -35,6 +56,9 @@ class ScopedModelsSelectorComponent {
 }
 
 class OAuthSelectorComponent {
+  typed = "";
+  handleInput = typedSearch.handleInput;
+  searchInput = { getValue: () => this.typed };
   mode = "login";
   filteredProviders = [
     { id: "anthropic", name: "Anthropic" },
@@ -167,6 +191,73 @@ describe("read", () => {
   });
 });
 
+describe("search and row actions", () => {
+  it("model selector: a search action types into its box and reads back as the query", () => {
+    const { ctx } = harness();
+    const component = new ModelSelectorComponent();
+    expect(piListAdapter.act(component, { type: "search", query: "gpt" }, ctx)).toBe(true);
+    expect(component.typed).toBe("gpt");
+    const model = expectSelect(piListAdapter.read(component, ctx));
+    expect(model.search?.query).toBe("gpt");
+  });
+
+  it("oauth selector is searchable the same way", () => {
+    const { ctx } = harness();
+    const component = new OAuthSelectorComponent();
+    expect(piListAdapter.act(component, { type: "search", query: "open" }, ctx)).toBe(true);
+    expect(expectSelect(piListAdapter.read(component, ctx)).search?.query).toBe("open");
+  });
+
+  it("scoped models are searchable; trust and fork are not", () => {
+    const { ctx } = harness();
+    expect(expectSelect(piListAdapter.read(new ScopedModelsSelectorComponent(), ctx)).search).toBeDefined();
+    expect(piListAdapter.act(new TrustSelectorComponent(), { type: "search", query: "x" }, ctx)).toBe(false);
+    expect(expectSelect(piListAdapter.read(new TrustSelectorComponent(), ctx)).search).toBeUndefined();
+    expect(piListAdapter.act(new UserMessageList(), { type: "search", query: "x" }, ctx)).toBe(false);
+  });
+
+  it("set as default: pick a row, the cursor moves there, then the host's save key", () => {
+    const { ctx, sent } = harness();
+    const component = new ModelSelectorComponent(); // selectedIndex 1
+    const model = expectSelect(piListAdapter.read(component, ctx));
+    expect(model.extraActions).toEqual([{ label: "Set as default", key: "row:ctrl-s" }]);
+    expect(piListAdapter.act(component, { type: "key", name: "row:ctrl-s" }, ctx)).toBe(true);
+    const picking = expectSelect(piListAdapter.read(component, ctx));
+    expect(picking.subtitle).toBe("Set as default: choose one");
+    expect(picking.extraActions).toEqual([{ label: "Back", key: "back" }]);
+    expect(piListAdapter.act(component, { type: "choose", key: "3:local/qwen" }, ctx)).toBe(true);
+    expect(sent).toEqual(["down", "down", "ctrl-s"]);
+    expect(expectSelect(piListAdapter.read(component, ctx)).extraActions).toEqual([{ label: "Set as default", key: "row:ctrl-s" }]);
+  });
+
+  it("set as default: back drops the pick and nothing is sent", () => {
+    const { ctx, sent } = harness();
+    const component = new ModelSelectorComponent();
+    piListAdapter.act(component, { type: "key", name: "row:ctrl-s" }, ctx);
+    expect(piListAdapter.act(component, { type: "key", name: "back" }, ctx)).toBe(true);
+    expect(expectSelect(piListAdapter.read(component, ctx)).subtitle).toBeUndefined();
+    expect(piListAdapter.act(component, { type: "choose", key: "3:local/qwen" }, ctx)).toBe(true);
+    expect(sent).toEqual(["down", "down", "enter"]);
+  });
+
+  it("a pick refuses toggles and never sends the host key for a non-row action", () => {
+    const { ctx, sent } = harness();
+    const component = new ModelSelectorComponent();
+    piListAdapter.act(component, { type: "key", name: "row:ctrl-s" }, ctx);
+    expect(piListAdapter.act(component, { type: "toggle", key: "3:local/qwen" }, ctx)).toBe(false);
+    expect(piListAdapter.act(component, { type: "key", name: "row:ctrl-x" }, ctx)).toBe(false);
+    expect(sent).toEqual([]);
+  });
+
+  it("row actions are only offered where the host has the key", () => {
+    const { ctx, sent } = harness();
+    expect(expectSelect(piListAdapter.read(new OAuthSelectorComponent(), ctx)).extraActions).toBeUndefined();
+    expect(piListAdapter.act(new OAuthSelectorComponent(), { type: "key", name: "row:ctrl-s" }, ctx)).toBe(false);
+    expect(piListAdapter.act(new ScopedModelsSelectorComponent(), { type: "key", name: "row:ctrl-s" }, ctx)).toBe(false);
+    expect(sent).toEqual([]);
+  });
+});
+
 describe("act", () => {
   it("walks the cursor down and presses enter to choose", () => {
     const { ctx, sent } = harness();
@@ -238,6 +329,65 @@ describe("contract: real pi 1.4.0 components", () => {
     expect(model.items[2].focused).toBe(true);
     expect(piListAdapter.act(list, { type: "choose", key: "0:alpha one" }, ctx)).toBe(true);
     expect(picked).toEqual(["a"]);
+  });
+
+  it("model selector: search filters the real list, and set as default saves the picked row", async () => {
+    setKeybindings(KeybindingsManager.create(mkdtempSync(join(tmpdir(), "pi-keybindings-"))));
+    const models = [
+      { provider: "anthropic", id: "claude-opus", name: "Claude Opus" },
+      { provider: "openai", id: "gpt-5", name: "GPT 5" },
+      { provider: "local", id: "qwen", name: "Qwen" },
+    ];
+    const runtime = {
+      getAvailableSnapshot: () => models,
+      getModel: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+      getError: () => undefined,
+      refresh: async () => {},
+    };
+    const selected: string[] = [];
+    const saved: string[] = [];
+    const selector = new RealModelSelectorComponent(
+      { requestRender: () => {} } as never,
+      models[1] as never,
+      runtime as never,
+      [],
+      (model) => selected.push(model.id),
+      () => {},
+      undefined,
+      (model) => saved.push(model.id),
+      models[1] as never,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const ctx = realCtx(selector);
+    expect(piListAdapter.detect(selector, ctx)).toBe(true);
+
+    expect(piListAdapter.act(selector, { type: "search", query: "qwen" }, ctx)).toBe(true);
+    expect(expectSelect(piListAdapter.read(selector, ctx)).items.map((item) => item.label)).toEqual(["local/qwen"]);
+    expect(piListAdapter.act(selector, { type: "search", query: "" }, ctx)).toBe(true);
+    const all = expectSelect(piListAdapter.read(selector, ctx));
+    expect(all.items.map((item) => item.label)).toEqual(["openai/gpt-5", "anthropic/claude-opus", "local/qwen"]);
+
+    // The cursor starts on the current model (row 0); the pick moves it to qwen and saves.
+    expect(piListAdapter.act(selector, { type: "key", name: "row:ctrl-s" }, ctx)).toBe(true);
+    expect(piListAdapter.act(selector, { type: "choose", key: all.items[2].key }, ctx)).toBe(true);
+    expect(saved).toEqual(["qwen"]);
+    expect(selected).toEqual([]);
+  });
+
+  it("oauth selector: search narrows the real provider list", () => {
+    const selector = new RealOAuthSelectorComponent(
+      "login",
+      [
+        { id: "anthropic", name: "Anthropic", authType: "oauth" },
+        { id: "openai", name: "OpenAI", authType: "api_key" },
+      ] as never,
+      () => {},
+      () => {},
+    );
+    const ctx = realCtx(selector);
+    expect(piListAdapter.detect(selector, ctx)).toBe(true);
+    expect(piListAdapter.act(selector, { type: "search", query: "open" }, ctx)).toBe(true);
+    expect(expectSelect(piListAdapter.read(selector, ctx)).items.map((item) => item.label)).toEqual(["OpenAI"]);
   });
 
   it("trust: labels come from trustOptions and choose answers onSelect", () => {

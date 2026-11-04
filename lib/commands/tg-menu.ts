@@ -9,9 +9,14 @@ import type { TgConfigDeps, SessionDeps } from "./register.ts";
 import type { BotRecord, BotRegistry, CapturedAgentSession, TelegramConfig } from "../types.ts";
 import { currentHostName } from "../tui/host.ts";
 import type { TuiHost } from "../tui-bridge.ts";
-import { configToolFlow, configThinkingFlow, configRetryFlow, configBashFlow } from "./tg-config.ts";
+
+/** The menu UI plus the Telegram-only id of the live menu message (used by the switch flow). */
+type TgMenuUi = MenuUi & { menuMessageId?: () => number | undefined };
+import { configToolFlow, configThinkingFlow, configRetryFlow, configBashFlow, configModeFlow } from "./tg-config.ts";
 import { formatPairingInstructions } from "../pairing.ts";
 import { formatDebugReport } from "./info.ts";
+import { hostCommandName } from "../session-capture.ts";
+import { recordTelegramCommandDescription } from "../telegram-command-descriptions.ts";
 import {
   addBotFlow,
   clearBotDefaultFlow,
@@ -26,13 +31,21 @@ import {
   unbindProjectFlow,
 } from "./telegram-commands.ts";
 
-/** Format a live instance for display in the switch selector. */
-export function formatInstanceChoice(instance: TelegramInstanceMetadata, activeId: string): string {
-  const marker = instance.id === activeId ? "✓" : " ";
-  const project = (basename(instance.cwd) || instance.cwd).slice(0, 28);
-  const session = (instance.sessionName || instance.sessionId?.slice(0, 8) || "session").slice(0, 24);
-  const model = (instance.model || "no-model").slice(0, 36);
-  return `${marker} ${project} · ${session} · ${model} · ${instance.id.slice(0, 8)}`;
+/** Button labels for the instance picker, in the same order as `instances`.
+ *  Project name and model read at a glance; the session id prefix is added only
+ *  when two instances share a project name, so the buttons can still be told apart. */
+export function formatInstanceChoices(instances: TelegramInstanceMetadata[], activeId: string): string[] {
+  const projectOf = (instance: TelegramInstanceMetadata) => (basename(instance.cwd) || instance.cwd).slice(0, 28);
+  const counts = new Map<string, number>();
+  for (const instance of instances) counts.set(projectOf(instance), (counts.get(projectOf(instance)) ?? 0) + 1);
+  return instances.map((instance) => {
+    const marker = instance.id === activeId ? "✓" : " ";
+    const model = (instance.model || "no-model").slice(0, 36);
+    const session = (counts.get(projectOf(instance)) ?? 0) > 1 && instance.sessionId
+      ? ` · ${instance.sessionId.slice(0, 8)}`
+      : "";
+    return `${marker} ${projectOf(instance)} · ${model}${session}`;
+  });
 }
 
 // ── Menu option labels ─────────────────────────────────────────────────────
@@ -44,7 +57,6 @@ const MAIN_MENU_OPTIONS = [
   "⚙️ Config",
   "🔄 Switch instance",
   "🛠 Debug info",
-  "❌ Close",
 ] as const;
 
 const BOTS_MENU_ADD = "➕ Add bot";
@@ -76,10 +88,39 @@ function formatBotLabel(bot: BotRecord, registry: BotRegistry): string {
 class MenuClosed extends Error {}
 
 /** Navigation select. On Telegram, ui.menu edits one message in place so the
- *  whole /tg navigation stays on a single message; the TUI has no edit concept
- *  and falls back to ui.select. */
-function pick(ui: MenuUi, title: string, options: string[]): Promise<string | undefined> {
-  return ui.menu ? ui.menu(title, options) : ui.select(title, options);
+ *  whole /tg page (title, body, buttons) stays on a single message; the TUI has
+ *  no edit concept and falls back to ui.select, with the body as a notice first. */
+function pick(ui: MenuUi, title: string, options: string[], body?: string): Promise<string | undefined> {
+  if (ui.menu) return ui.menu(title, options, body);
+  if (body) ui.notify(body, "info");
+  return ui.select(title, options);
+}
+
+/** The one place a cancel is decided: an undefined answer (Cancel button, /stop,
+ *  terminal Esc, input timeout) closes the whole /tg menu. */
+function answered<T>(value: T | undefined): T {
+  if (value === undefined) throw new MenuClosed();
+  return value;
+}
+
+/** A menu pick where only Back (a real choice) leaves the current page. */
+async function pickMenu(ui: MenuUi, title: string, options: string[], body?: string): Promise<string> {
+  return answered(await pick(ui, title, options, body));
+}
+
+/** The UI the /tg menu and the leaf flows it calls receive. Cancelling any
+ *  select / input here closes the menu at any depth, instead of returning to
+ *  the parent level. confirm is left as is: its boolean cannot tell "No" from
+ *  a cancel. Terminal calls of the flows never receive this wrapper. */
+function closeOnCancel(ui: TgMenuUi): TgMenuUi {
+  return {
+    ...ui,
+    select: async (title, options) => answered(await ui.select(title, options)),
+    input: async (title, placeholder) => answered(await ui.input(title, placeholder)),
+    ...(ui.inputSecret ? { inputSecret: async (title: string, placeholder?: string) => answered(await ui.inputSecret!(title, placeholder)) } : {}),
+    ...(ui.menu ? { menu: async (title: string, options: string[], body?: string) => answered(await ui.menu!(title, options, body)) } : {}),
+    ...(ui.menuMessageId ? { menuMessageId: ui.menuMessageId } : {}),
+  };
 }
 
 // ── Switch instance flow deps ──────────────────────────────────────────────
@@ -113,13 +154,14 @@ export function registerTgMenuCommand(
   commandDeps?: CommandMenuDeps,
   sessionDeps?: SessionDeps,
 ): void {
+  recordTelegramCommandDescription("tg", "Open the Telegram management menu");
   registry.registerCommand("tg", {
     description: "Open the Telegram management menu",
     handler: (_args, ctx) => runTgMenu(
       // MenuUi is the structural subset of ExtensionUIContext the menu flows
       // consume (plus Telegram-only menu/closeMenu hooks injected by the
       // controller's run-with-UI wrapper).
-      ctx.ui as unknown as MenuUi,
+      ctx.ui as unknown as TgMenuUi,
       deps, configDeps, switchDeps, commandDeps, sessionDeps, ctx.cwd || process.cwd(),
     ),
   });
@@ -128,7 +170,7 @@ export function registerTgMenuCommand(
 // ── Menu driver ─────────────────────────────────────────────────────────────
 
 async function runTgMenu(
-  ui: MenuUi,
+  ui: TgMenuUi,
   deps: TelegramCommandDeps,
   configDeps: TgConfigDeps,
   switchDeps: SwitchInstanceDeps,
@@ -137,7 +179,7 @@ async function runTgMenu(
   cwd: string,
 ): Promise<void> {
   try {
-    await mainMenu(ui, deps, configDeps, switchDeps, commandDeps, sessionDeps, cwd);
+    await mainMenu(closeOnCancel(ui), deps, configDeps, switchDeps, commandDeps, sessionDeps, cwd);
   } catch (error) {
     if (!(error instanceof MenuClosed)) throw error;
   } finally {
@@ -146,7 +188,7 @@ async function runTgMenu(
 }
 
 async function mainMenu(
-  ui: MenuUi,
+  ui: TgMenuUi,
   deps: TelegramCommandDeps,
   configDeps: TgConfigDeps,
   switchDeps: SwitchInstanceDeps,
@@ -158,8 +200,7 @@ async function mainMenu(
     ? [...MAIN_MENU_OPTIONS]
     : MAIN_MENU_OPTIONS.filter((option) => option !== "⌨️ Commands");
   while (true) {
-    const choice = await pick(ui, "Telegram Management", options);
-    if (!choice || choice === "❌ Close") return;
+    const choice = await pickMenu(ui, "Telegram Management", options);
 
     if (choice === "🤖 Bots") {
       if (await botsMenu(ui, deps, cwd)) continue;
@@ -179,7 +220,8 @@ async function mainMenu(
     } else if (choice === "🛠 Debug info") {
       const session = sessionDeps?.getSession();
       if (session) {
-        ui.notify(formatDebugReport(session, cwd), "info");
+        // A page of its own: the report is the body, Back is the only button.
+        await pickMenu(ui, "🛠 Debug info", [BACK_LABEL], formatDebugReport(session, cwd));
       } else {
         ui.notify("No active session", "error");
       }
@@ -191,6 +233,9 @@ async function mainMenu(
 
 // ── Full command catalog ───────────────────────────────────────────────────
 
+/** Running a command from the list closes the whole /tg menu: its output lands
+ *  in its own message, and reopening /tg is the way back to the menu. Nesting
+ *  the command's own dialogs inside the menu's scope would replace that scope. */
 async function commandsMenu(ui: MenuUi, deps: CommandMenuDeps): Promise<void> {
   const commands = (await deps.getCommands()).filter((command) => command.name !== "tg");
   if (commands.length === 0) {
@@ -198,12 +243,14 @@ async function commandsMenu(ui: MenuUi, deps: CommandMenuDeps): Promise<void> {
     return;
   }
   const labels = commands.map((command) => `/${command.name}${command.description ? ` — ${command.description}` : ""}`);
-  const selected = await pick(ui, `⌨️ Commands (${commands.length})`, [...labels, BACK_LABEL]);
-  if (!selected || selected === BACK_LABEL) return;
+  const selected = await pickMenu(ui, `⌨️ Commands (${commands.length})`, [...labels, BACK_LABEL]);
+  if (selected === BACK_LABEL) return;
   const index = labels.indexOf(selected);
   const command = commands[index];
   if (!command) return;
+  await ui.closeMenu?.();
   await deps.runCommand(command.name, "");
+  throw new MenuClosed();
 }
 
 // ── Bots submenu ───────────────────────────────────────────────────────────
@@ -215,8 +262,8 @@ async function botsMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): Pro
     const registry = await readBotRegistry();
     const defaultBot = registry.bots.find((b) => b.id === registry.defaultBotId);
     const defaultChoice = `${BOTS_MENU_DEFAULT_PREFIX}${defaultBot?.name ?? "not set"}`;
-    const choice = await pick(ui, "🤖 Bots", [BOTS_MENU_ADD, BOTS_MENU_LIST, defaultChoice, BACK_LABEL]);
-    if (!choice || choice === BACK_LABEL) return true; // back to main
+    const choice = await pickMenu(ui, "🤖 Bots", [BOTS_MENU_ADD, BOTS_MENU_LIST, defaultChoice, BACK_LABEL]);
+    if (choice === BACK_LABEL) return true; // back to main
 
     if (choice === BOTS_MENU_ADD) {
       await addBotFlow(ui, deps);
@@ -241,12 +288,12 @@ async function defaultBotMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string
     // The current default is ⭐-marked via formatBotLabel; "Clear default" only exists
     // while a default actually is set.
     const choices = registry.bots.map((b) => formatBotLabel(b, registry));
-    const selected = await pick(ui, "⭐ Default bot", [
+    const selected = await pickMenu(ui, "⭐ Default bot", [
       ...choices,
       ...(registry.defaultBotId ? [CLEAR_DEFAULT_LABEL] : []),
       BACK_LABEL,
     ]);
-    if (!selected || selected === BACK_LABEL) return; // back to Bots submenu
+    if (selected === BACK_LABEL) return; // back to Bots submenu
 
     if (selected === CLEAR_DEFAULT_LABEL) {
       if (await clearBotDefaultFlow(ui, deps, cwd)) throw new MenuClosed();
@@ -268,8 +315,8 @@ async function botListMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
       return;
     }
     const choices = registry.bots.map((b) => formatBotLabel(b, registry));
-    const selected = await pick(ui, "Bot list", [...choices, BACK_LABEL]);
-    if (!selected || selected === BACK_LABEL) return; // back to Bots submenu
+    const selected = await pickMenu(ui, "Bot list", [...choices, BACK_LABEL]);
+    if (selected === BACK_LABEL) return; // back to Bots submenu
     const bot = registry.bots[choices.indexOf(selected)];
     if (bot) await botDetailMenu(ui, deps, cwd, bot);
     // loop re-renders the bot list (reflects remove/pairing changes)
@@ -294,8 +341,20 @@ async function botDetailMenu(
     }
     // The global default is set only in the ⭐ Default bot submenu; this page
     // holds the bot's own actions.
-    const choice = await pick(ui, `🤖 ${botNow.name}`, [BOT_ACTION_UPDATE, BOT_ACTION_PAIRING, BOT_ACTION_REMOVE, BACK_LABEL]);
-    if (!choice || choice === BACK_LABEL) return; // back to bot list
+    const paired = botNow.allowedUserId !== undefined;
+    const choice = await pickMenu(
+      ui,
+      `🤖 ${botNow.name}`,
+      [BOT_ACTION_UPDATE, BOT_ACTION_PAIRING, BOT_ACTION_REMOVE, BACK_LABEL],
+      [
+        `Name: ${botNow.name}`,
+        `Username: ${botNow.botUsername ? `@${botNow.botUsername}` : "unknown"}`,
+        `API base: ${botNow.apiBase ?? "default"}`,
+        `Pairing: ${paired ? `paired (user ${botNow.allowedUserId})` : "not paired"}`,
+        `Default bot: ${registry.defaultBotId === botNow.id ? "yes" : "no"}`,
+      ].join("\n"),
+    );
+    if (choice === BACK_LABEL) return; // back to bot list
 
     if (choice === BOT_ACTION_UPDATE) {
       await updateBotFlow(ui, deps, cwd, botNow.id);
@@ -321,19 +380,18 @@ async function pairingMenu(ui: MenuUi, deps: TelegramCommandDeps, bot: BotRecord
       return;
     }
     const paired = botNow.allowedUserId !== undefined;
-    // The menu UI only offers select/notify: the state/instructions go out as
-    // a notify right before the choices render.
-    if (paired) {
-      ui.notify(`Paired user: ${botNow.allowedUserId}`, "info");
-    } else {
-      ui.notify(formatPairingInstructions({ ...botNow, botToken: botNow.token } as TelegramConfig), "info");
-    }
-    const choice = await pick(
+    // The state or the pairing instructions are the page's body, not a notice
+    // sent before it, so they stay on the same message as the buttons.
+    const body = paired
+      ? `Paired user: ${botNow.allowedUserId}`
+      : formatPairingInstructions({ ...botNow, botToken: botNow.token } as TelegramConfig);
+    const choice = await pickMenu(
       ui,
       `🔑 Pairing · ${botNow.name}`,
       paired ? [PAIRING_ACTION_UNPAIR, BACK_LABEL] : [PAIRING_ACTION_NEW_CODE, BACK_LABEL],
+      body,
     );
-    if (!choice || choice === BACK_LABEL) return; // back to bot detail
+    if (choice === BACK_LABEL) return; // back to bot detail
 
     if (choice === PAIRING_ACTION_NEW_CODE) {
       await regeneratePairingCodeFlow(ui, deps, botNow.id);
@@ -372,13 +430,13 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
     const connection = deps.connectionState();
     const connectLabel = connectionChoice(connection);
 
-    const choice = await pick(ui, "📁 Project", [
+    const choice = await pickMenu(ui, "📁 Project", [
       botLabel,
       // No usable bot means nothing to connect; hide this entry.
       ...(effectiveBot ? [connectLabel] : []),
       BACK_LABEL,
     ]);
-    if (!choice || choice === BACK_LABEL) return true; // back to main
+    if (choice === BACK_LABEL) return true; // back to main
 
     if (choice === botLabel) {
       if (registry.bots.length === 0) {
@@ -387,8 +445,8 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
       }
       const choices = registry.bots.map((b) => formatBotLabel(b, registry));
       // Unbind only makes sense for projects whose binding has a botId.
-      const selected = await pick(ui, "Bind project to bot", [...choices, ...(boundBotId ? [UNBIND_LABEL] : []), BACK_LABEL]);
-      if (!selected || selected === BACK_LABEL) continue;
+      const selected = await pickMenu(ui, "Bind project to bot", [...choices, ...(boundBotId ? [UNBIND_LABEL] : []), BACK_LABEL]);
+      if (selected === BACK_LABEL) continue;
       if (selected === UNBIND_LABEL) {
         await unbindProjectFlow(ui, deps, cwd);
       } else {
@@ -397,7 +455,7 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
       }
     } else if (choice === connectLabel) {
       if (connection === "other-instance") {
-        ui.notify("Another pi instance is serving this bot", "info");
+        ui.notify(`Another ${hostCommandName()} instance is serving this bot`, "info");
       } else if (connection === "disconnected") {
         // flow awaits reconcile, so the next render shows the new state.
         await enableProjectFlow(ui, deps, cwd);
@@ -433,6 +491,7 @@ export function buildConfigMenuOptions(
       ? [`🧠 Thinking level: ${session?.thinkingLevel ?? "off"}`]
       : []),
     `🔄 Retry: ${config.retryCount ?? 3}`,
+    `📨 Message mode: ${config.messageMode ?? "steer"}`,
     `🐚 Shell confirm: ${config.bashConfirm ?? "dangerous"}`,
     BACK_LABEL,
   ];
@@ -443,8 +502,8 @@ async function configMenu(ui: MenuUi, configDeps: TgConfigDeps, sessionDeps?: Se
     const session = sessionDeps?.getSession();
     const thinkingLevels = session?.getAvailableThinkingLevels() ?? [];
 
-    const choice = await pick(ui, CONFIG_MENU_PREFIX, buildConfigMenuOptions(configDeps.getConfig(), session, currentHostName()));
-    if (!choice || choice === BACK_LABEL) return true; // back to main
+    const choice = await pickMenu(ui, CONFIG_MENU_PREFIX, buildConfigMenuOptions(configDeps.getConfig(), session, currentHostName()));
+    if (choice === BACK_LABEL) return true; // back to main
 
     if (choice.startsWith("🔧 Tool:")) {
       await configToolFlow(ui, configDeps);
@@ -453,8 +512,7 @@ async function configMenu(ui: MenuUi, configDeps: TgConfigDeps, sessionDeps?: Se
     } else if (choice.startsWith("🧠 Thinking level:")) {
       if (!session || thinkingLevels.length === 0) continue;
       const labels = thinkingLevels.map((l) => (l === session.thinkingLevel ? "● " : "  ") + String(l));
-      const selected = await pick(ui, "Thinking level", labels);
-      if (!selected) continue;
+      const selected = await pickMenu(ui, "Thinking level", labels);
       const level = thinkingLevels[labels.indexOf(selected)];
       if (level !== undefined) {
         session.setThinkingLevel(level);
@@ -462,6 +520,8 @@ async function configMenu(ui: MenuUi, configDeps: TgConfigDeps, sessionDeps?: Se
       }
     } else if (choice.startsWith("🔄 Retry:")) {
       await configRetryFlow(ui, configDeps);
+    } else if (choice.startsWith("📨 Message mode:")) {
+      await configModeFlow(ui, configDeps);
     } else if (choice.startsWith("🐚 Shell confirm:")) {
       await configBashFlow(ui, configDeps);
     }
@@ -470,10 +530,10 @@ async function configMenu(ui: MenuUi, configDeps: TgConfigDeps, sessionDeps?: Se
 
 // ── Switch instance submenu ────────────────────────────────────────────────
 
-async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): Promise<boolean> {
+async function switchInstanceMenu(ui: TgMenuUi, switchDeps: SwitchInstanceDeps): Promise<boolean> {
   const coordinator = switchDeps.getCoordinator();
   if (!coordinator || !coordinator.isActive()) {
-    ui.notify("This pi instance is not the active Telegram instance.", "error");
+    ui.notify(`This ${hostCommandName()} instance is not the active Telegram instance.`, "error");
     return true; // back to main
   }
   const instances = await coordinator.listInstances();
@@ -483,9 +543,9 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
     return true; // back to main
   }
 
-  const choices = instances.map((instance) => formatInstanceChoice(instance, active.instanceId));
-  const selected = await pick(ui, "Switch Telegram pi instance", [...choices, BACK_LABEL]);
-  if (!selected || selected === BACK_LABEL) return true; // back to main
+  const choices = formatInstanceChoices(instances, active.instanceId);
+  const selected = await pickMenu(ui, `Switch Telegram ${hostCommandName()} instance`, [...choices, BACK_LABEL]);
+  if (selected === BACK_LABEL) return true; // back to main
 
   const target = instances[choices.indexOf(selected)];
   if (!target) return true;
@@ -497,6 +557,9 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
     return true;
   }
 
+  // The new active instance edits this menu message into the switch result (see
+  // replayTelegramHistory). This instance can no longer send once the switch lands.
+  const menuMessageId = ui.menuMessageId?.();
   const handoffId = randomUUID();
   const pendingHandoffs = switchDeps.pendingHandoffs;
   pendingHandoffs.add(handoffId);
@@ -508,6 +571,7 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
         chatId,
         messageThreadId: turn?.messageThreadId,
         sourceMessageId: turn?.sourceMessageId,
+        ...(menuMessageId === undefined ? {} : { menuMessageId }),
       },
       { instanceId: active.instanceId, generation: active.generation },
     );
@@ -518,5 +582,6 @@ async function switchInstanceMenu(ui: MenuUi, switchDeps: SwitchInstanceDeps): P
       switchDeps.startPolling();
     }
   }
-  return true; // back to main
+  // The menu message now shows the switch result: the /tg menu ends here.
+  return false;
 }

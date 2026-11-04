@@ -5,7 +5,7 @@ import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { SessionDeps, CommandRegistry } from "./register.ts";
 import { escapeHtml } from "../html.ts";
 import { log } from "../logger.ts";
-import { checkpointCurrentUpdateCursor } from "../polling.ts";
+import { isOmpHost } from "../session-capture.ts";
 
 const sessionLog = log.child("session");
 
@@ -73,15 +73,15 @@ export function registerSessionCommands(
       const ui = ctx.ui;
       const confirmed = await ui.confirm("New session", "Start a new session? Current session will be saved.");
       if (!confirmed) return;
-      // Commit this update's cursor before the in-process session replacement so
-      // the replacement runtime cannot re-fetch and re-run the unconfirmed /new.
-      await checkpointCurrentUpdateCursor();
+      // OMP prints its own "✔ New session started" into the command's message, so the plugin
+      // adds no notice there (a second line would repeat it). pi does not print one.
+      const started = async () => { if (!isOmpHost()) ui.notify("✅ New session started.", "info"); };
       const result = await ctx.newSession(
         typeof deps.getSession()?.extensionRunner?.setUIContext === "function"
           // pi keeps its pre-existing withSession post-replacement hook.
-          ? { withSession: async () => { ui.notify("✅ New session started.", "info"); } }
+          ? { withSession: started }
           // OMP has no setUIContext() and ignores withSession; it only implements setup.
-          : { setup: async () => { ui.notify("✅ New session started.", "info"); } },
+          : { setup: started },
       );
       if (result.cancelled) ui.notify("Cancelled.", "info");
     },
@@ -96,44 +96,49 @@ export function registerSessionCommands(
   });
 
   // ── /cd ───────────────────────────────────────────────────────────────
-  registry.registerCommand("cd", {
-    description: "Switch pi working directory",
-    handler: async (args, ctx) => {
-      const ui = ctx.ui;
-      const rawPath = args.trim() || await ui.input("Working directory", ctx.cwd);
-      if (!rawPath) return;
+  // OMP does not register /cd: its SessionManager.create takes a storage object
+  // where pi takes parentSession, and OMP already ships /move for this.
+  // Registration runs before the bridge reports the host, so use the sync check.
+  if (!isOmpHost()) {
+    registry.registerCommand("cd", {
+      description: "Switch pi working directory",
+      handler: async (args, ctx) => {
+        const ui = ctx.ui;
+        const rawPath = args.trim() || await ui.input("Working directory", ctx.cwd);
+        if (!rawPath) return;
 
-      const targetCwd = resolveTargetCwd(rawPath, ctx.cwd);
-      const info = await stat(targetCwd).catch(sessionLog.swallow("debug", "stat target cwd failed (treated as not-a-directory)", { targetCwd }));
-      if (!info?.isDirectory()) {
-        ui.notify(`Not a directory: ${escapeHtml(targetCwd)}`, "error");
-        return;
-      }
+        const targetCwd = resolveTargetCwd(rawPath, ctx.cwd);
+        const info = await stat(targetCwd).catch(sessionLog.swallow("debug", "stat target cwd failed (treated as not-a-directory)", { targetCwd }));
+        if (!info?.isDirectory()) {
+          ui.notify(`Not a directory: ${escapeHtml(targetCwd)}`, "error");
+          return;
+        }
 
-      const currentSessionFile = ctx.sessionManager.getSessionFile();
-      const SessionManagerClass = SESSION_MANAGER;
-      if (!SessionManagerClass) {
-        ui.notify("Session management is unavailable in this pi build.", "error");
-        return;
-      }
-      const sessionManager = SessionManagerClass.create(targetCwd, undefined, {
-        ...(currentSessionFile ? { parentSession: currentSessionFile } : {}),
-      });
-      // Ensure the header-only session file exists before switchSession opens it.
-      (sessionManager as unknown as { _rewriteFile?: () => void })._rewriteFile?.();
-      const sessionPath = sessionManager.getSessionFile();
-      if (!sessionPath) {
-        ui.notify("Cannot switch cwd from an ephemeral session.", "error");
-        return;
-      }
+        const currentSessionFile = ctx.sessionManager.getSessionFile();
+        const SessionManagerClass = SESSION_MANAGER;
+        if (!SessionManagerClass) {
+          ui.notify("Session management is unavailable in this pi build.", "error");
+          return;
+        }
+        const sessionManager = SessionManagerClass.create(targetCwd, undefined, {
+          ...(currentSessionFile ? { parentSession: currentSessionFile } : {}),
+        });
+        // Ensure the header-only session file exists before switchSession opens it.
+        (sessionManager as unknown as { _rewriteFile?: () => void })._rewriteFile?.();
+        const sessionPath = sessionManager.getSessionFile();
+        if (!sessionPath) {
+          ui.notify("Cannot switch cwd from an ephemeral session.", "error");
+          return;
+        }
 
-      const result = await ctx.switchSession(sessionPath, {
-        withSession: async (nextCtx: { ui: import("@earendil-works/pi-coding-agent").ExtensionUIContext }) => {
-          nextCtx.ui.notify(`✅ Switched cwd:\n${escapeHtml(targetCwd)}`, "info");
-        },
-      });
-      if (result.cancelled) ui.notify("Cwd switch cancelled.", "info");
-    },
-  });
+        const result = await ctx.switchSession(sessionPath, {
+          withSession: async (nextCtx: { ui: import("@earendil-works/pi-coding-agent").ExtensionUIContext }) => {
+            nextCtx.ui.notify(`✅ Switched cwd:\n${escapeHtml(targetCwd)}`, "info");
+          },
+        });
+        if (result.cancelled) ui.notify("Cwd switch cancelled.", "info");
+      },
+    });
+  }
 
 }

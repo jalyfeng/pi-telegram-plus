@@ -5,7 +5,7 @@ import type { TelegramButton, TelegramTransport } from "../types.ts";
 
 const CHAT = 42;
 
-function setup() {
+function setup(onMenuMessage?: (messageId: number) => void) {
   let nextId = 100;
   const renders: TelegramButton[][][] = [];
   const transport = {
@@ -16,7 +16,7 @@ function setup() {
     removeInlineKeyboard: vi.fn(async () => undefined),
   };
   const runtime = createTelegramUiRuntime({ getSession: () => undefined, transport: transport as unknown as TelegramTransport });
-  const ui = runtime.create(CHAT);
+  const ui = runtime.create(CHAT, undefined, undefined, onMenuMessage);
   return { transport, runtime, ui, renders };
 }
 
@@ -28,6 +28,31 @@ async function press({ runtime, renders }: ReturnType<typeof setup>, messageId: 
   const handled = runtime.resolveInput(CHAT, decodeUiCallback(button.value), messageId, true);
   expect(handled.handled).toBe(true);
 }
+
+describe("telegram ui confirm()", () => {
+  it("offers only Yes and No, reports its message id, and /stop answers it false", async () => {
+    const env = setup();
+    const reported: number[] = [];
+    const ui = env.runtime.create(CHAT, undefined, undefined, undefined, (messageId) => reported.push(messageId));
+
+    const answer = ui.confirm("Run shell command?", "rm -rf x");
+    await vi.waitFor(() => expect(env.runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(reported).toEqual([100]);
+    expect(env.renders.at(-1)!.flat().map((b) => b.text)).toEqual(["Yes", "No"]);
+
+    env.runtime.resolveInput(CHAT, undefined);
+    expect(await answer).toBe(false);
+  });
+
+  it("the Yes button answers true on the reported message", async () => {
+    const env = setup();
+    const ui = env.runtime.create(CHAT, undefined, undefined, undefined, () => undefined);
+
+    const answer = ui.confirm("Run shell command?", "ls");
+    await press(env, 100, "Yes");
+    expect(await answer).toBe(true);
+  });
+});
 
 describe("telegram ui menu() edit-in-place", () => {
   it("first menu sends, nested menus edit the same message, closeMenu removes the keyboard", async () => {
@@ -97,6 +122,19 @@ describe("telegram ui menu() edit-in-place", () => {
     await press(env, 100, "opt 11");
     expect(await result).toBe("opt 11");
     expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+  });
+
+  it("a body sits under the title on the same message, and onMenuMessage reports that message", async () => {
+    const reported: number[] = [];
+    const env = setup((id) => reported.push(id));
+    const { transport, ui } = env;
+    const result = ui.menu("Pairing", ["Unpair", "Back"], "Paired user: <42>");
+    await press(env, 100, "Back");
+    expect(await result).toBe("Back");
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    expect(transport.sendButtons.mock.calls[0][1]).toBe("<b>Pairing</b>\n\nPaired user: &lt;42&gt;");
+    expect(transport.sendText).not.toHaveBeenCalled();
+    expect(reported).toEqual([100]);
   });
 
   it("Cancel resolves undefined and removes the keyboard", async () => {

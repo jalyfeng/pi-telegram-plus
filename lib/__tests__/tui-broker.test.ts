@@ -8,10 +8,10 @@
  * the message once somebody has answered.
  */
 import { describe, expect, it, vi } from "vitest";
-import { DialogBroker, REFRESH_MS, textPurpose } from "../tui/broker.ts";
+import { DialogBroker, EDIT_THROTTLE_MS, REFRESH_MS, textPurpose } from "../tui/broker.ts";
 import type { BrokerDeps } from "../tui/broker.ts";
 import type { FocusInfo } from "../tui/focus.ts";
-import type { DialogModel, EntryInfo } from "../tui/model.ts";
+import type { DialogAction, DialogAdapter, DialogModel, EntryInfo } from "../tui/model.ts";
 import type { TelegramTurn } from "../types.ts";
 import type { CommandScope } from "../tui/origin.ts";
 import { SecretStore } from "../tui/secrets.ts";
@@ -57,6 +57,8 @@ function fakeFocus(entry?: EntryInfo) {
   const listeners = new Set<(info: FocusInfo) => void>();
   const editor = { getText: () => "", setText: () => undefined, handleInput: () => undefined };
   let info: FocusInfo = { kind: "editor", component: editor, source: "field" };
+  // Where the host's focus really is; `info` is what the tracker has reported so far.
+  let live: object = editor;
   const emit = (next: FocusInfo) => {
     info = next;
     for (const listener of [...listeners]) listener(info);
@@ -64,6 +66,15 @@ function fakeFocus(entry?: EntryInfo) {
   return {
     current: () => info,
     entryFor: () => entry,
+    /** A live read the tracker runs when it validates (§4.1.3); a difference is a focus change. */
+    validate() {
+      if (live === info.component) return;
+      emit({ kind: live === editor ? "editor" : "dialog", component: live as Record<string, unknown>, source: "getter" });
+    },
+    /** The host moves focus without an event the tracker can see yet. */
+    handOverSilently(component: Record<string, unknown>) {
+      live = component;
+    },
     onChange: (listener: (info: FocusInfo) => void) => {
       listeners.add(listener);
       return () => {
@@ -71,9 +82,11 @@ function fakeFocus(entry?: EntryInfo) {
       };
     },
     openDialog(component: Record<string, unknown>) {
+      live = component;
       emit({ kind: "dialog", component, source: "event" });
     },
     closeToEditor() {
+      live = editor;
       emit({ kind: "editor", component: editor, source: "event" });
     },
     emitProgress(component: Record<string, unknown>) {
@@ -94,7 +107,7 @@ function makeBroker(options: {
   const broker = new DialogBroker({
     transport: transport as unknown as BrokerDeps["transport"],
     focus,
-    origin: { active: () => options.scope } as unknown as BrokerDeps["origin"],
+    origin: { active: () => options.scope, touch: () => undefined } as unknown as BrokerDeps["origin"],
     activeChatId: () => 42,
     activeTurns: () => options.turns ?? [],
     writeText: (text: string) => {
@@ -198,7 +211,7 @@ describe("dialog broker", () => {
       turns: [turn(42)],
       entry: { kind: "panel", source: "omp", title: "Status" },
     });
-    const component: Record<string, unknown> = { render: () => "session report text" };
+    const component: Record<string, unknown> = { children: [{ text: "session report text" }] };
     focus.openDialog(component);
     await settle();
 
@@ -206,6 +219,52 @@ describe("dialog broker", () => {
     expect(transport.sent[0]?.text).toContain("session report text");
     const buttons = transport.sent[0]!.rows.flat() as Array<{ text: string }>;
     expect(buttons.map((button) => button.text)).toEqual(["Close"]);
+  });
+
+  it("follows the dialog a tap opened inside the host call instead of redrawing the closed one", async () => {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    const keysNext: string[] = [];
+    const next: Record<string, unknown> = {
+      options: ["x", "y"],
+      selectedIndex: 0,
+      handleInput: (input: string) => {
+        keysNext.push(input);
+      },
+    };
+    const keysFirst: string[] = [];
+    // Shaped like pi's login selector: Enter answers, then the host shows the next list.
+    const first: Record<string, unknown> = {
+      options: ["alpha", "beta", "gamma"],
+      selectedIndex: 0,
+      handleInput: (input: string) => {
+        keysFirst.push(input);
+        if (input === "\r") focus.handOverSilently(next);
+      },
+    };
+    focus.openDialog(first);
+    await settle();
+
+    const session = broker.current();
+    const arg = [...(session?.keyMap.get(0) ?? [])].find(([, key]) => key === "1:beta")?.[0];
+    expect(arg).toBeDefined();
+    broker.handleCallback(42, undefined, { sessionId: session?.id ?? "", generation: 0, op: "c", arg });
+    await settle();
+
+    expect(keysFirst).toEqual(["\x1b[B", "\r"]);
+    expect(broker.current()?.focus).toBe(next);
+    const shown = transport.sent.at(-1);
+    expect(shown?.text).toContain("x");
+    expect(JSON.stringify(shown?.rows)).toContain("y");
+    expect(JSON.stringify(shown?.rows)).not.toContain("gamma");
+
+    // The next tap is for the list on screen: it reaches that list, not the closed one.
+    const nextSession = broker.current();
+    const yArg = [...(nextSession?.keyMap.get(0) ?? [])].find(([, key]) => key === "1:y")?.[0];
+    expect(yArg).toBeDefined();
+    broker.handleCallback(42, undefined, { sessionId: nextSession?.id ?? "", generation: 0, op: "c", arg: yArg });
+    await settle();
+    expect(keysNext).toEqual(["\x1b[B", "\r"]);
+    expect(keysFirst).toHaveLength(2);
   });
 
   it("walks the host key path on a row tap and retires the message", async () => {
@@ -473,6 +532,29 @@ describe("dialog broker", () => {
     // A late tap on the dead keyboard must not reach the host.
     const result = broker.handleCallback(42, undefined, { sessionId: "gone", generation: 0, op: "c", arg: "0.1" });
     expect(result).toEqual({ handled: true, toast: "Answered in the terminal", clear: true });
+  });
+
+  it("attributes a Telegram Cancel to Telegram when the host closes the dialog after the tap", async () => {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    const keys: string[] = [];
+    const component: Record<string, unknown> = {
+      render: () => "weird frame",
+      handleInput: (input: string) => {
+        keys.push(input);
+        // The host handles Esc later, so the close is observed after the tap has returned.
+        if (input === "\x1b") queueMicrotask(() => focus.closeToEditor());
+      },
+    };
+    focus.openDialog(component);
+    await settle();
+
+    const session = broker.current();
+    broker.handleCallback(42, undefined, { sessionId: session?.id ?? "", generation: 0, op: "x" });
+    await settle();
+
+    expect(keys).toEqual(["\x1b"]);
+    expect(transport.edits.at(-1)?.text).toContain("✖ Cancelled");
+    expect(transport.edits.at(-1)?.text).not.toContain("Answered in the terminal");
   });
 
   it("mirrors a dialog onto the chat whose command scope is running", async () => {
@@ -840,5 +922,599 @@ describe("textPurpose for settings submenus", () => {
   it("keeps search the purpose while no submenu is open, and plain settings take no text", () => {
     expect(textPurpose(settings({ search: { query: "" } }))).toBe("search");
     expect(textPurpose(settings())).toBeUndefined();
+  });
+});
+
+describe("who closed a dialog and what they tapped", () => {
+  /**
+   * A dialog whose model and actions the test scripts: the adapter is swapped in after the
+   * session opens, and `closesOn` decides which action the host answers by closing the dialog.
+   */
+  async function scripted(model: DialogModel, closesOn: (action: DialogAction) => boolean) {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    const acts: string[] = [];
+    const adapter: DialogAdapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: (_component, action) => {
+        acts.push(action.type);
+        if (closesOn(action)) focus.closeToEditor();
+        return true;
+      },
+    };
+    session.adapter = adapter;
+    session.model = model;
+    return { broker, transport, focus, session, acts };
+  }
+
+  const lastText = (transport: { edits: Array<{ text: string }> }) => transport.edits.at(-1)?.text ?? "";
+
+  it("counts a typed answer sent from Telegram as Telegram's, not the terminal's", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, focus, session } = await scripted(
+        { kind: "input", title: "Paste your API key", secret: false },
+        () => false,
+      );
+      expect(broker.handleText(session, "sk-test-123", 57)).toEqual({ handled: true });
+      await settle();
+      // The redraw after the typed answer uses the edit throttle; let it pass before the host closes.
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+
+      expect(lastText(transport)).toContain("✅ Sent an answer");
+      expect(lastText(transport)).not.toContain("Answered in the terminal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts a typed answer as Telegram's even when the host closes the dialog during the write", async () => {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    // The host closes the dialog synchronously inside the submit, before handleText returns.
+    const model: DialogModel = { kind: "input", title: "Paste your API key", secret: false };
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: (_component, action) => {
+        if (action.type === "submit") focus.closeToEditor();
+        return true;
+      },
+    };
+    session.model = model;
+
+    expect(broker.handleText(session, "sk-test-123", 57)).toEqual({ handled: true });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ Sent an answer");
+    expect(lastText(transport)).not.toContain("Answered in the terminal");
+  });
+
+  it("says the terminal closed the dialog when the Telegram tap moved it to another list", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const { broker, transport, focus, session } = await scripted(
+        { kind: "confirm", title: "Delete session?" },
+        () => false,
+      );
+      // The tap returns the host to a list the terminal user is still looking at: the dialog changed.
+      let current: DialogModel = { kind: "confirm", title: "Delete session?" };
+      session.adapter = {
+        id: "scripted",
+        detect: () => true,
+        read: () => current,
+        act: () => {
+          current = { kind: "select", title: "Sessions", items: [], total: 0 };
+          return true;
+        },
+      };
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
+      await settle();
+      // The dialog then says something new on its own, and the next draw shows it.
+      current = { kind: "select", title: "Other sessions", items: [], total: 0 };
+      focus.openDialog(session.focus as Record<string, unknown>);
+      await settle();
+      vi.setSystemTime(Date.now() + 2_000);
+      focus.closeToEditor();
+      await settle();
+
+      expect(lastText(transport)).toContain("Answered in the terminal");
+      expect(lastText(transport)).not.toContain("✅");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("runs OMP's /share loader as a progress wait: no line when the host ends it, Cancelled when Telegram cancels", async () => {
+    // OMP's BorderedLoader shape (bordered-loader.ts): a signal Escape aborts through, and a describe tree.
+    class Zq {
+      render(): string[] {
+        return [];
+      }
+      handleInput(): void {}
+      get signal(): AbortSignal {
+        return new AbortController().signal;
+      }
+      describe() {
+        return {
+          k: "card",
+          p: { role: "omp.hook.loader" },
+          c: [
+            { k: "spinner", p: { style: "starburst", label: [{ t: "Sharing session..." }] } },
+            { k: "row", p: { role: "omp.overlay.hints" }, c: [{ k: "text", p: { text: [{ t: "cancel" }] } }] },
+          ],
+        };
+      }
+    }
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog(new Zq() as unknown as Record<string, unknown>);
+    await settle();
+    const session = broker.current();
+    // The minified class name is no clue: the structure selects the panel adapter, which reads the wait.
+    expect(session?.adapter?.id).toBe("info-panel");
+    expect(session?.model).toEqual({ kind: "progress", text: "Sharing session...", cancellable: true });
+    focus.closeToEditor();
+    await settle();
+    expect(transport.edits.filter((entry) => entry.text.includes("Answered in the terminal"))).toEqual([]);
+    expect(transport.deleted).toHaveLength(1);
+  });
+
+  it("says Cancelled when Telegram cancels OMP's /share loader", async () => {
+    class Zq {
+      render(): string[] {
+        return [];
+      }
+      handleInput(): void {}
+      get signal(): AbortSignal {
+        return new AbortController().signal;
+      }
+      describe() {
+        return { k: "card", p: { role: "omp.hook.loader" }, c: [{ k: "spinner", p: { label: [{ t: "Sharing session..." }] } }] };
+      }
+    }
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog(new Zq() as unknown as Record<string, unknown>);
+    await settle();
+    const session = broker.current()!;
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "x" });
+    // The loader's Escape handler aborts it, and the host closes it after the tap.
+    focus.closeToEditor();
+    await settle();
+    expect(lastText(transport)).toContain("✖ Cancelled");
+  });
+
+  it("writes no closing line for an unsupported dialog the terminal closes", async () => {
+    const { transport, focus } = await scripted(
+      { kind: "unsupported", title: "Something new", what: "a panel with no readable content" },
+      () => false,
+    );
+    focus.closeToEditor();
+    await settle();
+
+    expect(transport.edits.filter((entry) => entry.text.includes("Answered in the terminal"))).toEqual([]);
+  });
+
+  it("writes no closing line when the host ends a progress wait (e.g. /share uploading)", async () => {
+    const { transport, focus, session } = await scripted(
+      { kind: "progress", text: "Sharing session...", cancellable: true },
+      () => false,
+    );
+    focus.closeToEditor();
+    await settle();
+
+    expect(transport.edits.filter((entry) => entry.text.includes("Answered in the terminal"))).toEqual([]);
+    expect(transport.deleted).toEqual([session.telegram?.messageId]);
+  });
+
+  it("writes nothing into a running command scope when the host ends a progress wait", async () => {
+    const scope = {
+      id: "s2",
+      origin: { chatId: 7, messageThreadId: 3, sourceMessageId: 21 },
+      telegramMessageId: 555,
+      ended: false,
+      dialogSummaries: [] as string[],
+    } as unknown as CommandScope;
+    const { broker, focus } = makeBroker({ scope });
+    const { component } = selector(focus);
+    focus.openDialog(component);
+    await settle();
+    const session = broker.current()!;
+    const progress: DialogModel = { kind: "progress", text: "Sharing session...", cancellable: true };
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => progress,
+      act: () => true,
+    };
+    session.model = progress;
+    // The opening select made the dialog interactive; a loader never shows an answer, so clear that.
+    session.interactive = false;
+    focus.closeToEditor();
+    await settle();
+
+    expect(scope.dialogSummaries).toEqual([]);
+  });
+
+  it("keeps the line of a dialog Telegram answered when the same command's next dialog replaces it", async () => {
+    const scope = {
+      id: "s4",
+      origin: { chatId: 7, messageThreadId: 3, sourceMessageId: 21 },
+      telegramMessageId: 555,
+      ended: false,
+      dialogSummaries: [] as string[],
+    } as unknown as CommandScope;
+    const { broker, focus } = makeBroker({ scope });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    const model: DialogModel = {
+      kind: "select",
+      title: "Login",
+      items: [{ key: "a", label: "A" }],
+      total: 1,
+      extraActions: [{ label: "Paste code (mock)", key: "act:0" }],
+    };
+    // The host opens the next dialog (OMP's OAuth sheet) inside the tap, as a selector does on Enter.
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: () => {
+        focus.openDialog(selector(focus).component);
+        return true;
+      },
+    };
+    session.model = model;
+    broker.handleCallback(7, 3, { sessionId: session.id, generation: 0, op: "k", arg: "act:0" });
+    await settle();
+
+    expect(scope.dialogSummaries).toEqual(["✅ Paste code (mock)"]);
+  });
+
+  it("writes no line for a dialog nobody answered when the same command's next dialog replaces it", async () => {
+    const scope = {
+      id: "s5",
+      origin: { chatId: 7, messageThreadId: 3, sourceMessageId: 21 },
+      telegramMessageId: 555,
+      ended: false,
+      dialogSummaries: [] as string[],
+    } as unknown as CommandScope;
+    const { broker, focus } = makeBroker({ scope });
+    focus.openDialog(selector(focus).component);
+    await settle();
+    expect(broker.current()).toBeDefined();
+
+    focus.openDialog(selector(focus).component);
+    await settle();
+
+    expect(scope.dialogSummaries).toEqual([]);
+  });
+
+  it("writes Cancelled when Telegram cancels a progress wait", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "progress", text: "Sharing session...", cancellable: true },
+      () => true,
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "x" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✖ Cancelled");
+    expect(lastText(transport)).not.toContain("Answered in the terminal");
+  });
+
+  it("names the button a key tap pressed, not its internal id", async () => {
+    const { broker, transport, session } = await scripted(
+      {
+        kind: "select",
+        title: "Login",
+        items: [{ key: "a", label: "A" }],
+        total: 1,
+        extraActions: [{ label: "Sign in", key: "act:0" }],
+      },
+      (action) => action.type === "key",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "k", arg: "act:0" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ Sign in");
+    expect(lastText(transport)).not.toContain("act:0");
+  });
+
+  it("names a confirm's Yes button as the button the user pressed", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "confirm", title: "Delete session?" },
+      (action) => action.type === "confirm",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "y" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ Yes");
+    expect(lastText(transport)).not.toContain("Confirm");
+  });
+
+  it("uses the host's own confirm label when the confirm names one", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "confirm", title: "Delete session?", confirmLabel: "Delete", cancelLabel: "Keep" },
+      (action) => action.type === "confirm",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "y" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ Delete");
+  });
+
+  it("closes a choice with the picked label alone, trimmed and without a Choose prefix", async () => {
+    const { broker, transport, session } = await scripted(
+      {
+        kind: "select",
+        title: "Model",
+        items: [{ key: "full", label: "  full   access " }],
+        total: 1,
+      },
+      (action) => action.type === "choose",
+    );
+    // The scripted model was never drawn, so its row buttons are not in the key map yet.
+    session.keyMap.set(0, new Map([["0.0", "full"]]));
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "c", arg: "0.0" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ full access");
+    expect(lastText(transport)).not.toContain("Choose");
+  });
+
+  it("closes a toggle with the row and the state the tap set", async () => {
+    const { broker, transport, session } = await scripted(
+      {
+        kind: "select",
+        title: "Tools",
+        multi: true,
+        items: [{ key: "bash", label: "bash", checked: false }],
+        total: 1,
+      },
+      (action) => action.type === "toggle",
+    );
+    session.keyMap.set(0, new Map([["0.0", "bash"]]));
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "t", arg: "0.0" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ bash: on");
+    expect(lastText(transport)).not.toContain("Toggle");
+  });
+
+  it("closes a hidden answer as Submitted (hidden) even after the dialog turned into progress", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+      focus.openDialog({});
+      await settle();
+      const session = broker.current()!;
+      let current: DialogModel = { kind: "input", title: "Paste your API key", secret: true };
+      session.adapter = {
+        id: "scripted",
+        detect: () => true,
+        read: () => current,
+        act: (_component, action) => {
+          // The host starts signing in: the same dialog now shows progress, not a secret field.
+          if (action.type === "submit") current = { kind: "progress", text: "Signing in", cancellable: false };
+          return true;
+        },
+      };
+      session.model = current;
+
+      expect(broker.handleText(session, "sk-secret", 57)).toEqual({ handled: true });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+
+      expect(lastText(transport)).toContain("✅ Submitted (hidden)");
+      expect(lastText(transport)).not.toContain("Sent an answer");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a login that moved from its key prompt to an information page as Submitted (hidden), not Closed", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+      focus.openDialog({});
+      await settle();
+      const session = broker.current()!;
+      // pi's login: a key prompt, then the same dialog shows an information page (pi-login's `info`).
+      let current: DialogModel = { kind: "input", title: "Paste your API key", secret: true };
+      session.adapter = {
+        id: "scripted",
+        detect: () => true,
+        read: () => current,
+        act: (_component, action) => {
+          if (action.type === "submit") current = { kind: "info", title: "Login to acme", text: "Signing in", closable: true };
+          return true;
+        },
+      };
+      session.model = current;
+
+      expect(broker.handleText(session, "sk-secret", 57)).toEqual({ handled: true });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+
+      expect(lastText(transport)).toContain("✅ Submitted (hidden)");
+      expect(lastText(transport)).not.toContain("✖ Closed");
+      expect(lastText(transport)).not.toContain("Signing in");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a Cancel tap as Cancelled even when the host closes the dialog during the tap", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "select", title: "Tool", items: [{ key: "a", label: "A" }], total: 1 },
+      (action) => action.type === "cancel",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "x" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✖ Cancelled");
+    expect(lastText(transport)).not.toContain("✅");
+  });
+
+  it("closes a confirm's No as an answer, not as a cancel", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "confirm", title: "Delete session?" },
+      (action) => action.type === "confirm",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ No");
+    expect(lastText(transport)).not.toContain("Cancelled");
+  });
+
+  it("declines a confirm that names only its confirm button with No, not Cancel", async () => {
+    const { broker, transport, session } = await scripted(
+      { kind: "confirm", title: "Delete session?", confirmLabel: "Delete" },
+      (action) => action.type === "confirm",
+    );
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
+    await settle();
+
+    expect(lastText(transport)).toContain("✅ No");
+    expect(lastText(transport)).not.toContain("Cancel");
+  });
+});
+
+describe("a read-only panel that closes keeps the page it showed", () => {
+  const panelModel: DialogModel = {
+    kind: "info",
+    title: "Recent Changes",
+    text: "<b>1.2.0</b> fixed the thing",
+    html: true,
+    closable: false,
+    actions: [{ label: "Close", key: "close" }],
+  };
+
+  /** A panel drawn on the chat, with its own Close button mapped to the key the renderer would use. */
+  async function openedPanel(model: DialogModel) {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: (_component, action) => {
+        if (action.type === "choose" || action.type === "cancel") focus.closeToEditor();
+        return true;
+      },
+    };
+    session.model = model;
+    session.keyMap.set(session.generation, new Map([["close", "close"], ...(model.kind === "info" ? (model.actions ?? []).map((action) => [action.key, action.key] as [string, string]) : [])]));
+    return { broker, transport, focus, session };
+  }
+
+  const lastEdit = (transport: { edits: Array<{ text: string; rows: unknown[][] }> }) => transport.edits.at(-1);
+
+  it("keeps the page and ends with a Closed line when Telegram closes it", async () => {
+    const { broker, transport, session } = await openedPanel(panelModel);
+
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "c", arg: "close" });
+    await settle();
+
+    const edit = lastEdit(transport);
+    expect(edit?.text).toContain("Recent Changes");
+    expect(edit?.text).toContain("<b>1.2.0</b> fixed the thing");
+    expect(edit?.text).toContain("✖ Closed");
+    expect(edit?.text).not.toContain("✅");
+    expect(edit?.text).not.toContain("Answered in the terminal");
+    expect(edit?.rows).toEqual([]);
+  });
+
+  it("says the action a panel button ran, and drops the panel text, when the host closes it", async () => {
+    const actionModel: DialogModel = {
+      kind: "info",
+      title: "Debug",
+      text: "Pick a report to run.",
+      closable: true,
+      actions: [{ key: "view:system", label: "View: system info" }],
+    };
+    const { broker, transport, session } = await openedPanel(actionModel);
+    // The host runs the report and closes the panel inside the tap.
+    expect(broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "c", arg: "view:system" })).toEqual({ handled: true });
+    await settle();
+
+    expect(lastEdit(transport)?.text).toContain("✅ View: system info");
+    expect(lastEdit(transport)?.text).not.toContain("Pick a report");
+    expect(lastEdit(transport)?.text).not.toContain("✖ Closed");
+  });
+
+  it("keeps the panel and says Closed when Telegram taps Close on a panel with action buttons", async () => {
+    const actionModel: DialogModel = {
+      kind: "info",
+      title: "Debug",
+      text: "Pick a report to run.",
+      closable: true,
+      actions: [{ key: "view:system", label: "View: system info" }],
+    };
+    const { broker, transport, session } = await openedPanel(actionModel);
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "x" });
+    await settle();
+
+    expect(lastEdit(transport)?.text).toContain("Pick a report");
+    expect(lastEdit(transport)?.text).toContain("✖ Closed");
+  });
+
+  it("keeps the page and says it was closed in the terminal when the terminal closes it", async () => {
+    const { transport, focus } = await openedPanel(panelModel);
+
+    focus.closeToEditor();
+    await settle();
+
+    const edit = lastEdit(transport);
+    expect(edit?.text).toContain("<b>1.2.0</b> fixed the thing");
+    expect(edit?.text).toContain("Closed in the terminal");
+    expect(edit?.text).not.toContain("Answered in the terminal");
+    expect(edit?.rows).toEqual([]);
+  });
+
+  it("keeps the page that was on screen, not the first one", async () => {
+    const paged: DialogModel = {
+      kind: "info",
+      title: "Long",
+      text: Array.from({ length: 400 }, (_, index) => `line ${index} ${"x".repeat(20)}`).join("\n\n"),
+      html: true,
+      closable: true,
+    };
+    const { broker, transport, session } = await openedPanel(paged);
+    session.page = 1;
+    session.model = paged;
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "x" });
+    await settle();
+
+    const edit = lastEdit(transport);
+    expect(edit?.text).toContain("✖ Closed");
+    expect(edit?.text).not.toContain("line 0 ");
+  });
+
+  it("still ends a choice with its answer rather than the panel status", async () => {
+    const choice: DialogModel = { kind: "select", title: "Pick", items: [{ key: "a", label: "alpha" }], total: 1 };
+    const { broker, transport, session } = await openedPanel(choice);
+    session.keyMap.set(session.generation, new Map([["a", "a"]]));
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "c", arg: "a" });
+    await settle();
+
+    expect(lastEdit(transport)?.text).toContain("✅ alpha");
+    expect(lastEdit(transport)?.text).not.toContain("Closed");
   });
 });

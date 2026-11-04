@@ -10,6 +10,8 @@ import {
   syncTelegramCommands,
 } from "../menu-commands.ts";
 import type * as tuiBridgeModule from "../tui-bridge.ts";
+import { registerAllCommands } from "../commands/register.ts";
+import { getTelegramCommandDescriptions } from "../telegram-command-descriptions.ts";
 
 // v6: the host bridge is the only path for host commands - run these with the bridge up.
 vi.mock("../tui-bridge.ts", async (importOriginal) => {
@@ -28,7 +30,7 @@ describe("Telegram command menu", () => {
     it("exposes /tg as the consolidated management menu command", () => {
         const commands = buildTelegramMenuCommands({
             getCommands: () => [],
-        } as any);
+        } as any, { pluginDescriptions: new Map([["tg", "Open the Telegram management menu"]]) });
 
         expect(commands).toContainEqual({
             command: "tg",
@@ -163,11 +165,12 @@ describe("dynamic TUI catalog in BotMenu", () => {
           { name: "model", description: "Select model (opens selector UI)", source: "builtin" as const },
           { name: "quit", description: "Quit pi", source: "builtin" as const },
         ],
+        pluginDescriptions: new Map([["tg", "Open the Telegram management menu"]]),
       },
     );
     expect(commands.find((c) => c.command === "model")?.description).toBe("Select model (opens selector UI)");
     expect(commands.find((c) => c.command === "quit")?.description).toBe("Quit pi");
-    // Entries the catalog does not describe keep the fallback wording.
+    // A plugin-served entry the catalog does not describe keeps the plugin's own wording.
     expect(commands.find((c) => c.command === "tg")?.description).toBe("Open the Telegram management menu");
   });
 
@@ -210,6 +213,49 @@ describe("dynamic command ordering", () => {
     );
     const names = commands.map((command) => command.command);
     expect(names.indexOf("middle")).toBeLessThan(names.indexOf("alpha"));
+  });
+});
+
+describe("recent commands in BotMenu", () => {
+  it("leaves a recent command the host catalog does not have out of the menu", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      {
+        recent: ["scoped-models"],
+        tuiCommands: [{ name: "settings", description: "Open settings", source: "builtin" }],
+      },
+    );
+    expect(commands.some((c) => c.command === "scoped_models")).toBe(false);
+  });
+
+  it("keeps a recent command the host catalog has, ordered by recent use", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      {
+        recent: ["zulu", "middle"],
+        tuiCommands: [
+          { name: "alpha", description: "Alpha", source: "builtin" },
+          { name: "middle", description: "Middle", source: "builtin" },
+          { name: "zulu", description: "Zulu", source: "builtin" },
+        ],
+      },
+    );
+    const names = commands.map((c) => c.command);
+    expect(names).toContain("zulu");
+    expect(names).toContain("middle");
+    expect(names.indexOf("zulu")).toBeLessThan(names.indexOf("middle"));
+    expect(names.indexOf("middle")).toBeLessThan(names.indexOf("alpha"));
+  });
+
+  it("keeps a recent plugin-served command even when the host catalog lacks it", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      {
+        recent: ["stop"],
+        tuiCommands: [{ name: "settings", description: "Open settings", source: "builtin" }],
+      },
+    );
+    expect(commands.some((c) => c.command === "stop")).toBe(true);
   });
 });
 
@@ -335,5 +381,95 @@ describe("/more overflow keyboard", () => {
       data: target.value,
     } as any);
     await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("terminal-only commands in BotMenu", () => {
+  const terminalOnly = ["local", "dump", "open", "stats", "trace", "record", "live", "git"];
+  const hostCatalog = (names: string[]) => names.map((name) => ({ name, description: `host ${name}`, source: "builtin" as const }));
+
+  it("keeps terminal-only commands and OMP /cd out of the menu on OMP, but keeps /move", () => {
+    const { commands, overflow } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [] },
+      { host: "omp", tuiCommands: hostCatalog([...terminalOnly, "move", "cd", "tools"]) },
+    );
+    const names = new Set([...commands, ...overflow].map((c) => c.command));
+    for (const name of [...terminalOnly, "cd"]) expect(names.has(name)).toBe(false);
+    expect(names.has("move")).toBe(true);
+    expect(names.has("tools")).toBe(true);
+  });
+
+  it("keeps /cd in the menu on pi, but still hides terminal-only commands", () => {
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [] },
+      { host: "pi", tuiCommands: hostCatalog([...terminalOnly, "tools"]) },
+    );
+    const names = new Set(commands.map((c) => c.command));
+    expect(names.has("cd")).toBe(true);
+    for (const name of terminalOnly) expect(names.has(name)).toBe(false);
+  });
+
+  it("hides terminal-only entries from recent usage too", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      { host: "pi", recent: ["open", "tools"] },
+    );
+    const names = new Set(commands.map((c) => c.command));
+    expect(names.has("open")).toBe(false);
+    expect(names.has("tools")).toBe(true);
+  });
+});
+
+describe("menu descriptions come from the source that owns them", () => {
+  it("never shows a host source tag for an extension command", () => {
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [hostCommand("foo", "Do foo")] as any },
+      {
+        host: "pi",
+        tuiCommands: [{ name: "foo", description: "[t] Do foo", source: "autocomplete" }],
+      },
+    );
+    expect(commands.find((c) => c.command === "foo")?.description).toBe("Do foo");
+  });
+
+  it("keeps the plugin's own command description free of the tag", () => {
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [hostCommand("cwd", "Show current working directory")] as any },
+      {
+        host: "pi",
+        tuiCommands: [{ name: "cwd", description: "[t] Show current working directory", source: "autocomplete" }],
+      },
+    );
+    expect(commands.find((c) => c.command === "cwd")?.description).toBe("Show current working directory");
+  });
+
+  it("uses the plugin's registered description for a command it serves on Telegram", () => {
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [] },
+      {
+        host: "pi",
+        tuiCommands: [{ name: "copy", description: "Copy last agent message to clipboard", source: "autocomplete" }],
+        pluginDescriptions: new Map([["copy", "Send the last assistant reply as text"]]),
+      },
+    );
+    expect(commands.find((c) => c.command === "copy")?.description).toBe("Send the last assistant reply as text");
+  });
+
+  it("records the descriptions registered by the command modules and the menu uses them", () => {
+    const registered = new Map<string, { description?: string }>();
+    registerAllCommands(
+      { registerCommand: (name, options) => { registered.set(name, options); } },
+      { getSession: () => undefined },
+    );
+    const { commands } = buildTelegramMenuCommandsFull(
+      { getCommands: () => [] },
+      {
+        host: "pi",
+        tuiCommands: [{ name: "hotkeys", description: "Show keyboard shortcuts", source: "autocomplete" }],
+        pluginDescriptions: getTelegramCommandDescriptions(),
+      },
+    );
+    expect(registered.get("hotkeys")?.description).toBe("How to use pi from Telegram");
+    expect(commands.find((c) => c.command === "hotkeys")?.description).toBe("How to use pi from Telegram");
   });
 });

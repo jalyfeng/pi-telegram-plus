@@ -8,7 +8,7 @@
  * OpenAI-compatible provider, all state under /tmp.
  *
  * Usage:
- *   node scripts/e2e/run-probe.mjs --host pi  [--pi-version 0.81.1] [--out docs/host-probe/pi-0.81.1.json]
+ *   node scripts/e2e/run-probe.mjs --host pi  [--pi-version 1.4.0] [--out docs/host-probe/pi-1.4.0.json]
  *   node scripts/e2e/run-probe.mjs --host omp [--omp /path/to/omp]   [--out docs/host-probe/omp-18.12.5.json]
  *   node scripts/e2e/run-probe.mjs --host pi --goal confirm --out /tmp/goal-confirm.json
  */
@@ -35,7 +35,7 @@ const TIMEOUT_MS = Number(argValue("--timeout", "180")) * 1000;
 const TG_PORT = Number(argValue("--tg-port", HOST === "omp" ? "9982" : "9980"));
 const PROVIDER_PORT = Number(argValue("--provider-port", HOST === "omp" ? "9983" : "9981"));
 const OUT = resolve(argValue("--out", join(REPO, "docs", "host-probe", `${HOST}${GOAL ? `-goal-${GOAL}` : ""}.json`)));
-const PI_VERSION = argValue("--pi-version", "0.81.1");
+const PI_VERSION = argValue("--pi-version", "1.4.0");
 const OMP_CLI = argValue("--omp", process.env.OMP_CLI || "omp");
 const BOT_TOKEN = `333333:${HOST.toUpperCase()}_PROBE_TOKEN`;
 const CHAT_ID = 991;

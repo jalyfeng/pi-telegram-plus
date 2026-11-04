@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
-import type { TelegramButton, TelegramConfig, TelegramSentMessage, TelegramTransport, TelegramUpdate } from "./types.ts";
+import type { TelegramButton, TelegramConfig, TelegramDelivery, TelegramSentMessage, TelegramTransport, TelegramUpdate } from "./types.ts";
 import { stripHtml, splitTelegramHtml } from "./text-split.ts";
 import { log } from "./logger.ts";
+import { queuePendingNotice, supersedePendingEdit, type PendingNotice } from "./pending-notices.ts";
 
 const apiLog = log.child("telegram-api");
 
@@ -22,13 +23,16 @@ type TelegramApiResponse = {
 
 export class TelegramApiRequestError extends Error {
   readonly retryAfterMs?: number;
+  /** HTTP status of the Telegram answer (400 for a rejected payload, 429 for flood control). */
+  readonly status?: number;
 
-  constructor(message: string, retryAfterSeconds?: number) {
+  constructor(message: string, retryAfterSeconds?: number, status?: number) {
     super(message);
     this.name = "TelegramApiRequestError";
     this.retryAfterMs = typeof retryAfterSeconds === "number" && retryAfterSeconds >= 0
       ? retryAfterSeconds * 1_000
       : undefined;
+    this.status = status;
   }
 }
 
@@ -83,9 +87,18 @@ export async function telegramApi<T>(
   } catch (error) {
     throw new Error(`Telegram API request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const json = (await response.json()) as TelegramApiResponse & { result: T };
+  const text = await response.text();
+  let json: TelegramApiResponse & { result: T };
+  try {
+    json = JSON.parse(text) as TelegramApiResponse & { result: T };
+  } catch {
+    // A gateway or proxy answers an outage with a plain-text page ("Bad Gateway").
+    // Keep the HTTP status so the caller can tell it is transient.
+    const snippet = text.replace(/\s+/g, " ").trim().slice(0, 200);
+    throw new TelegramApiRequestError(`${method} failed: HTTP ${response.status}${snippet ? ` ${snippet}` : ""}`, undefined, response.status);
+  }
   if (!json.ok) {
-    throw new TelegramApiRequestError(json.description ?? `${method} failed`, json.parameters?.retry_after);
+    throw new TelegramApiRequestError(json.description ?? `${method} failed`, json.parameters?.retry_after, response.status);
   }
   return json.result;
 }
@@ -134,6 +147,18 @@ export async function downloadTelegramFile(
 
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * True when repeating the same request may succeed: timeouts (408), flood control
+ * (429), server and gateway errors (5xx), and network-level failures (no Telegram answer). Any other
+ * Telegram answer, such as 400 "can't parse entities" or "message is too long",
+ * is a deterministic rejection of this payload; repeating it only resends the
+ * same rejected message.
+ */
+function isTransientSendError(error: unknown): boolean {
+  if (!(error instanceof TelegramApiRequestError) || error.status === undefined) return true;
+  return error.status === 408 || error.status === 429 || error.status >= 500;
+}
 
 // ── Telegram Rich Messages (Bot API 10.1+) ──────────────────────────────────
 // Rich Messages render Markdown tables natively, which the regular HTML parse
@@ -190,7 +215,7 @@ export function createTelegramTransport(
     body: Record<string, unknown>,
     signal: AbortSignal | undefined,
     lease: unknown,
-    delivery?: { maxAttempts?: number },
+    delivery?: TelegramDelivery,
   ): Promise<T> => {
     const requestSignal = signal ?? options.getAbortSignal?.();
     const token = requireToken();
@@ -202,7 +227,12 @@ export function createTelegramTransport(
         return await telegramApi<T>(token, method, body, requestSignal, cfg().apiBase);
       } catch (error) {
         lastError = error;
-        if (error instanceof TelegramSendSuppressedError || attempt + 1 >= maxAttempts || requestSignal?.aborted) throw error;
+        if (
+          error instanceof TelegramSendSuppressedError
+          || !isTransientSendError(error)
+          || attempt + 1 >= maxAttempts
+          || requestSignal?.aborted
+        ) throw error;
         const retryAfterMs = error instanceof TelegramApiRequestError ? error.retryAfterMs : undefined;
         // Prefer Telegram's explicit flood-control delay; otherwise use exponential backoff.
         await sleep(retryAfterMs ?? 250 * Math.pow(2, attempt));
@@ -251,6 +281,34 @@ export function createTelegramTransport(
     return /\bfetch failed\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|UND_ERR|socket hang up|network(?:\s|_)?error/i.test(msg);
   };
 
+  /** True when a failed send must NOT be retried as plain text. Network
+   *  failures and transient Telegram answers (429/5xx) that already used up
+   *  their retry budget are not payload problems: a plain-text resend would hit
+   *  the same flaky server. Only a deterministic rejection (400 "can't parse
+   *  entities", …) earns the single plain-text fallback. */
+  const skipsFallback = (err: unknown): boolean => isNetworkError(err) || isTransientSendError(err);
+
+  /** The one decision for a must-deliver send that an outage defeated: when the
+   *  error is transient, the pieces not yet sent go to the pending queue and are
+   *  replayed in order on reconnect (the caller then reports success). Anything
+   *  else returns false and the caller fails as before. */
+  const holdForReconnect = (
+    error: unknown,
+    delivery: TelegramDelivery | undefined,
+    pieces: Array<Omit<PendingNotice, "createdAt" | "mustDeliver">>,
+  ): boolean => {
+    if (!delivery?.mustDeliver || error instanceof TelegramSendSuppressedError || !isTransientSendError(error)) return false;
+    // A replayed piece keeps its first failure time, so a repeated outage does not extend its lifetime.
+    const createdAt = delivery.heldSince ?? Date.now();
+    for (const piece of pieces) queuePendingNotice({ ...piece, mustDeliver: true, createdAt });
+    apiLog.warn("must-deliver send kept for reconnect", {
+      chatId: pieces[0]?.chatId,
+      pieces: pieces.length,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  };
+
   /** Log why an HTML-format send failed before falling back to plain text.
    *  Without this the renderer's failures were completely silent — a single
    *  unsupported tag nuked the whole message's formatting and nobody noticed.
@@ -260,7 +318,7 @@ export function createTelegramTransport(
    *  every failed send when the bot is simply offline would only noise up the
    *  log file. */
   const warnHtmlFallback = (label: string, err: unknown, preview: string) => {
-    if (isNetworkError(err)) return;
+    if (skipsFallback(err)) return;
     const reason = err instanceof Error ? err.message : String(err);
     const snippet = preview.replace(/\s+/g, " ").slice(0, 120);
     apiLog.warn(`HTML ${label} rejected; falling back to plain text`, { reason, snippet });
@@ -293,7 +351,7 @@ export function createTelegramTransport(
     lease: unknown,
     messageThreadId?: number,
     replyToMessageId?: number,
-    delivery?: { maxAttempts?: number },
+    delivery?: TelegramDelivery,
   ): Promise<TelegramSentMessage | undefined> => {
     try {
       return await callApi<TelegramSentMessage>("sendRichMessage", {
@@ -302,7 +360,7 @@ export function createTelegramTransport(
         ...messageTargetFields(messageThreadId, replyToMessageId),
       }, undefined, lease, delivery);
     } catch (err) {
-      if (isNetworkError(err)) throw err;
+      if (skipsFallback(err)) throw err;
       noteRichFailure("sendRichMessage", err);
       return undefined;
     }
@@ -311,36 +369,51 @@ export function createTelegramTransport(
   return {
     async sendText(chatId, text, messageThreadId, replyToMessageId, richMarkdown, delivery) {
       const lease = captureSendLease();
-      if (richMarkdown && richMessagesAvailable) {
-        const rich = await sendRich(richMarkdown, chatId, lease, messageThreadId, replyToMessageId, delivery);
-        if (rich) return [rich];
-      }
-      const sent: TelegramSentMessage[] = [];
       // Use the semantic HTML splitter so multi-message sends cut at block
       // boundaries (every chunk is independently valid Telegram HTML) instead
       // of the legacy byte splitter that could split mid-<pre>/<blockquote>
       // and force a plain-text fallback.
-      for (const chunk of splitTelegramHtml(text)) {
+      const chunks = splitTelegramHtml(text);
+      const piece = (html: string) => ({ chatId, messageThreadId, replyTo: replyToMessageId, html });
+      if (richMarkdown && richMessagesAvailable) {
+        try {
+          const rich = await sendRich(richMarkdown, chatId, lease, messageThreadId, replyToMessageId, delivery);
+          if (rich) return [rich];
+        } catch (err) {
+          // The rich attempt went unanswered: keep the HTML rendering of the same content.
+          if (holdForReconnect(err, delivery, chunks.map(piece))) return [];
+          throw err;
+        }
+      }
+      const sent: TelegramSentMessage[] = [];
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
         const body = {
           chat_id: chatId,
           text: chunk,
           parse_mode: "HTML",
           ...messageTargetFields(messageThreadId, replyToMessageId),
         };
-        const msg = await callApi<TelegramSentMessage>("sendMessage", body, undefined, lease, delivery)
-          .catch((err) => {
-            // Network failure: the plain-text retry will fail identically.
-            // Propagate so the caller's `.catch` (or renderer suppression)
-            // handles it; the polling status line already reports outages.
-            if (isNetworkError(err)) throw err;
-            warnHtmlFallback("sendMessage", err, chunk);
-            return callApi<TelegramSentMessage>("sendMessage", {
-              chat_id: chatId,
-              text: stripHtml(chunk),
-              ...messageTargetFields(messageThreadId, replyToMessageId),
-            }, undefined, lease, delivery);
-          });
-        sent.push(msg);
+        try {
+          const msg = await callApi<TelegramSentMessage>("sendMessage", body, undefined, lease, delivery)
+            .catch((err) => {
+              // Network failure: the plain-text retry will fail identically.
+              // Propagate so the caller's `.catch` (or renderer suppression)
+              // handles it; the polling status line already reports outages.
+              if (skipsFallback(err)) throw err;
+              warnHtmlFallback("sendMessage", err, chunk);
+              return callApi<TelegramSentMessage>("sendMessage", {
+                chat_id: chatId,
+                text: stripHtml(chunk),
+                ...messageTargetFields(messageThreadId, replyToMessageId),
+              }, undefined, lease, delivery);
+            });
+          sent.push(msg);
+        } catch (err) {
+          // This chunk and the rest were not delivered: keep them, the sent ones stay sent.
+          if (holdForReconnect(err, delivery, chunks.slice(i).map(piece))) return sent;
+          throw err;
+        }
       }
       return sent;
     },
@@ -358,7 +431,7 @@ export function createTelegramTransport(
         reply_markup,
         ...messageTargetFields(messageThreadId, replyToMessageId),
       }, undefined, lease).catch((err) => {
-        if (isNetworkError(err)) throw err;
+        if (skipsFallback(err)) throw err;
         warnHtmlFallback("sendButtons", err, first);
         return callApi<TelegramSentMessage>("sendMessage", {
           chat_id: chatId,
@@ -369,58 +442,77 @@ export function createTelegramTransport(
       });
     },
 
-    async editText(chatId, messageId, text, richMarkdown) {
+    async editText(chatId, messageId, text, richMarkdown, delivery) {
       const lease = captureSendLease();
+      const first = splitTelegramHtml(text)[0];
+      const piece = { chatId, editMessageId: messageId, html: first };
+      // A direct edit that lands makes any queued older edit of this message stale.
+      // A replayed edit must not drop a newer queued one, so it is excluded.
+      const edited = () => { if (delivery?.heldSince === undefined) supersedePendingEdit(chatId, messageId); };
       if (richMarkdown && richMessagesAvailable) {
         try {
           await callApi("editMessageText", {
             chat_id: chatId,
             message_id: messageId,
             rich_message: { markdown: richMarkdown },
-          }, undefined, lease);
+          }, undefined, lease, delivery);
+          edited();
           return;
         } catch (err) {
+          if (holdForReconnect(err, delivery, [piece])) return;
           // Network failure: nothing useful to retry (same as the HTML path).
-          if (isNetworkError(err)) return;
+          if (skipsFallback(err)) return;
           noteRichFailure("editMessageText", err);
         }
       }
-      const first = splitTelegramHtml(text)[0];
       await callApi("editMessageText", {
         chat_id: chatId,
         message_id: messageId,
         text: first,
         parse_mode: "HTML",
-      }, undefined, lease).catch((err) => {
-        if (isNetworkError(err)) return; // swallow; nothing useful to retry
+      }, undefined, lease, delivery).then(edited).catch((err) => {
+        if (holdForReconnect(err, delivery, [piece])) return;
+        if (skipsFallback(err)) return; // swallow; nothing useful to retry
         warnHtmlFallback("editMessageText", err, first);
         return callApi("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
           text: stripHtml(first),
-        }, undefined, lease).catch(apiLog.swallow("debug", "editMessageText plain-text fallback failed", { chatId, messageId }));
+        }, undefined, lease, delivery).then(edited).catch((plainErr) => {
+          if (holdForReconnect(plainErr, delivery, [piece])) return;
+          apiLog.swallow("debug", "editMessageText plain-text fallback failed", { chatId, messageId })(plainErr);
+        });
       });
     },
 
-    async editButtons(chatId, messageId, text, rows) {
+    async editButtons(chatId, messageId, text, rows, delivery) {
       const lease = captureSendLease();
       const reply_markup = buildInlineKeyboard(rows);
       const first = splitTelegramHtml(text)[0];
+      // A kept edit is replayed as plain text, which drops the keyboard: only a
+      // keyboard-less edit (the dialog's closing summary) may be kept.
+      const keep = rows.length === 0 ? delivery : undefined;
+      const piece = { chatId, editMessageId: messageId, html: first };
+      const edited = () => { if (delivery?.heldSince === undefined) supersedePendingEdit(chatId, messageId); };
       await callApi("editMessageText", {
         chat_id: chatId,
         message_id: messageId,
         text: first,
         parse_mode: "HTML",
         reply_markup,
-      }, undefined, lease).catch((err) => {
-        if (isNetworkError(err)) return; // swallow; nothing useful to retry
+      }, undefined, lease).then(edited).catch((err) => {
+        if (holdForReconnect(err, keep, [piece])) return;
+        if (skipsFallback(err)) return; // swallow; nothing useful to retry
         warnHtmlFallback("editButtons", err, first);
         return callApi("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
           text: stripHtml(first),
           reply_markup,
-        }, undefined, lease).catch(apiLog.swallow("debug", "editButtons plain-text fallback failed", { chatId, messageId }));
+        }, undefined, lease).then(edited).catch((plainErr) => {
+          if (holdForReconnect(plainErr, keep, [piece])) return;
+          apiLog.swallow("debug", "editButtons plain-text fallback failed", { chatId, messageId })(plainErr);
+        });
       });
     },
 

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { escapeHtml } from "./html.ts";
 import { markdownToTelegramHtml } from "./markdown.ts";
 import { richMarkdownForTables } from "./rich-message.ts";
+import { splitTelegramHtml } from "./text-split.ts";
 import type { TelegramConfig, TelegramRenderLevel, TelegramTransport, TelegramTurn } from "./types.ts";
 import type { SecretStore } from "./tui/secrets.ts";
 import { RENDER_LEVELS } from "./types.ts";
@@ -16,13 +17,25 @@ type AnyMessage = {
   role?: string;
   content?: unknown;
   errorMessage?: string;
+  stopReason?: string;
   usage?: { cost?: { total?: number }; totalTokens?: number };
   model?: string;
   provider?: string;
 };
 
+function userMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part): part is { type: "text"; text: string } => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
+}
+
 const TOOL_UPDATE_MS = 5000;
 const EDIT_LIMIT = 3500;
+/** Longest edit diff shown under a tool result in full mode. */
+const EDIT_DIFF_LIMIT = 3000;
 
 function formatThinkingInline(part: Record<string, any>, level: TelegramRenderLevel): string {
   if (level === "hidden") return "";
@@ -39,9 +52,11 @@ export function contentToRenderParts(
   content: unknown,
   thinkingLevel: TelegramRenderLevel = "brief",
   toolLevel: TelegramRenderLevel = "brief",
+  options: { includeToolCalls?: boolean } = {},
 ): { body: string; inlineEvents: string[] } {
   if (typeof content === "string") return { body: content, inlineEvents: [] };
   if (!Array.isArray(content)) return { body: "", inlineEvents: [] };
+  const includeToolCalls = options.includeToolCalls ?? true;
   const body: string[] = [];
   const inlineEvents: string[] = [];
   for (const part of content) {
@@ -52,7 +67,7 @@ export function contentToRenderParts(
       const inline = formatThinkingInline(p, thinkingLevel);
       if (inline) inlineEvents.push(inline);
     } else if (p.type === "toolCall") {
-      if (toolLevel === "hidden") continue;
+      if (!includeToolCalls || toolLevel === "hidden") continue;
       const name = String(p.name ?? "tool");
       inlineEvents.push(toolLevel === "brief"
         ? formatToolBrief(name, p.arguments ?? {})
@@ -100,6 +115,19 @@ export function extractToolResultParts(result: unknown): {
     body.push(result);
   }
   return { body: body.filter(Boolean).join("\n\n"), images };
+}
+
+/**
+ * The display diff a host's edit result carries in `details.diff` (pi and OMP both
+ * do), as a markdown code block. Empty when the host gives none; never computed here.
+ */
+function editDiffMarkdown(result: unknown): string {
+  const diff = (result as { details?: { diff?: unknown } } | null | undefined)?.details?.diff;
+  if (typeof diff !== "string" || !diff.trim()) return "";
+  const truncated = diff.length > EDIT_DIFF_LIMIT;
+  const shown = truncated ? diff.slice(0, EDIT_DIFF_LIMIT) : diff;
+  const fence = shown.includes("```") ? "````" : "```";
+  return `${fence}diff\n${shown}${truncated ? "\n(diff truncated)" : ""}\n${fence}`;
 }
 
 function stringifyShort(value: unknown, max = 900): string {
@@ -183,30 +211,152 @@ function shortenSummary(text: string, max: number): string {
   return text.length <= max ? text : text.slice(0, max - 1) + "…";
 }
 
-function summarizeToolArgs(toolName: string, args: unknown, max = 96): string {
-  if (!args || typeof args !== "object") return "";
-  const a = args as Record<string, unknown>;
-  let text = "";
+type ToolArgs = Record<string, unknown>;
 
-  if (toolName === "edit" && typeof a.path === "string") text = a.path;
-  else if (toolName === "read" && typeof a.path === "string") {
-    text = a.path;
-    const offset = typeof a.offset === "number" ? a.offset : undefined;
-    const limit = typeof a.limit === "number" ? a.limit : undefined;
-    if (offset !== undefined || limit !== undefined) {
+function basename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+/** Hashline patch headers: `[<path>#<TAG>]` at the start of a line. */
+const EDIT_FILE_HEADER = /^\[([^\]\n]+?)#[^\]\n]+\]/gm;
+
+/** Up to three file names, then a count of the rest. */
+function summarizeFileNames(names: string[]): string {
+  const shown = names.slice(0, 3).join(", ");
+  return names.length > 3 ? `${shown} (+${names.length - 3} more)` : shown;
+}
+
+function summarizeEditPatch(input: string): string {
+  const files = [...new Set([...input.matchAll(EDIT_FILE_HEADER)].map((match) => basename(match[1])))];
+  if (files.length === 0) return "patch";
+  return summarizeFileNames(files);
+}
+
+/** A non-empty array whose items are all non-blank strings, or undefined. */
+function stringListArg(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  return value.every((item) => typeof item === "string" && item.trim().length > 0) ? value as string[] : undefined;
+}
+
+function summarizeTodo(a: ToolArgs): string {
+  const op = typeof a.op === "string" ? a.op : "";
+  if (!op) return "";
+  if (op === "init") {
+    const phases = Array.isArray(a.list) ? (a.list as Array<{ items?: unknown }>) : [];
+    const itemCount = phases.reduce((sum, phase) => sum + (Array.isArray(phase?.items) ? phase.items.length : 0), 0)
+      + (Array.isArray(a.items) ? a.items.length : 0);
+    return `init (${phases.length} ${phases.length === 1 ? "phase" : "phases"}, ${itemCount} ${itemCount === 1 ? "item" : "items"})`;
+  }
+  if (op === "append") {
+    const count = Array.isArray(a.items) ? a.items.length : 0;
+    return `append ${count} ${count === 1 ? "item" : "items"}`;
+  }
+  const task = typeof a.task === "string" ? firstLine(a.task) : "";
+  return task ? `${op}: ${task}` : op;
+}
+
+function summarizeAsk(a: ToolArgs): string {
+  const questions = Array.isArray(a.questions) ? (a.questions as Array<{ question?: unknown }>) : [];
+  const first = typeof questions[0]?.question === "string" ? firstLine(questions[0].question) : "";
+  if (!first) return "";
+  return questions.length > 1 ? `${first} (+${questions.length - 1} more)` : first;
+}
+
+function summarizeTask(a: ToolArgs): string {
+  const tasks = Array.isArray(a.tasks) ? (a.tasks as Array<{ name?: unknown; task?: unknown }>) : [];
+  if (tasks.length === 0) return "";
+  const first = tasks[0];
+  const label = firstLine(
+    typeof first.name === "string" && first.name.trim()
+      ? first.name
+      : typeof first.task === "string" ? first.task : "",
+  );
+  const count = `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
+  return label ? `${count}: ${label}` : count;
+}
+
+/** First string argument, skipping the intent field `i`. Used for unknown tools. */
+function firstStringArg(a: ToolArgs): string {
+  for (const [key, value] of Object.entries(a)) {
+    if (key === "i") continue;
+    if (typeof value === "string" && value.trim()) return firstLine(value);
+  }
+  return "";
+}
+
+function toolArgsText(toolName: string, a: ToolArgs): string {
+  const str = (key: string): string => (typeof a[key] === "string" ? (a[key] as string) : "");
+  switch (toolName) {
+    case "read": {
+      const path = str("path");
+      if (!path) return "";
+      const offset = typeof a.offset === "number" ? a.offset : undefined;
+      const limit = typeof a.limit === "number" ? a.limit : undefined;
+      if (offset === undefined && limit === undefined) return path;
       const start = offset ?? 1;
       const end = limit !== undefined ? start + limit - 1 : "";
-      text += `:${start}${end ? `-${end}` : ""}`;
+      return `${path}:${start}${end ? `-${end}` : ""}`;
     }
-  } else if (toolName === "bash" && typeof a.command === "string") text = firstLine(a.command);
-  else if (typeof a.path === "string") text = a.path;
-  else if (typeof a.url === "string") text = a.url;
-  else if (Array.isArray(a.paths)) text = a.paths.map(String).join(", ");
-  else if (typeof a.file === "string") text = a.file;
-  else if (typeof a.query === "string") text = a.query;
-  else text = stringifyShort(args, max);
+    case "write":
+      return str("path");
+    case "edit": {
+      // pi edit: { path, edits }. OMP edit: hashline patch in `input`.
+      const path = str("path");
+      if (!path) return summarizeEditPatch(str("input"));
+      const edits = Array.isArray(a.edits) ? a.edits.length : 0;
+      return edits > 1 ? `${path} (${edits} edits)` : path;
+    }
+    case "tg_attach": {
+      const paths = stringListArg(a.paths);
+      return paths ? summarizeFileNames(paths.map(basename)) : "";
+    }
+    case "bash":
+      return firstLine(str("command"));
+    case "eval": {
+      const title = firstLine(str("title"));
+      if (title) return title;
+      const code = firstLine(str("code"));
+      const language = str("language").trim();
+      if (language && code) return `${language}: ${code}`;
+      return language || code;
+    }
+    case "glob":
+      return str("path") || str("pattern");
+    case "grep":
+    case "find": {
+      const pattern = firstLine(str("pattern"));
+      const path = str("path");
+      if (!pattern) return path;
+      return path ? `"${pattern}" in ${path}` : `"${pattern}"`;
+    }
+    case "ls":
+      return str("path");
+    case "todo":
+      return summarizeTodo(a);
+    case "wait":
+      return "";
+    case "ask":
+      return summarizeAsk(a);
+    case "web_search":
+      return firstLine(str("query"));
+    case "task":
+      return summarizeTask(a);
+    default: {
+      const first = firstStringArg(a);
+      if (first) return first;
+      for (const [key, value] of Object.entries(a)) {
+        if (key === "i") continue;
+        const list = stringListArg(value);
+        if (list) return summarizeFileNames(list.map(basename));
+      }
+      return "";
+    }
+  }
+}
 
-  return shortenSummary(text, max);
+export function summarizeToolArgs(toolName: string, args: unknown, max = 96): string {
+  if (!args || typeof args !== "object") return "";
+  return shortenSummary(toolArgsText(toolName, args as ToolArgs), max);
 }
 
 function formatToolBrief(toolName: string, args: unknown): string {
@@ -251,7 +401,19 @@ export function registerTelegramRenderer(
     transport: TelegramTransport;
     getActiveTurn: (chatId?: number, messageThreadId?: number) => TelegramTurn | undefined;
     hasActiveTurns?: () => boolean;
-    getSession?: () => { isStreaming: boolean; extensionRunner: { createCommandContext(): unknown } } | undefined;
+    /** True on OMP; only used to name the host in debug logs. */
+    isOmp?: boolean;
+    /**
+     * The live AgentSession whose subscription carries auto-retry events and failed attempts.
+     * Neither host delivers those through extension handlers (P2-5).
+     */
+    getRetrySession?: () => { subscribe?: (listener: (event: any) => void) => () => void } | undefined;
+    /** `subscribe` carries the host's session events, including auto-retry start/end (P2-5). */
+    getSession?: () => {
+      isStreaming: boolean;
+      extensionRunner: { createCommandContext(): unknown };
+      subscribe?: (listener: (event: any) => void) => () => void;
+    } | undefined;
     /** Shared secret store, so assistant replies are redacted too (§4.7.4). */
     secrets?: SecretStore;
   },
@@ -259,6 +421,8 @@ export function registerTelegramRenderer(
   const sentInlineEvents = new Set<string>();
   const toolUpdateAt = new Map<string, number>();
   const toolArgs = new Map<string, unknown>();
+  /** Full mode: the one message each tool call is shown in, edited as the call progresses. */
+  const fullToolCalls = new Map<string, { chatId: number; messageId: number; summaryHtml: string }>();
 
   /** §4.7.4: replace this chat's tracked secrets before any escaping happens. */
   const redactFor = (turn: TelegramTurn | undefined, text: string): string => {
@@ -327,10 +491,10 @@ export function registerTelegramRenderer(
     return chatIds.length === 0 ? undefined : `default:${chatIds.join(",")}`;
   };
 
-  const sendDefault = async (html: string, richMarkdown?: string) => {
+  const sendDefault = async (html: string, richMarkdown?: string, delivery?: { mustDeliver: boolean }) => {
     const chatIds = defaultChats();
     if (chatIds.length === 0) return [];
-    return [await deps.transport.sendText(chatIds[0], html, undefined, undefined, richMarkdown)];
+    return [await deps.transport.sendText(chatIds[0], html, undefined, undefined, richMarkdown, delivery)];
   };
 
   const sendNewToEventTarget = async (html: string) => {
@@ -339,32 +503,38 @@ export function registerTelegramRenderer(
     return sendDefault(html);
   };
 
-  const sendToTurn = async (html: string, options: { final?: boolean; richMarkdown?: string } = {}) => {
+  /** Sends to the turn's target. Returns the id of the message now holding `html`, when known. */
+  const sendToTurn = async (html: string, options: { final?: boolean; richMarkdown?: string } = {}): Promise<number | undefined> => {
     const richMarkdown = options.richMarkdown;
+    // A final reply must reach the chat even across an outage: the transport keeps it for reconnect.
+    const delivery = options.final ? { mustDeliver: true } : undefined;
     const turn = deps.getActiveTurn();
     if (!turn) {
-      await sendDefault(html, richMarkdown);
-      return;
+      const sent = await sendDefault(html, richMarkdown, delivery);
+      return sent[0]?.[0]?.message_id;
     }
     if (turn.replaceMessageId === undefined) {
-      await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
-      return;
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown, delivery);
+      return sent[0]?.message_id;
     }
     // The placeholder cannot hold an HTML answer that large, but one Rich
     // Message can (up to ~30k), so a table answer still lands in place.
     if (options.final && !richMarkdown && Buffer.byteLength(html, "utf8") > EDIT_LIMIT) {
       await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Assistant</b>\n\nFinal answer follows in separate message(s).").catch(renderLog.swallow("warn", "editText final-answer pointer failed", { chatId: turn.chatId, messageId: turn.replaceMessageId }));
       turn.replaceMessageId = undefined;
-      await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
-      return;
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown, delivery);
+      return sent[0]?.message_id;
     }
+    const placeholderId = turn.replaceMessageId;
     try {
-      await deps.transport.editText(turn.chatId, turn.replaceMessageId, html, richMarkdown);
+      await deps.transport.editText(turn.chatId, placeholderId, html, richMarkdown, delivery);
+      return placeholderId;
     } catch (err) {
       // Edit failed (message deleted / too many edits). Fall back to a new message.
-      renderLog.debug("editText failed; falling back to sendText", { chatId: turn.chatId, messageId: turn.replaceMessageId, err });
+      renderLog.debug("editText failed; falling back to sendText", { chatId: turn.chatId, messageId: placeholderId, err });
       turn.replaceMessageId = undefined;
-      await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown);
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId, richMarkdown, delivery);
+      return sent[0]?.message_id;
     }
   };
 
@@ -380,27 +550,253 @@ export function registerTelegramRenderer(
     await sendToTurn(`<blockquote>${escapeHtml(text)}</blockquote>`);
   };
 
+  /**
+   * Full mode: the call's start message is its one message. Sent without the inline
+   * dedupe, which is keyed on text and would hide a repeated call.
+   */
+  const sendFullToolStart = async (toolCallId: string, brief: string): Promise<void> => {
+    const turn = deps.getActiveTurn();
+    const chatId = turn?.chatId ?? defaultChats()[0];
+    const summaryHtml = escapeHtml(redactFor(turn, brief));
+    const messageId = await sendToTurn(summaryHtml);
+    if (chatId === undefined || messageId === undefined) return;
+    fullToolCalls.set(toolCallId, { chatId, messageId, summaryHtml });
+  };
+
+  /**
+   * Full mode: replaces the call's start message with its summary and result. Text past one
+   * message goes into new messages. Without a start message, the result is sent as new messages.
+   */
+  const finishFullToolCall = async (
+    call: { chatId: number; messageId: number; summaryHtml: string } | undefined,
+    resultHtml: string,
+  ): Promise<void> => {
+    if (!call) {
+      for (const chunk of splitTelegramHtml(resultHtml)) await sendNewToEventTarget(chunk);
+      return;
+    }
+    const chunks = splitTelegramHtml(`${call.summaryHtml}\n${resultHtml}`);
+    try {
+      await deps.transport.editText(call.chatId, call.messageId, chunks[0]);
+    } catch (err) {
+      renderLog.debug("tool result edit failed; sending new messages", { chatId: call.chatId, messageId: call.messageId, err });
+      for (const chunk of chunks) await sendNewToEventTarget(chunk);
+      return;
+    }
+    for (const chunk of chunks.slice(1)) await sendNewToEventTarget(chunk);
+  };
+
   const sendInlineEvents = async (events: string[]) => {
     for (const event of events) await sendInlineEvent(event);
   };
 
-  pi.on("agent_start", async () => {
-    try {
-    sentInlineEvents.clear();
-    toolArgs.clear();
-    toolUpdateAt.clear();
+  // ── Provider error and auto-retry status (P2-5) ─────────────────────────
+  // A failed attempt is not sent as a message of its own. One status message
+  // per turn shows what became of it: retrying, recovered, or one final ❌.
+  // All of these come from the session subscription, the one source on both hosts:
+  // the failed assistant message_end, then auto_retry_start if it is retried, then
+  // auto_retry_end, and agent_end (with willRetry on pi) when the run settles.
+  const hostName = deps.isOmp === true ? "omp" : "pi";
+  type RetryStatus = { messageId?: number; lastError?: string; queue: Promise<void> };
+  const retryStatuses = new WeakMap<TelegramTurn, RetryStatus>();
+  const noTurnRetryStatus: RetryStatus = { queue: Promise.resolve() };
+  /** Error of a failed attempt not yet retried or settled in the current run. */
+  let pendingError: string | undefined;
+  let retrySession: { session: unknown; unsubscribe: () => void } | undefined;
+
+  const retryStatusFor = (turn: TelegramTurn | undefined): RetryStatus => {
+    if (!turn) return noTurnRetryStatus;
+    let status = retryStatuses.get(turn);
+    if (!status) {
+      status = { queue: Promise.resolve() };
+      retryStatuses.set(turn, status);
+    }
+    return status;
+  };
+
+  /** Sends the turn's status message once, then edits it in place. Writes run in order. */
+  const writeRetryStatus = (turn: TelegramTurn | undefined, html: string): Promise<void> => {
+    const status = retryStatusFor(turn);
+    status.queue = status.queue.then(async () => {
+      if (!turn) {
+        await sendDefault(html);
+        return;
+      }
+      if (status.messageId === undefined && turn.replaceMessageId !== undefined) {
+        status.messageId = turn.replaceMessageId;
+        turn.replaceMessageId = undefined;
+      }
+      if (status.messageId !== undefined) {
+        try {
+          await deps.transport.editText(turn.chatId, status.messageId, html);
+          renderLog.debug("retry status edited", { host: hostName, messageId: status.messageId });
+          return;
+        } catch (err) {
+          renderLog.debug("retry status edit failed; sending a new message", { host: hostName, err });
+          status.messageId = undefined;
+        }
+      }
+      const sent = await deps.transport.sendText(turn.chatId, html, turn.messageThreadId, turn.sourceMessageId);
+      status.messageId = sent[0]?.message_id;
+      renderLog.debug("retry status sent", { host: hostName, messageId: status.messageId });
+    }).catch(renderLog.swallow("warn", "retry status write failed"));
+    return status.queue;
+  };
+
+  const headline = (text: string, max: number): string => shortenSummary(firstLine(text), max);
+
+  /** Redacts, then escapes: the one way a retry-status text reaches Telegram. */
+  const retryHtml = (turn: TelegramTurn | undefined, text: string): string => escapeHtml(redactFor(turn, text));
+
+  const showFinalError = (turn: TelegramTurn | undefined, error: string, fromRetryNotice: boolean): void => {
+    // Recorded synchronously: the host's own "Retry failed" notice is forwarded in the same emit.
+    if (turn && fromRetryNotice) turn.finalErrorShown = redactFor(turn, error);
+    void writeRetryStatus(turn, `❌ ${retryHtml(turn, headline(error, 1000))}`);
+  };
+
+  const onRetryStart = (event: { attempt: number; maxAttempts: number; delayMs: number; errorMessage?: string }): void => {
     const turn = deps.getActiveTurn();
+    const error = headline(event.errorMessage ?? "", 200) || "Unknown error";
+    retryStatusFor(turn).lastError = error;
+    pendingError = undefined;
+    const seconds = Math.round(event.delayMs / 1000);
+    void writeRetryStatus(turn, `⚠️ ${retryHtml(turn, error)}\nRetrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s…`);
+  };
+
+  const onRetryEnd = (event: { success: boolean; attempt: number; finalError?: string }): void => {
+    const turn = deps.getActiveTurn();
+    const status = retryStatusFor(turn);
+    pendingError = undefined;
+    if (event.success) {
+      const retries = event.attempt;
+      const lastError = status.lastError ?? "Unknown error";
+      void writeRetryStatus(turn, `⚠️ ${retryHtml(turn, lastError)}\nRecovered after ${retries} ${retries === 1 ? "retry" : "retries"}.`);
+      return;
+    }
+    if (event.finalError === "Retry cancelled") {
+      void writeRetryStatus(turn, "⏹️ Retry cancelled.");
+      return;
+    }
+    showFinalError(turn, event.finalError || "Unknown error", true);
+  };
+
+  /** A failed assistant attempt with no text: held, not sent (see onSessionEvent). */
+  const isHeldFailure = (message: AnyMessage): boolean =>
+    message.role === "assistant"
+    && message.stopReason === "error"
+    && contentToRenderParts(message.content, "brief", "brief", { includeToolCalls: false }).body.trim() === ""
+    && contentImages(message.content).length === 0;
+
+  const holdFailedAttempt = (message: AnyMessage): void => {
+    const error = message.errorMessage || "Unknown error";
+    pendingError = error;
+    const turn = deps.getActiveTurn();
+    // Recorded on the turn before any retry event: TurnNotice judges the host's
+    // "Retry failed" notice against it, and that notice always comes after this.
+    if (turn) turn.failedAttemptError = redactFor(turn, error);
+    renderLog.debug("failed attempt held back", { host: hostName });
+  };
+
+  /**
+   * The run settled. Without a retry (auto_retry_start has already cleared pendingError when
+   * one follows), the held error is final; an aborted run says it was stopped.
+   */
+  const onRunSettled = (event: { willRetry?: boolean; messages?: unknown[] }): void => {
+    if (pendingError === undefined || event.willRetry === true) return;
+    const error = pendingError;
+    pendingError = undefined;
+    const turn = deps.getActiveTurn();
+    let lastAssistant: AnyMessage | undefined;
+    for (const message of event.messages ?? []) {
+      if ((message as AnyMessage)?.role === "assistant") lastAssistant = message as AnyMessage;
+    }
+    if (lastAssistant?.stopReason === "aborted") {
+      renderLog.debug("run stopped after a failed attempt", { host: hostName });
+      void writeRetryStatus(turn, `⏹️ Stopped after an error: ${retryHtml(turn, headline(error, 1000))}`);
+      return;
+    }
+    renderLog.debug("run settled with no retry; failed attempt is final", { host: hostName });
+    showFinalError(turn, error, false);
+  };
+
+  /** OMP's todo reminder: the incomplete items, shown as the terminal shows them (P2-31). */
+  const TODO_REMINDER_LIST_MAX = 10;
+  const onTodoReminder = (event: { todos?: Array<{ content?: unknown }>; attempt?: number; maxAttempts?: number }): void => {
+    const todos = Array.isArray(event.todos) ? event.todos : [];
+    if (todos.length === 0) return;
+    const count = todos.length;
+    const lines = [`⚠️ ${count} incomplete ${count === 1 ? "todo" : "todos"} — reminder ${event.attempt}/${event.maxAttempts}`];
+    for (const todo of todos.slice(0, TODO_REMINDER_LIST_MAX)) {
+      lines.push(`☐ ${firstLine(typeof todo?.content === "string" ? todo.content : "")}`);
+    }
+    if (count > TODO_REMINDER_LIST_MAX) lines.push(`… +${count - TODO_REMINDER_LIST_MAX} more`);
+    void sendInlineEvent(lines.join("\n")).catch(renderLog.swallow("warn", "todo reminder send failed"));
+  };
+
+  /**
+   * Records the first line of a failed tool result on the turn, as the failure line shows it
+   * (P2-30). The host's own warning for the same failure is then not forwarded (controller).
+   */
+  const rememberToolFailure = (turn: TelegramTurn | undefined, result: unknown): void => {
     if (!turn) return;
-    if (turn.replaceMessageId !== undefined) await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Working…</b>");
-    } catch (err) { renderLog.warn("render status-clear handler failed", { err }); }
-  });
+    const line = extractToolResultParts(result).body.split(/\r?\n/).map((text) => text.trim()).find(Boolean);
+    if (line) turn.lastToolFailure = redactFor(turn, line);
+  };
+
+  /** Every event of the main session's subscription, in the order the host emits it. */
+  const onSessionEvent = (event: any): void => {
+    try {
+      renderLog.debug("session event", { host: hostName, type: event?.type, attempt: event?.attempt });
+      switch (event?.type) {
+        case "message_end":
+          if (isHeldFailure(event.message)) holdFailedAttempt(event.message);
+          break;
+        case "auto_retry_start": onRetryStart(event); break;
+        case "auto_retry_end": onRetryEnd(event); break;
+        case "agent_end": onRunSettled(event); break;
+        case "todo_reminder": onTodoReminder(event); break;
+        default: break;
+      }
+    } catch (err) { renderLog.warn("render retry event failed", { err }); }
+  };
+
+  /**
+   * Follows the live main session (deps.getRetrySession). The subscription is replaced when
+   * the session object changes, and is attached again at each run start.
+   */
+  const attachRetryEvents = (): void => {
+    const session = deps.getRetrySession?.();
+    if (retrySession !== undefined && retrySession.session === session) return;
+    if (retrySession !== undefined) {
+      retrySession.unsubscribe();
+      renderLog.debug("retry events unsubscribed from the previous session", { host: hostName });
+    }
+    retrySession = undefined;
+    const hasSubscribe = typeof session?.subscribe === "function";
+    if (!session || !hasSubscribe) {
+      renderLog.debug("retry events not subscribed", { host: hostName, hasSession: session !== undefined, hasSubscribe });
+      return;
+    }
+    retrySession = { session, unsubscribe: session.subscribe!(onSessionEvent) };
+    renderLog.debug("retry events subscribed", {
+      host: hostName,
+      hasSubscribe,
+      sameAsGetSession: session === deps.getSession?.(),
+    });
+  };
+
+  renderLog.debug("renderer retry source", { host: hostName, hasGetRetrySession: deps.getRetrySession !== undefined });
 
   pi.on("agent_start", async () => {
+    renderLog.debug("handler agent_start", { host: hostName });
     try {
     sentInlineEvents.clear();
     toolArgs.clear();
     toolUpdateAt.clear();
+    fullToolCalls.clear();
     workflowNoticeSent = false;
+    pendingError = undefined;
+    attachRetryEvents();
     const turn = deps.getActiveTurn();
     if (!turn) return;
     if (turn.replaceMessageId !== undefined) await deps.transport.editText(turn.chatId, turn.replaceMessageId, "🤖 <b>Working…</b>");
@@ -425,11 +821,12 @@ export function registerTelegramRenderer(
     const level = renderLevel(deps.getConfig(), "tool");
     if (level === "hidden") return;
     toolArgs.set(event.toolCallId, event.args);
-    const inline = level === "brief"
-      ? formatToolBrief(event.toolName, event.args)
-      : `🔧 ${event.toolName} started
-${stringifyShort(event.args, 1200)}`;
-    await sendInlineEvent(inline);
+    const brief = formatToolBrief(event.toolName, event.args);
+    if (level === "full") {
+      await sendFullToolStart(event.toolCallId, brief);
+      return;
+    }
+    await sendInlineEvent(brief);
     } catch (err) { renderLog.warn("render tool_execution_start handler failed", { err }); }
   });
 
@@ -438,14 +835,17 @@ ${stringifyShort(event.args, 1200)}`;
     if (isBackgroundAgentActivity()) return;
     const level = renderLevel(deps.getConfig(), "tool");
     if (level !== "full") return;
+    const call = fullToolCalls.get(event.toolCallId);
+    if (!call) return;
+    const text = extractToolResultParts(event.partialResult).body;
+    if (!text.trim()) return;
     const now = Date.now();
     const last = toolUpdateAt.get(event.toolCallId) ?? 0;
     if (now - last < TOOL_UPDATE_MS) return;
     toolUpdateAt.set(event.toolCallId, now);
-    const partial = stringifyShort(event.partialResult, 700);
-    if (!partial || partial === "{}") return;
-    await sendInlineEvent(`🔄 ${event.toolName} update
-${partial}`);
+    const partial = escapeHtml(redactFor(deps.getActiveTurn(), stringifyShort(text, 700)));
+    await deps.transport.editText(call.chatId, call.messageId, `${call.summaryHtml}\n<blockquote>🔄 ${partial}</blockquote>`)
+      .catch(renderLog.swallow("debug", "tool progress edit failed", { chatId: call.chatId, messageId: call.messageId }));
     } catch (err) { renderLog.warn("render tool_execution_update handler failed", { err }); }
   });
 
@@ -462,29 +862,35 @@ ${partial}`);
     }
     const level = renderLevel(deps.getConfig(), "tool");
     toolUpdateAt.delete(event.toolCallId);
+    const call = fullToolCalls.get(event.toolCallId);
+    fullToolCalls.delete(event.toolCallId);
     const args = toolArgs.get(event.toolCallId);
     toolArgs.delete(event.toolCallId);
     if (level === "hidden") return;
+    if (event.isError) rememberToolFailure(deps.getActiveTurn(), event.result);
     const status = event.isError ? "❌ Tool failed" : "✅ Tool finished";
     if (level === "brief") {
       if (!event.isError) return;
       await sendInlineEvent(formatToolFailureBrief(event.toolName, event.result, args));
       return;
     }
-    // full mode: render the tool's actual output (text + images) as a
-    // persistent new message, so users who opt into `full` see complete
-    // content instead of a truncated JSON blob. Tool results are excluded
+    // full mode: render the tool's actual output (text + images) in the call's
+    // start message, so one tool call is one message. Tool results are excluded
     // from the "never fold" rule, so long ones use an expandable blockquote.
     const parts = extractToolResultParts(event.result);
     const header = `${event.isError ? "❌" : "✅"} <b>${escapeHtml(event.toolName)}</b>`;
-    if (parts.body.trim()) {
-      const rendered = markdownToTelegramHtml(redactFor(deps.getActiveTurn(), parts.body));
+    const diff = event.toolName === "edit" ? editDiffMarkdown(event.result) : "";
+    const resultSource = [parts.body, diff].filter((text) => text.trim()).join("\n\n");
+    let resultHtml: string;
+    if (resultSource.trim()) {
+      const rendered = markdownToTelegramHtml(redactFor(deps.getActiveTurn(), resultSource));
       const expandable = rendered.length > 600 || rendered.split("\n").length > 8;
       const tag = expandable ? "<blockquote expandable>" : "<blockquote>";
-      await sendNewToEventTarget(`${tag}${header}\n${rendered}</blockquote>`);
+      resultHtml = `${tag}${header}\n${rendered}</blockquote>`;
     } else {
-      await sendInlineEvent(`${status}: ${event.toolName}`);
+      resultHtml = `<blockquote>${escapeHtml(redactFor(deps.getActiveTurn(), `${status}: ${event.toolName}`))}</blockquote>`;
     }
+    await finishFullToolCall(call, resultHtml);
     const eventTurn = deps.getActiveTurn();
     for (const image of parts.images) {
       for (const chatId of eventChatIds()) {
@@ -495,25 +901,54 @@ ${partial}`);
     } catch (err) { renderLog.warn("tool-result image upload failed", { err }); }
   });
 
+  // A Telegram message steered or queued into a running turn keeps that turn's
+  // sourceMessageId. When the host adds it to the conversation, make the
+  // turn's next reply quote that message instead.
+  const adoptSteeredReplyTarget = (message: AnyMessage): void => {
+    const turn = deps.getActiveTurn();
+    const pending = turn?.pendingReplyTargets;
+    if (!turn || !pending?.length) return;
+    const userText = userMessageText(message.content).trim();
+    if (!userText) return;
+    const index = pending.findIndex((target) => {
+      const targetText = target.text.trim();
+      return targetText.length > 0 && userText.includes(targetText);
+    });
+    if (index < 0) return;
+    turn.sourceMessageId = pending[index].messageId;
+    pending.splice(0, index + 1);
+  };
+
   pi.on("message_end", async (event) => {
+    const messageEndInfo = event.message as AnyMessage;
+    renderLog.debug("handler message_end", { host: hostName, role: messageEndInfo?.role, stopReason: messageEndInfo?.stopReason });
     try {
     const message = event.message as AnyMessage;
+    if (message.role === "user") {
+      adoptSteeredReplyTarget(message);
+      return;
+    }
     if (message.role !== "assistant") return;
     // Subagent turns emit assistant messages in the same session stream.
     // The TUI never shows them as conversation — suppress them while agent
     // activity is in flight and the main loop is idle.
     if (isBackgroundAgentActivity()) {
+      renderLog.debug("message_end skipped: background agent activity", { host: hostName, stopReason: message.stopReason });
       await maybeSendWorkflowNotice();
       return;
     }
     const config = deps.getConfig();
     const thinkingLevel = renderLevel(config, "thinking");
-    const toolLevel = renderLevel(config, "tool");
-    const rendered = contentToRenderParts(message.content, thinkingLevel, toolLevel);
+    // Tool calls are rendered by tool_execution_start instead; rendering the
+    // toolCall blocks here as well would print every call twice.
+    const rendered = contentToRenderParts(message.content, thinkingLevel, "brief", { includeToolCalls: false });
     await sendInlineEvents(rendered.inlineEvents);
+    // A failed attempt with no text is not sent as a message of its own: the
+    // session subscription holds it, and the retry events decide what it becomes.
+    if (isHeldFailure(message)) return;
     // Redact the whole reply (prose *and* the oversized code blocks pulled out
     // of it below) before it is converted to HTML or sent as Markdown (§4.7.4).
-    const rawBody = redactFor(deps.getActiveTurn(), rendered.body || message.errorMessage || "");
+    const rawBody = redactFor(deps.getActiveTurn(), rendered.body);
     // Pull oversized code blocks out of the body before rendering: they'd
     // otherwise be split across many <pre> messages (painful on mobile). They
     // are sent as downloadable files after the body.

@@ -192,3 +192,329 @@ describe("Telegram renderer turn routing", () => {
     expect(sent[0].richMarkdown).toBeUndefined();
   });
 });
+
+describe("Telegram reply target for steered or queued messages", () => {
+  it("replies to a steered Telegram message once the host has taken it into the conversation", async () => {
+    const { emit, sent } = createRendererHarness();
+    const turn: TelegramTurn = {
+      chatId: 111,
+      sourceMessageId: 1,
+      pendingReplyTargets: [{ text: "second", messageId: 2 }],
+      queuedAttachments: [],
+    };
+
+    await runWithTelegramTurn(turn, async () => {
+      await emit("message_end", { message: { role: "user", content: "second" } });
+      await emit("message_end", { message: { role: "assistant", content: "answer to second" } });
+    });
+
+    expect(sent).toEqual([expect.objectContaining({ chatId: 111, replyToMessageId: 2, text: expect.stringContaining("answer to second") })]);
+  });
+
+  it("matches a host-decorated user message (text inside a system-reminder block) and array content", async () => {
+    const { emit, sent } = createRendererHarness();
+    const turn: TelegramTurn = {
+      chatId: 111,
+      sourceMessageId: 1,
+      pendingReplyTargets: [{ text: "second", messageId: 2 }],
+      queuedAttachments: [],
+    };
+
+    await runWithTelegramTurn(turn, async () => {
+      await emit("message_end", {
+        message: { role: "user", content: [{ type: "text", text: "<system-reminder>x</system-reminder>\nsecond" }] },
+      });
+      await emit("message_end", { message: { role: "assistant", content: "answer" } });
+    });
+
+    expect(sent).toEqual([expect.objectContaining({ replyToMessageId: 2 })]);
+  });
+
+  it("keeps replying to the turn's first message when no pending target matches", async () => {
+    const { emit, sent } = createRendererHarness();
+    const turn: TelegramTurn = {
+      chatId: 111,
+      sourceMessageId: 1,
+      pendingReplyTargets: [{ text: "second", messageId: 2 }],
+      queuedAttachments: [],
+    };
+
+    await runWithTelegramTurn(turn, async () => {
+      await emit("message_end", { message: { role: "user", content: "something else entirely" } });
+      await emit("message_end", { message: { role: "assistant", content: "answer" } });
+    });
+
+    expect(sent).toEqual([expect.objectContaining({ replyToMessageId: 1 })]);
+    expect(turn.pendingReplyTargets).toEqual([{ text: "second", messageId: 2 }]);
+  });
+
+  it("uses the first matching pending target and drops it and the entries before it", async () => {
+    const { emit, sent } = createRendererHarness();
+    const turn: TelegramTurn = {
+      chatId: 111,
+      sourceMessageId: 1,
+      pendingReplyTargets: [
+        { text: "first queued", messageId: 2 },
+        { text: "second queued", messageId: 3 },
+        { text: "third queued", messageId: 4 },
+      ],
+      queuedAttachments: [],
+    };
+
+    await runWithTelegramTurn(turn, async () => {
+      await emit("message_end", { message: { role: "user", content: "second queued" } });
+      await emit("message_end", { message: { role: "assistant", content: "answer two" } });
+    });
+
+    expect(sent).toEqual([expect.objectContaining({ replyToMessageId: 3, text: expect.stringContaining("answer two") })]);
+    expect(turn.pendingReplyTargets).toEqual([{ text: "third queued", messageId: 4 }]);
+  });
+});
+
+describe("Telegram tool-call lines are readable, one per call", () => {
+  const turn: TelegramTurn = { chatId: 111, queuedAttachments: [] };
+
+  async function briefLine(toolName: string, args: unknown): Promise<string | undefined> {
+    const { emit, sent } = createRendererHarness({ tool: "brief" });
+    await runWithTelegramTurn(turn, () => emit("tool_execution_start", { toolCallId: "call", toolName, args }));
+    return sent[0]?.text.replace(/^<blockquote>|<\/blockquote>$/g, "");
+  }
+
+  it.each([
+    ["read", { i: "Reading notes", path: "src/notes.md" }, "🔧 read: src/notes.md"],
+    ["write", { i: "Writing", path: "out/result.txt", content: "{\"a\": 1}" }, "🔧 write: out/result.txt"],
+    ["edit", { i: "Editing", input: "[/tmp/p/notes.md#0760]\nPUT >4:\n+- d" }, "🔧 edit: notes.md"],
+    ["edit", { i: "Editing", input: "[/tmp/p/a.ts#00AA]\nPUT >1:\n+x\n[/tmp/p/b.ts#00AB]\nPUT >2:\n+y" }, "🔧 edit: a.ts, b.ts"],
+    ["edit", { i: "Editing", input: "[a.ts#1]\n[b.ts#2]\n[c.ts#3]\n[d.ts#4]\n[e.ts#5]" }, "🔧 edit: a.ts, b.ts, c.ts (+2 more)"],
+    ["edit", { i: "Editing", input: "no header here" }, "🔧 edit: patch"],
+    ["bash", { i: "Listing", command: "ls -la\necho done" }, "🔧 bash: ls -la"],
+    ["eval", { i: "Computing", language: "js", code: "const x = 1;\nconsole.log(x)", title: "Sum check" }, "🔧 eval: Sum check"],
+    ["eval", { i: "Computing", language: "js", code: "const x = 1;\nconsole.log(x)" }, "🔧 eval: js: const x = 1;"],
+    ["glob", { i: "Finding", path: "lib/**/*.ts" }, "🔧 glob: lib/**/*.ts"],
+    ["grep", { i: "Searching", pattern: "summarizeToolArgs", path: "lib" }, "🔧 grep: \"summarizeToolArgs\" in lib"],
+    ["grep", { i: "Searching", pattern: "TODO" }, "🔧 grep: \"TODO\""],
+    ["todo", { i: "Planning", op: "init", list: [{ phase: "A", items: ["one", "two"] }, { phase: "B", items: ["three"] }] }, "🔧 todo: init (2 phases, 3 items)"],
+    ["todo", { i: "Planning", op: "init", list: [{ phase: "A", items: ["one", "two"] }] }, "🔧 todo: init (1 phase, 2 items)"],
+    ["todo", { i: "Planning", op: "init", list: [{ phase: "A", items: ["one"] }] }, "🔧 todo: init (1 phase, 1 item)"],
+    ["todo", { i: "Done", op: "done", task: "write tests" }, "🔧 todo: done: write tests"],
+    ["todo", { i: "Adding", op: "append", items: ["x", "y"] }, "🔧 todo: append 2 items"],
+    ["wait", {}, "🔧 wait"],
+    ["ask", { i: "Asking", questions: [{ question: "Which branch?", options: ["a", "b"] }, { question: "Second?" }] }, "🔧 ask: Which branch? (+1 more)"],
+    ["web_search", { i: "Searching web", query: "oh-my-pi hashline" }, "🔧 web_search: oh-my-pi hashline"],
+    ["task", { i: "Delegating", context: "shared", tasks: [{ name: "Scan", agent: "task", task: "scan the repo", solutionSpace: "x" }, { agent: "task", task: "second", solutionSpace: "y" }] }, "🔧 task: 2 tasks: Scan"],
+    ["task", { i: "Delegating", context: "shared", tasks: [{ agent: "task", task: "Review the diff", solutionSpace: "x" }] }, "🔧 task: 1 task: Review the diff"],
+    ["custom_tool", { i: "Custom", target: "thing", count: 3 }, "🔧 custom_tool: thing"],
+    ["custom_tool", { i: "Custom", count: 3 }, "🔧 custom_tool"],
+  ])("%s %j -> one line", async (toolName, args, expected) => {
+    const line = await briefLine(toolName, args);
+    expect(line).toBe(expected);
+    expect(line).not.toMatch(/[{}"]\s*:|\{ /);
+  });
+
+  it("does not echo raw JSON or the intent field for a tool whose args only hold intent", async () => {
+    expect(await briefLine("custom_tool", { i: "Only intent" })).toBe("🔧 custom_tool");
+  });
+
+  it("does not render assistant toolCall blocks inline on message_end, but still sends the reply", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "full" });
+
+    await runWithTelegramTurn(turn, () => emit("message_end", {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } },
+          { type: "text", text: "final words" },
+        ],
+      },
+    }));
+
+    expect(sent.some((item) => item.text.includes("🔧"))).toBe(false);
+    expect(sent.some((item) => item.text.includes("final words"))).toBe(true);
+  });
+
+  it("full mode start sends the brief line without JSON", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "full" });
+
+    await runWithTelegramTurn(turn, () => emit("tool_execution_start", {
+      toolCallId: "call-1",
+      toolName: "write",
+      args: { i: "Writing", path: "out.txt", content: "payload-body" },
+    }));
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("🔧 write: out.txt");
+    expect(sent[0].text).not.toContain("payload-body");
+    expect(sent[0].text).not.toContain("started");
+  });
+
+  it("full mode update is skipped when the partial result has no text", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "full" });
+
+    await runWithTelegramTurn(turn, () => emit("tool_execution_update", {
+      toolCallId: "call-2",
+      toolName: "bash",
+      partialResult: { details: { progress: 0.5 } },
+    }));
+
+    expect(sent).toHaveLength(0);
+  });
+
+  it("full mode update edits the start message with the partial text, not the JSON envelope", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "full" });
+
+    await runWithTelegramTurn(turn, async () => {
+      await emit("tool_execution_start", { toolCallId: "call-3", toolName: "bash", args: { command: "tick" } });
+      await emit("tool_execution_update", {
+        toolCallId: "call-3",
+        toolName: "bash",
+        partialResult: { content: [{ type: "text", text: "tick 1" }], details: {} },
+      });
+    });
+
+    // The harness records edits in `sent` too: the start message, then the progress edit.
+    expect(sent).toHaveLength(2);
+    expect(sent[0].text).toContain("🔧 bash: tick");
+    expect(sent[1].text).toContain("🔧 bash: tick\n<blockquote>🔄 tick 1</blockquote>");
+    expect(sent[1].text).not.toContain('"content"');
+  });
+});
+
+describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
+  function createFullModeHarness(options: { failStart?: boolean } = {}) {
+    const handlers = new Map<string, Array<(event: any) => Promise<void>>>();
+    const sent: Array<{ chatId: number; text: string; messageId: number }> = [];
+    const edits: Array<{ chatId: number; messageId: number; text: string }> = [];
+    let nextMessageId = 500;
+    let startFailed = false;
+    const transport: TelegramTransport = {
+      removeInlineKeyboard: async () => undefined,
+      sendText: async (chatId, text) => {
+        if (options.failStart && !startFailed) {
+          startFailed = true;
+          throw new Error("send failed");
+        }
+        const messageId = ++nextMessageId;
+        sent.push({ chatId, text, messageId });
+        return [{ message_id: messageId }];
+      },
+      sendButtons: async () => ({ message_id: 1 }),
+      editText: async (chatId, messageId, text) => {
+        edits.push({ chatId, messageId, text });
+      },
+      editButtons: async () => undefined,
+      answerCallbackQuery: async () => undefined,
+      deleteMessage: async () => undefined,
+      sendDocument: async () => undefined,
+      sendPhoto: async () => undefined,
+      sendChatAction: async () => undefined,
+    };
+    const pi = {
+      on: (event: string, handler: (event: any) => Promise<void>) => {
+        const list = handlers.get(event) ?? [];
+        list.push(handler);
+        handlers.set(event, list);
+      },
+    };
+    registerTelegramRenderer(pi as any, {
+      getConfig: () => ({ botToken: "token", activeChatId: 111, tool: "full", thinking: "brief" }),
+      transport,
+      getActiveTurn: () => getCurrentTelegramTurn(),
+      hasActiveTurns: () => true,
+    });
+    const emit = async (event: string, payload: any) => {
+      await Promise.all((handlers.get(event) ?? []).map((handler) => handler(payload)));
+    };
+    return { emit, sent, edits };
+  }
+
+  const turn = (): TelegramTurn => ({ chatId: 111, queuedAttachments: [] });
+
+  it("edits the start message with progress and then the result, instead of sending more messages", async () => {
+    const { emit, sent, edits } = createFullModeHarness();
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "bash-1", toolName: "bash", args: { command: "echo hi; ls" } });
+      await emit("tool_execution_update", {
+        toolCallId: "bash-1",
+        toolName: "bash",
+        partialResult: { content: [{ type: "text", text: "hi" }], details: {} },
+      });
+      await emit("tool_execution_end", {
+        toolCallId: "bash-1",
+        toolName: "bash",
+        isError: false,
+        result: { content: [{ type: "text", text: "hi\nnotes.md\nout.txt" }] },
+      });
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("🔧 bash: echo hi; ls");
+    expect(edits).toHaveLength(2);
+    expect(edits.every((edit) => edit.messageId === sent[0].messageId && edit.chatId === 111)).toBe(true);
+    expect(edits[0].text).toContain("🔧 bash: echo hi; ls");
+    expect(edits[0].text).toContain("<blockquote>🔄 hi</blockquote>");
+    expect(edits[1].text).toContain("🔧 bash: echo hi; ls");
+    expect(edits[1].text).toContain("notes.md");
+    expect(edits[1].text).not.toContain("🔄");
+  });
+
+  it("puts the edit diff under the result in a diff code block, truncated past 3000 characters", async () => {
+    const { emit, edits } = createFullModeHarness();
+    const diff = `-beta\n+gamma\n${"x".repeat(3500)}`;
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "edit-1", toolName: "edit", args: { path: "notes.md" } });
+      await emit("tool_execution_end", {
+        toolCallId: "edit-1",
+        toolName: "edit",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "Successfully replaced 1 block(s) in notes.md." }],
+          details: { diff },
+        },
+      });
+    });
+
+    const final = edits.at(-1)!.text;
+    expect(final).toContain("Successfully replaced 1 block(s) in notes.md.");
+    expect(final).toContain("<pre><code class=\"language-diff\">");
+    expect(final).toContain("-beta");
+    expect(final).toContain("+gamma");
+    expect(final).toContain("(diff truncated)");
+    expect(final).not.toContain("x".repeat(3500));
+  });
+
+  it("does not add a diff for non-edit tools or when the host gives no diff", async () => {
+    const { emit, edits } = createFullModeHarness();
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "w-1", toolName: "write", args: { path: "a.txt" } });
+      await emit("tool_execution_end", {
+        toolCallId: "w-1",
+        toolName: "write",
+        isError: false,
+        result: { content: [{ type: "text", text: "wrote" }], details: { diff: "+x" } },
+      });
+    });
+
+    expect(edits.at(-1)!.text).not.toContain("diff");
+  });
+
+  it("sends the result as a new message when the start message could not be sent", async () => {
+    const { emit, sent, edits } = createFullModeHarness({ failStart: true });
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "bash-2", toolName: "bash", args: { command: "ls" } }).catch(() => undefined);
+      await emit("tool_execution_end", {
+        toolCallId: "bash-2",
+        toolName: "bash",
+        isError: false,
+        result: { content: [{ type: "text", text: "notes.md" }] },
+      });
+    });
+
+    expect(edits).toHaveLength(0);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("notes.md");
+  });
+});

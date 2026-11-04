@@ -10,11 +10,16 @@
 import { describe, expect, it } from "vitest";
 import { SelectList } from "../../node_modules/@earendil-works/pi-tui/dist/components/select-list.js";
 import { SettingsList } from "../../node_modules/@earendil-works/pi-tui/dist/components/settings-list.js";
+import { SteppedSubmenu } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/components/settings-submenu.js";
+import { initTheme } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { pickAdapter } from "../tui/adapters/index.ts";
 import { piSettingsAdapter } from "../tui/adapters/pi-settings.ts";
 import { extensionSelectAdapter } from "../tui/adapters/extension.ts";
 import { sendKeyTo } from "../tui/keys.ts";
 import type { AdapterContext, DialogModel } from "../tui/model.ts";
+
+/** pi's theme is a module singleton; SteppedSubmenu draws through it. */
+initTheme();
 
 /** Submenus only render on demand; nothing here draws, so an empty theme works. */
 const theme = {} as never;
@@ -308,5 +313,58 @@ describe("search", () => {
     const { list, ctx } = settingsHarness();
     expect(expectSettings(piSettingsAdapter.read(list, ctx)).search).toBeUndefined();
     expect(piSettingsAdapter.act(list, { type: "search", query: "theme" }, ctx)).toBe(false);
+  });
+});
+
+describe("submenu subtitle: pi's own step description", () => {
+  /** pi's `/settings` "Default thinking level per model": a two-step SteppedSubmenu. */
+  function thinkingHarness() {
+    const items = [
+      {
+        id: "model-thinking",
+        label: "Default thinking level per model",
+        currentValue: "none",
+        submenu: () => new SteppedSubmenu(
+          [
+            {
+              key: "model",
+              title: "Per-Model Thinking Level",
+              description: "Select a model to configure",
+              options: () => [{ value: "a", label: "Model A", description: "off" }],
+              preselect: () => "a",
+            },
+            {
+              key: "level",
+              title: "Thinking Level for Model A",
+              description: "Select default thinking level for this model",
+              options: () => [{ value: "off", label: "off" }, { value: "high", label: "high" }],
+              preselect: () => "off",
+            },
+          ],
+          () => {},
+          () => {},
+        ),
+      },
+    ];
+    const list = new SettingsList(items as never, 10, theme, () => {}, () => {});
+    const ctx: AdapterContext = { host: "pi", sendKey: (name) => sendKeyTo(list, name), requestRender: () => {} };
+    return { list, ctx };
+  }
+
+  it("shows the current step's description as the select subtitle, step by step", () => {
+    const { list, ctx } = thinkingHarness();
+    expect(piSettingsAdapter.act(list, { type: "submenu", key: "0:Default thinking level per model" }, ctx)).toBe(true);
+    const first = expectSubmenu(piSettingsAdapter.read(list, ctx));
+    if (first.model.kind !== "select") throw new Error(`expected a select submenu, got ${first.model.kind}`);
+    // The title is the row that opened the submenu; the step title is pi's own.
+    expect(first.model.title).toBe("Default thinking level per model");
+    expect(first.model.subtitle).toBe("Step 1/2 · Select a model to configure");
+    // Each row carries its current value: pi's option description (the override) is the row's value.
+    expect(first.model.items).toEqual([expect.objectContaining({ label: "Model A", value: "off" })]);
+    // Choosing the model advances pi to step 2, which carries its own line.
+    expect(piSettingsAdapter.act(list, { type: "choose", key: "0:Model A" }, ctx)).toBe(true);
+    const second = expectSubmenu(piSettingsAdapter.read(list, ctx));
+    if (second.model.kind !== "select") throw new Error(`expected a select submenu, got ${second.model.kind}`);
+    expect(second.model.subtitle).toBe("Step 2/2 · Select default thinking level for this model");
   });
 });

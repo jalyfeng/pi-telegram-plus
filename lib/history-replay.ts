@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import { escapeHtml } from "./html.ts";
 import { markdownToTelegramHtml } from "./markdown.ts";
 import { richMarkdownForTables } from "./rich-message.ts";
@@ -35,6 +36,8 @@ export type TelegramHistoryReplayTarget = {
     chatId: number;
     messageThreadId?: number;
     sourceMessageId?: number;
+    /** The /tg menu message that the switch was picked on: it becomes the switch result. */
+    menuMessageId?: number;
 };
 
 export type TelegramHistoryInstanceInfo = {
@@ -169,9 +172,7 @@ export async function replayTelegramHistory(options: {
     canContinue?: () => boolean;
 }): Promise<{ messageCount: number; itemCount: number; aborted: boolean }> {
     const replay = buildTelegramHistoryReplay(options.entries, options.config);
-    const instanceLabel = options.instance.sessionName
-        || options.instance.sessionId
-        || options.instance.instanceId.slice(0, 8);
+    const instanceLabel = basename(options.instance.cwd) || options.instance.cwd;
     const details = [
         `🔀 <b>Switched to ${escapeHtml(instanceLabel)}</b>`,
         `<b>cwd:</b> <code>${escapeHtml(options.instance.cwd)}</code>`,
@@ -182,12 +183,18 @@ export async function replayTelegramHistory(options: {
     if (options.canContinue && !options.canContinue()) {
         return { messageCount: replay.messageCount, itemCount: 0, aborted: true };
     }
-    await options.transport.sendText(
-        options.target.chatId,
-        details,
-        options.target.messageThreadId,
-        options.target.sourceMessageId,
-    );
+    // One result for the switch: edit the menu message when the switch came from it
+    // (an edit without a reply_markup also removes its buttons), else a message of its own.
+    if (options.target.menuMessageId !== undefined) {
+        await options.transport.editText(options.target.chatId, options.target.menuMessageId, details);
+    } else {
+        await options.transport.sendText(
+            options.target.chatId,
+            details,
+            options.target.messageThreadId,
+            options.target.sourceMessageId,
+        );
+    }
 
     let itemCount = 0;
     for (const item of replay.items) {

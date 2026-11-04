@@ -61,6 +61,7 @@ function fakeFocus() {
   return {
     current: () => info,
     entryFor: () => undefined,
+    validate: () => undefined,
     onChange: (listener: (info: FocusInfo) => void) => {
       listeners.add(listener);
       return () => {

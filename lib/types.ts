@@ -8,6 +8,10 @@ export const RENDER_LEVELS: readonly TelegramRenderLevel[] = ["hidden", "brief",
 export type TelegramBashConfirm = "always" | "dangerous" | "never";
 export const BASH_CONFIRM_MODES: readonly TelegramBashConfirm[] = ["always", "dangerous", "never"] as const;
 
+/** How Telegram messages are delivered while the main turn is running. */
+export type TelegramMessageMode = "steer" | "queue";
+export const MESSAGE_MODES: readonly TelegramMessageMode[] = ["steer", "queue"] as const;
+
 /**
  * User-wide bot registry stored at `<agent dir>/tg.json` (version 3).
  * Holds ONLY bot identity + a defaultBotId. Runtime (polling/chat state)
@@ -48,6 +52,8 @@ export type ProjectTelegramBinding = {
   retryCount?: number;
   /** Confirmation policy for Telegram-originated shell commands. Defaults to "dangerous". */
   bashConfirm?: TelegramBashConfirm;
+  /** How Telegram messages are delivered while the main turn is running. "steer" injects into the running turn (default); "queue" waits for it to finish. */
+  messageMode?: TelegramMessageMode;
   /** Runtime state (per-project) — cold-start seed / best-effort backup. */
   lastUpdateId?: number;
   /** Runtime state (per-project). */
@@ -89,6 +95,8 @@ export type TelegramConfig = {
   retryCount?: number;
   /** Confirmation policy for Telegram-originated shell commands. Defaults to "dangerous". */
   bashConfirm?: TelegramBashConfirm;
+  /** How Telegram messages are delivered while the main turn is running. "steer" injects into the running turn (default); "queue" waits for it to finish. */
+  messageMode?: TelegramMessageMode;
   /** Override the Telegram Bot API base URL (e.g. a self-hosted local Bot API server or a test mock). Defaults to https://api.telegram.org. */
   apiBase?: string;
 };
@@ -118,6 +126,12 @@ export type TelegramExternalReply = {
   quote?: TelegramTextQuote;
 };
 
+/** Loose shape of a Telegram Rich Message block; only the fields the plain-text view reads are typed. */
+export type TelegramRichBlock = { type?: string; [key: string]: unknown };
+
+/** Telegram Rich Message body (Bot API `RichMessage`), returned when a bot-sent rich message is replied to. */
+export type TelegramRichMessage = { blocks?: TelegramRichBlock[]; is_rtl?: boolean };
+
 export type TelegramMessage = {
   message_id: number;
   /** Forum topic/thread id for supergroup topics. */
@@ -141,6 +155,8 @@ export type TelegramMessage = {
   text_quote?: TelegramTextQuote;
   /** External replied-to message metadata, when the original message is not directly accessible. */
   external_reply?: TelegramExternalReply;
+  /** Rich Message body; Telegram keeps the text here instead of `text`/`caption` for `sendRichMessage` output. */
+  rich_message?: TelegramRichMessage;
 };
 
 export type TelegramCallbackQuery = {
@@ -167,11 +183,40 @@ export type TelegramTurn = {
   messageThreadId?: number;
   /** Incoming Telegram message/button message that started this turn. */
   sourceMessageId?: number;
+  /**
+   * Telegram messages steered or queued into this turn, in hand-off order. When
+   * the host adds one of them to the conversation, its reply targets that
+   * message instead of sourceMessageId.
+   */
+  pendingReplyTargets?: Array<{ text: string; messageId: number }>;
   /** Message to edit in-place for callback-button initiated turns. */
   replaceMessageId?: number;
+  /**
+   * The redacted final error of this turn's failed auto-retry, once the renderer has shown
+   * it. The host's own "Retry failed" notice for the same error is then not sent again.
+   */
+  finalErrorShown?: string;
+  /**
+   * Redacted error of the last failed attempt in this turn, set as soon as that attempt
+   * is seen (before any retry event). A host "Retry failed" notice after it is ours to hide.
+   */
+  failedAttemptError?: string;
+  /**
+   * The raw first line of this turn's last failed tool result, redacted, once the renderer has
+   * shown the tool's failure line. A host warning that repeats it is not sent again.
+   */
+  lastToolFailure?: string;
   queuedAttachments: Array<{ path: string; fileName: string }>;
   attachmentsSent?: boolean;
 };
+
+/**
+ * Per-send options. `mustDeliver` marks content the user has to see (a final
+ * reply, a closing edit): when Telegram is unreachable it is kept and sent on
+ * reconnect instead of being dropped. `heldSince` is set only when a kept
+ * notice is replayed, so its lifetime counts from the first failure.
+ */
+export type TelegramDelivery = { maxAttempts?: number; mustDeliver?: boolean; heldSince?: number };
 
 export type TelegramTransport = {
   removeInlineKeyboard(chatId: number, messageId: number): Promise<void>;
@@ -188,7 +233,7 @@ export type TelegramTransport = {
     messageThreadId?: number,
     replyToMessageId?: number,
     richMarkdown?: string,
-    options?: { maxAttempts?: number },
+    options?: TelegramDelivery,
   ): Promise<TelegramSentMessage[]>;
   sendButtons(
     chatId: number,
@@ -198,8 +243,8 @@ export type TelegramTransport = {
     replyToMessageId?: number,
   ): Promise<TelegramSentMessage>;
   /** See `sendText` for `richMarkdown`. */
-  editText(chatId: number, messageId: number, text: string, richMarkdown?: string): Promise<void>;
-  editButtons(chatId: number, messageId: number, text: string, rows: TelegramButton[][]): Promise<void>;
+  editText(chatId: number, messageId: number, text: string, richMarkdown?: string, options?: TelegramDelivery): Promise<void>;
+  editButtons(chatId: number, messageId: number, text: string, rows: TelegramButton[][], options?: TelegramDelivery): Promise<void>;
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>;
   deleteMessage(chatId: number, messageId: number): Promise<void>;
   sendDocument(chatId: number, path: string, caption?: string, signal?: AbortSignal, messageThreadId?: number, replyToMessageId?: number): Promise<void>;

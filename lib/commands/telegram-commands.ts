@@ -41,8 +41,8 @@ export type MenuUi = {
   input: (title: string, placeholder?: string) => Promise<string | undefined>;
   inputSecret?: (title: string, placeholder?: string) => Promise<string | undefined>;
   confirm: (title: string, message?: string) => Promise<boolean>;
-  /** Telegram only: select that edits one menu message in place across calls. */
-  menu?: (title: string, options: string[]) => Promise<string | undefined>;
+  /** Telegram only: select that edits one menu message in place across calls. The body, when given, is shown under the title on that message. */
+  menu?: (title: string, options: string[], body?: string) => Promise<string | undefined>;
   /** Telegram only: drop the keyboard of the live menu message. */
   closeMenu?: () => Promise<void>;
 };

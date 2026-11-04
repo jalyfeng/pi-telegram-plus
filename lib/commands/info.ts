@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import type { CommandRegistry } from "./register.ts";
 import { escapeHtml } from "../html.ts";
+import { hostCommandName } from "../session-capture.ts";
 import type { CapturedAgentSession, TelegramTransport, TelegramTurn } from "../types.ts";
 
 function formatFooterLikeTokenCount(value: number): string {
@@ -117,7 +118,7 @@ export function registerInfoCommands(
 ): void {
   // ── /copy ──────────────────────────────────────────────────────────────
   registry.registerCommand("copy", {
-    description: "Show last assistant message (for Telegram copy)",
+    description: "Send the last assistant reply as text",
     handler: async (_args, ctx) => {
       const ui = ctx.ui;
       const session = deps.getSession();
@@ -184,7 +185,7 @@ export function registerInfoCommands(
 
   // ── /hotkeys ──────────────────────────────────────────────────────────
   registry.registerCommand("hotkeys", {
-    description: "Show keyboard shortcuts (TUI feature list)",
+    description: `How to use ${hostCommandName()} from Telegram`,
     handler: async (_args, ctx) => {
       const ui = ctx.ui;
       ui.notify(

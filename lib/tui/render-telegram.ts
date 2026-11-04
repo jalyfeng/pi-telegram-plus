@@ -11,13 +11,23 @@
  * `i` free text, `k` terminal key, `x` cancel.
  */
 import { encodeDialogCallback } from "../callback-protocol.ts";
+import { splitTelegramHtml } from "../text-split.ts";
 import type { TelegramButton } from "../types.ts";
-import type { DialogItem, DialogModel } from "./model.ts";
+import { confirmDeclineLabel } from "./model.ts";
+import type { DialogItem, DialogModel, SearchModel } from "./model.ts";
 
 /** §4.7.2: ten items per page, one button per row. */
 export const PAGE_SIZE = 10;
 export const BUTTONS_PER_ROW = 3;
 const MAX_LABEL = 45;
+/** Longest host detail or hint shown after an item's label in the message body. */
+const MAX_NOTE = 100;
+/** Longest host lead or notice shown in the message body. */
+const MAX_NOTICE = 300;
+/** Longest badge shown after an item's label. */
+const MAX_BADGE = 40;
+/** Body text one list page may carry; past it the page drops its details, not its items (Telegram caps a message at 4096). */
+const MAX_LIST_BODY = 3400;
 
 export type RenderedDialog = {
   text: string;
@@ -107,7 +117,11 @@ function itemButtons(items: DialogItem[], page: number, ctx: RenderContext, op: 
 }
 
 function pageButtons(total: number, page: number, ctx: RenderContext): TelegramButton[] {
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  return pageNav(Math.max(1, Math.ceil(total / PAGE_SIZE)), page, ctx);
+}
+
+/** ◀ / ▶ and the position, for a list of `pages` pages; empty when there is one page. */
+function pageNav(pages: number, page: number, ctx: RenderContext): TelegramButton[] {
   if (pages <= 1) return [];
   const previous = page > 0 ? button("◀ Prev", ctx, "p", String(page - 1)) : undefined;
   const next = page < pages - 1 ? button("Next ▶", ctx, "p", String(page + 1)) : undefined;
@@ -126,15 +140,62 @@ function header(title: string, subtitle: string | undefined, body: string[]): st
   return `${lines.join("\n")}${body.join("")}`;
 }
 
-function listText(title: string, subtitle: string | undefined, items: DialogItem[], page: number, multi = false): string {
-  const body = items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE).map((item) => `${escapeHtml(itemLabel(item, multi))}\n`);
-  return header(title, subtitle, body);
+/**
+ * One item as a line of message text: its label, then the host's badges in
+ * brackets and its note after a dash. The buttons still carry the label only.
+ */
+function itemLine(item: DialogItem, multi: boolean, details: boolean): string {
+  if (!details) return escapeHtml(itemLabel(item, multi));
+  const badges = (item.badges ?? []).map((badge) => ` [${escapeHtml(shorten(badge, MAX_BADGE))}]`).join("");
+  const note = item.note ? ` — ${escapeHtml(shorten(item.note, MAX_NOTE))}` : "";
+  return `${escapeHtml(itemLabel(item, multi))}${badges}${note}`;
+}
+
+/** The page's lines, with a bold heading wherever the section (`group`) changes. */
+function itemBody(items: DialogItem[], multi: boolean, details: boolean): string[] {
+  const body: string[] = [];
+  let group: string | undefined;
+  for (const item of items) {
+    if (item.group !== undefined && item.group !== group) {
+      body.push(`<b>${escapeHtml(shorten(item.group, 60))}</b>\n`);
+    }
+    group = item.group;
+    body.push(`${itemLine(item, multi, details)}\n`);
+  }
+  return body;
+}
+
+/** A host lead or notice, as plain text above the items; empty when there is none. */
+function noticeBody(notice: string | undefined): string[] {
+  return notice ? [`${escapeHtml(shorten(notice, MAX_NOTICE))}\n\n`] : [];
+}
+
+function listText(
+  title: string,
+  subtitle: string | undefined,
+  items: DialogItem[],
+  page: number,
+  multi = false,
+  notice?: string,
+): string {
+  const visible = items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+  const detailed = [...noticeBody(notice), ...itemBody(visible, multi, true)];
+  const fits = detailed.join("").length <= MAX_LIST_BODY;
+  return header(title, subtitle, fits ? detailed : [...noticeBody(notice), ...itemBody(visible, multi, false)]);
+}
+
+/** The search box's shown text: its query, else the host's placeholder, else `empty`. */
+function searchHint(search: SearchModel, empty = "(all)"): string {
+  return shorten(search.query || search.placeholder || empty, 30);
 }
 
 function renderSelect(model: Extract<DialogModel, { kind: "select" }>, ctx: RenderContext): RenderedDialog {
-  const page = Math.max(0, ctx.page ?? 0);
-  const total = model.total || model.items.length;
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // `items` is what the host shows after its filter, so pages count those rows;
+  // `total` is the list before filtering and only feeds the "of" in the title.
+  const shown = model.items.length;
+  const total = Math.max(model.total || 0, shown);
+  const pages = Math.max(1, Math.ceil(shown / PAGE_SIZE));
+  const page = Math.min(Math.max(0, ctx.page ?? 0), pages - 1);
   const window = model.items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
   const { rows, keyMap } = itemButtons(window, page, ctx, model.multi ? "t" : "c");
   const actions: TelegramButton[] = [];
@@ -153,18 +214,21 @@ function renderSelect(model: Extract<DialogModel, { kind: "select" }>, ctx: Rend
     (extra) => button(shorten(extra.label, MAX_LABEL), ctx, "k", extra.key),
   ));
   actions.push(...cancelRow(ctx));
-  const nav = pageButtons(total, page, ctx);
+  const nav = pageButtons(shown, page, ctx);
   if (nav.length > 0) rows.push(nav);
   rows.push(...chunk(extras));
   rows.push(actions);
-  const subtitle = `Page ${page + 1}/${pages} · ${total} items`;
+  const count = shown < total ? `${shown} of ${total} items` : `${total} items`;
+  const pageLine = `Page ${page + 1}/${pages} · ${count}`;
+  const searchLine = model.search ? `${pageLine} · 🔍 ${searchHint(model.search)}` : pageLine;
   return {
     text: listText(
       model.title,
-      model.search ? `${subtitle} · 🔍 ${shorten(model.search.query || "(all)", 20)}` : subtitle,
+      [model.subtitle, searchLine].filter((line) => line !== undefined && line !== "").join("\n"),
       model.items,
       page,
       model.multi,
+      model.notice,
     ),
     rows,
     keyMap,
@@ -183,11 +247,14 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
     // Keys are the exact callback arguments of the buttons drawn above, so the
     // Broker can look one up without knowing this is a nested view.
     for (const [key, value] of inner.keyMap) keyMap.set(key, value);
-    return { text: `${inner.text}\n<i>Submenu · Back sends Esc</i>`, rows, keyMap, page: 0, pages: 1 };
+    return { text: inner.text, rows, keyMap, page: 0, pages: 1 };
   }
   const page = Math.max(0, ctx.page ?? 0);
-  const pages = Math.max(1, Math.ceil(model.items.length / PAGE_SIZE));
-  const window = model.items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+  // Page switches (shortcuts) are not list rows: they form a compact block under the list.
+  const rowItems = model.items.filter((item) => item.shortcut !== true);
+  const shortcutItems = model.items.filter((item) => item.shortcut === true);
+  const pages = Math.max(1, Math.ceil(rowItems.length / PAGE_SIZE));
+  const window = rowItems.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
   const rows: TelegramButton[][] = [];
   const keyMap = new Map<string, string>();
   window.forEach((item, index) => {
@@ -200,32 +267,45 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
       keyMap.set(arg, item.key);
       return;
     }
+    const arg = `${page}.${index}`;
     if (values.length === 2) {
-      values.forEach((value, position) => {
-        const arg = `${page}.${index}.${position}`;
-        const built = button(`${item.value === value ? "◉" : "○"} ${item.label}: ${shorten(value, MAX_LABEL - 12)}`, ctx, "v", arg);
-        if (!built) return;
-        rows.push([built]);
-        keyMap.set(arg, `${item.key}=${value}`);
-      });
+      // One button shows the current value; a press moves to the other one.
+      const other = values[0] === item.value ? values[1] : values[0];
+      const built = button(itemLabel(item), ctx, "v", arg);
+      if (!built) return;
+      rows.push([built]);
+      keyMap.set(arg, `${item.key}=${other}`);
       return;
     }
-    const arg = `${page}.${index}`;
     const built = button(itemLabel(item), ctx, values.length > 2 ? "v" : "t", arg);
     if (!built) return;
     rows.push([built]);
     keyMap.set(arg, item.key);
   });
-  const nav = pageButtons(model.items.length, page, ctx);
+  const nav = pageButtons(rowItems.length, page, ctx);
   if (nav.length > 0) rows.push(nav);
+  // The compact block of page switches sits under the list on every page; the
+  // arg `g<n>` cannot collide with the row args (`<page>.<index>...`).
+  const shortcutButtons: TelegramButton[] = [];
+  shortcutItems.forEach((item, index) => {
+    const arg = `g${index}`;
+    const built = button(shorten(item.label, MAX_LABEL), ctx, "m", arg);
+    if (!built) return;
+    shortcutButtons.push(built);
+    keyMap.set(arg, item.key);
+  });
+  rows.push(...chunk(shortcutButtons));
   rows.push(cancelRow(ctx));
-  const subtitle = `Page ${page + 1}/${pages} · ${model.items.length} items`;
+  const pageLine = `Page ${page + 1}/${pages} · ${rowItems.length} items`;
+  const searchLine = model.search ? `${pageLine} · 🔍 ${searchHint(model.search, "Type to search")}` : pageLine;
   return {
     text: listText(
       model.title,
-      model.search ? `${subtitle} · 🔍 ${shorten(model.search.query || "Type to search", 20)}` : subtitle,
-      model.items,
+      [model.subtitle, searchLine].filter((line) => line !== undefined && line !== "").join("\n"),
+      rowItems,
       page,
+      false,
+      model.notice,
     ),
     rows,
     keyMap,
@@ -240,17 +320,22 @@ function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire"
   if (!active) {
     return { text: header(model.title, undefined, ["(no questions to show)"]), rows: [cancelRow(ctx)], keyMap: new Map(), page: 0, pages: 1 };
   }
-  const status = model.questions
-    .map((question, index) => `${index === activeIndex ? "▸" : ""}${index + 1}${question.answered ? "✓" : "·"}`)
-    .join(" ");
+  // A single question has no tabs to show: no progress line and no switch row.
+  const multiple = model.questions.length > 1;
+  const answeredCount = model.questions.filter((question) => question.answered).length;
+  const status = multiple
+    ? `Question ${activeIndex + 1} of ${model.questions.length} · answered: ${answeredCount}`
+    : undefined;
   const body = `${escapeHtml(shorten(active.prompt, 300))}\n`;
   const { rows, keyMap } = itemButtons(active.items, 0, ctx, active.multi ? "t" : "c");
-  const switchRow = keep([
-    activeIndex > 0 ? button("◀ Prev question", ctx, "q", String(activeIndex - 1)) : undefined,
-    button(`Question ${activeIndex + 1}/${model.questions.length}`, ctx, "q", String((activeIndex + 1) % model.questions.length)),
-    activeIndex < model.questions.length - 1 ? button("Next question ▶", ctx, "q", String(activeIndex + 1)) : undefined,
-  ]);
-  if (switchRow.length > 0) rows.unshift(switchRow);
+  if (multiple) {
+    const switchRow = keep([
+      activeIndex > 0 ? button("◀ Prev question", ctx, "q", String(activeIndex - 1)) : undefined,
+      button(`Question ${activeIndex + 1}/${model.questions.length}`, ctx, "q", String((activeIndex + 1) % model.questions.length)),
+      activeIndex < model.questions.length - 1 ? button("Next question ▶", ctx, "q", String(activeIndex + 1)) : undefined,
+    ]);
+    if (switchRow.length > 0) rows.unshift(switchRow);
+  }
   const actions: TelegramButton[] = [];
   if (active.allowCustom) {
     const custom = button("✏️ Type an answer", ctx, "i");
@@ -265,6 +350,9 @@ function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire"
   return { text: header(model.title, status, [body]), rows, keyMap, page: 0, pages: 1 };
 }
 
+/** What a tool-approval card says about typed text: a message denies the call and gives the new instructions. */
+const APPROVAL_HINT = "Send a message to deny and give new instructions.";
+
 function renderApproval(model: Extract<DialogModel, { kind: "approval" }>, ctx: RenderContext): RenderedDialog {
   const body = model.detail ? `<pre>${escapeHtml(clean(model.detail).slice(0, 900))}</pre>\n` : "";
   const buttons: TelegramButton[] = [];
@@ -275,29 +363,101 @@ function renderApproval(model: Extract<DialogModel, { kind: "approval" }>, ctx: 
     buttons.push(built);
     keyMap.set(String(index), option.key);
   });
-  buttons.push(...cancelRow(ctx));
-  return { text: header(model.title, undefined, [body]), rows: chunk(buttons), keyMap, page: 0, pages: 1 };
+  // A Cancel beside a Deny is the same answer twice, and its name says neither what it does nor what it ends.
+  if (!model.options.some((option) => option.key === "deny")) buttons.push(...cancelRow(ctx));
+  return { text: header(model.title, undefined, [body, `${escapeHtml(APPROVAL_HINT)}\n`]), rows: chunk(buttons), keyMap, page: 0, pages: 1 };
 }
 
 function renderConfirm(model: Extract<DialogModel, { kind: "confirm" }>, ctx: RenderContext): RenderedDialog {
-  const body = model.message ? `${escapeHtml(shorten(model.message, 900))}\n` : "";
+  const body = model.message ? `${escapeHtml(messageBody(model.message))}\n` : "";
+  if (model.confirmLabel) {
+    // The host named its own buttons (e.g. Delete / Cancel): use them, not Yes / No.
+    const answers = keep([
+      button(shorten(model.confirmLabel, MAX_LABEL), ctx, "y"),
+      button(shorten(confirmDeclineLabel(model), MAX_LABEL), ctx, "n"),
+    ]);
+    return { text: header(model.title, undefined, [body]), rows: [answers], keyMap: new Map(), page: 0, pages: 1 };
+  }
   const rows = [keep([button("✅ Yes", ctx, "y"), button("❌ No", ctx, "n")]), cancelRow(ctx)];
   return { text: header(model.title, undefined, [body]), rows, keyMap: new Map(), page: 0, pages: 1 };
 }
 
+const DETAIL_BUDGET = 900;
+const HAS_LINK = /https?:\/\//i;
+
+/**
+ * An input's detail as Telegram text. A line with a link is kept whole, however long: a link cut in the
+ * middle is not tappable. The other lines fill the budget that the links leave, in order, and are dropped
+ * from the end once it is spent.
+ */
+function detailBody(detail: string): string {
+  const lines = clean(detail).split("\n");
+  const linkCost = lines.filter((line) => HAS_LINK.test(line)).reduce((sum, line) => sum + line.length + 1, 0);
+  let budget = Math.max(0, DETAIL_BUDGET - linkCost);
+  let room = true;
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (HAS_LINK.test(line)) {
+      kept.push(line);
+      continue;
+    }
+    if (!room) continue;
+    if (line.length + 1 > budget) {
+      room = false;
+      continue;
+    }
+    budget -= line.length + 1;
+    kept.push(line);
+  }
+  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
+  return kept.join("\n");
+}
+
 function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: RenderContext): RenderedDialog {
   // Plain text, not `<pre>`: Telegram makes a bare URL tappable and copyable.
+  const steps = model.steps && model.steps.length > 0
+    ? [`${model.steps
+        .map((step) => (step.current ? `<b>${escapeHtml(shorten(step.label, 20))}</b>` : escapeHtml(shorten(step.label, 20))))
+        .join(" › ")}\n\n`]
+    : [];
+  const detail = model.detail ? detailBody(model.detail) : "";
   const body = [
-    model.detail ? `${escapeHtml(clean(model.detail).slice(0, 900))}\n` : "",
+    ...steps,
+    detail ? `${escapeHtml(detail)}\n` : "",
     model.placeholder ? `<pre>${escapeHtml(shorten(model.placeholder, 300))}</pre>\n` : "",
     model.secret ? "<i>Secret input: send a message; the bot will not echo it.</i>\n" : "",
     "Send a message as the input, or tap Cancel.",
   ];
-  return { text: header(model.title, undefined, body), rows: [cancelRow(ctx)], keyMap: new Map(), page: 0, pages: 1 };
+  // The input's extra buttons (e.g. Skip) sit above Cancel, as a select's do.
+  const extras = keep((model.extraActions ?? []).map((extra) => button(shorten(extra.label, MAX_LABEL), ctx, "k", extra.key)));
+  return { text: header(model.title, undefined, body), rows: [...chunk(extras), cancelRow(ctx)], keyMap: new Map(), page: 0, pages: 1 };
 }
 
 /** Progress lines keep their line breaks: each line is shortened on its own,
  * and whole lines are dropped from the end once the 900-character budget is spent. */
+/**
+ * A confirmation's message as Telegram text: each line shortened on its own,
+ * so the host's line breaks and paragraph breaks survive; whole lines are
+ * dropped from the end once the 900-character budget is spent.
+ */
+function messageBody(text: string): string {
+  const kept: string[] = [];
+  let total = 0;
+  for (const raw of text.split("\n")) {
+    const line = shorten(raw, 900);
+    if (line === "") {
+      if (kept.length > 0 && kept[kept.length - 1] !== "") kept.push("");
+      continue;
+    }
+    const cost = line.length + (kept.length > 0 ? 1 : 0);
+    if (total + cost > 900) break;
+    kept.push(line);
+    total += cost;
+  }
+  while (kept.length > 0 && kept[kept.length - 1] === "") kept.pop();
+  return kept.join("\n");
+}
+
 function progressBody(text: string): string {
   const kept: string[] = [];
   let total = 0;
@@ -324,14 +484,57 @@ function renderProgress(model: Extract<DialogModel, { kind: "progress" }>, ctx: 
 }
 
 /** Read-only panel: the text plus one way out (§4.6.5 #12). */
+/** Bytes of HTML one info message carries; the rest of the message is buttons and header. */
+const INFO_PAGE_BYTES = 3400;
+
+/** The title of a read-only panel that the host did not name, on every message it is drawn on. */
+export const PANEL_TITLE = "Panel";
+
+/** A panel's text cut into pages (HTML split at block boundaries so no tag is cut). */
+function infoPages(model: Extract<DialogModel, { kind: "info" }>): string[] {
+  return model.html === true ? splitTelegramHtml(model.text, INFO_PAGE_BYTES) : [`<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>`];
+}
+
+/**
+ * What a read-only panel leaves on its message when it closes: its title and the page the user last
+ * saw (`page`, clamped), then one status line. No buttons. `redact` is applied to the text before it
+ * is cut, as `renderDialog` does for a live draw.
+ */
+export function closedPanelHtml(
+  model: Extract<DialogModel, { kind: "info" }>,
+  page: number,
+  status: string,
+  redact?: (text: string) => string,
+): string {
+  const shown = redact ? redactModel(model, redact) : model;
+  const pages = infoPages(shown);
+  const body = pages[Math.min(Math.max(0, page), pages.length - 1)] ?? "";
+  return `${header(shown.title ?? PANEL_TITLE, undefined, [`${body}\n`])}\n\n${escapeHtml(status)}`;
+}
+
+/**
+ * A read-only panel: the text (one page of it for HTML), the panel's own action buttons, paging, and
+ * the renderer's Close when the panel has none of its own.
+ */
 function renderInfo(model: Extract<DialogModel, { kind: "info" }>, ctx: RenderContext): RenderedDialog {
-  const body = `<pre>${escapeHtml(clean(model.text).slice(0, 3000))}</pre>\n`;
+  const pages = infoPages(model);
+  const count = Math.max(1, pages.length);
+  const page = Math.min(Math.max(0, ctx.page ?? 0), count - 1);
+  const body = `${pages[page] ?? ""}\n`;
+  const actions = model.actions ?? [];
+  const buttons = actions.map((action) => button(action.label, ctx, "c", action.key)).filter((built): built is TelegramButton => built !== undefined);
+  const keyMap = new Map<string, string>();
+  actions.forEach((action) => keyMap.set(action.key, action.key));
+  const rows = chunk(buttons);
+  const nav = pageNav(count, page, ctx);
+  if (nav.length > 0) rows.push(nav);
+  if (model.closable) rows.push(cancelRow(ctx, "Close"));
   return {
-    text: header(model.title ?? "Terminal", undefined, [body]),
-    rows: [cancelRow(ctx, "Close")],
-    keyMap: new Map(),
-    page: 0,
-    pages: 1,
+    text: header(model.title ?? PANEL_TITLE, count > 1 ? `Page ${page + 1}/${count}` : undefined, [body]),
+    rows: fitRows(rows),
+    keyMap,
+    page,
+    pages: count,
   };
 }
 
