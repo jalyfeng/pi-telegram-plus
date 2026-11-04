@@ -216,6 +216,49 @@ describe("dynamic command ordering", () => {
   });
 });
 
+describe("recent commands in BotMenu", () => {
+  it("leaves a recent command the host catalog does not have out of the menu", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      {
+        recent: ["scoped-models"],
+        tuiCommands: [{ name: "settings", description: "Open settings", source: "builtin" }],
+      },
+    );
+    expect(commands.some((c) => c.command === "scoped_models")).toBe(false);
+  });
+
+  it("keeps a recent command the host catalog has, ordered by recent use", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      {
+        recent: ["zulu", "middle"],
+        tuiCommands: [
+          { name: "alpha", description: "Alpha", source: "builtin" },
+          { name: "middle", description: "Middle", source: "builtin" },
+          { name: "zulu", description: "Zulu", source: "builtin" },
+        ],
+      },
+    );
+    const names = commands.map((c) => c.command);
+    expect(names).toContain("zulu");
+    expect(names).toContain("middle");
+    expect(names.indexOf("zulu")).toBeLessThan(names.indexOf("middle"));
+    expect(names.indexOf("middle")).toBeLessThan(names.indexOf("alpha"));
+  });
+
+  it("keeps a recent plugin-served command even when the host catalog lacks it", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      {
+        recent: ["stop"],
+        tuiCommands: [{ name: "settings", description: "Open settings", source: "builtin" }],
+      },
+    );
+    expect(commands.some((c) => c.command === "stop")).toBe(true);
+  });
+});
+
 describe("Telegram menu refresh scheduling", () => {
   afterEach(() => {
     vi.useRealTimers();

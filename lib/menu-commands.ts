@@ -142,9 +142,13 @@ export function buildTelegramMenuCommandsFull(
   }
   for (const command of pi.getCommands()) noteCatalog(command.name, command.description, true);
   const catalogAvailable = (options.tuiCommands?.length ?? 0) > 0;
+  // One rule for every entry, static or recent: with a captured catalog, a name
+  // is offered only if the host serves it or the plugin serves it on Telegram.
+  const offeredHere = (n: string | undefined): boolean =>
+    !catalogAvailable || !n || catalogNames.has(n) || TELEGRAM_SERVED_COMMANDS.has(n);
   for (const command of TELEGRAM_MENU_COMMANDS) {
     const n = toTelegramCommandName(command.command);
-    if (catalogAvailable && n && !catalogNames.has(n) && !TELEGRAM_SERVED_COMMANDS.has(n)) continue;
+    if (!offeredHere(n)) continue;
     // The static copy is a fallback wording; the live host description wins so
     // the BotMenu never shows text the host itself stopped using.
     addCommand(command.command, hostDescription(n) ?? command.description);
@@ -178,7 +182,7 @@ export function buildTelegramMenuCommandsFull(
   }
   for (const name of options.recent ?? []) {
     const n = toTelegramCommandName(name);
-    if (!n) continue;
+    if (!n || !offeredHere(n)) continue;
     if (commands.has(n) || seenDynamic.has(n)) continue;
     seenDynamic.add(n);
     dynamic.push({ name, desc: undefined });
