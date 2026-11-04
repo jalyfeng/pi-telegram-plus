@@ -2424,3 +2424,28 @@ describe("tsp input title from styled spans (#68)", () => {
     });
   });
 });
+
+describe("tsp login field is secret (#71)", () => {
+  it("masks a field the login sheet puts in its prompt row, as pi does for every login prompt", () => {
+    const field = {
+      describe: () => ({ k: "input", p: { text: "", placeholder: undefined } }),
+      handleInput: () => undefined,
+    };
+    const sheet = makeComponent({
+      k: "overlay",
+      p: { role: "omp.overlay.login", head: "Sign in to MockAuth" },
+      c: [
+        {
+          k: "col",
+          p: { role: "omp.login.prompt" },
+          c: [{ k: "text", p: { role: "omp.login.label", text: "Paste the authorization code, then press Enter" } }, field],
+        },
+      ],
+    });
+    expect(tspLoginAdapter.read(sheet, ctxFor())).toMatchObject({
+      kind: "input",
+      title: "Paste the authorization code",
+      secret: true,
+    });
+  });
+});

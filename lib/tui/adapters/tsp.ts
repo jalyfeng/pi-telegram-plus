@@ -1496,6 +1496,8 @@ export const tspPrefsAdapter: DialogAdapter = {
  * line OMP's login dialog puts above the field. */
 type PromptScan = {
   input: NodeFound<"input">;
+  /** The field sits in the login sheet's prompt row (see {@link secretOAuthField}). */
+  loginField?: boolean;
   label?: string;
   detail?: string;
   /** The step title of a wizard step (`omp.mcpAdd.title`), when the host marks one. */
@@ -1506,6 +1508,8 @@ type PromptScan = {
 
 type ScanState = {
   lastText?: string;
+  /** How many login prompt rows (`omp.login.prompt`) the scan is inside of right now. */
+  loginDepth: number;
   detail: string[];
   detailSeen: Set<object>;
   heading?: string;
@@ -1522,6 +1526,23 @@ const PROMPT_DETAIL_ROLES = new Set([
   "omp.login.shortcut",
   "omp.mcpAdd.lead",
 ]);
+
+/** The login sheet's row holding one prompt's label and field (`LoginDialogComponent`'s `omp.login.prompt`). */
+const LOGIN_PROMPT_ROLE = "omp.login.prompt";
+
+/** The device code row of the login sheet (`LoginDialogComponent`'s `omp.login.code`); a device-code sheet is not a paste. */
+const LOGIN_CODE_ROLE = "omp.login.code";
+
+/**
+ * The OAuth manual code field: a field in the login sheet's prompt row of a sign-in that has no device code.
+ * pi treats everything its login dialog asks as a secret (pi-login.ts); on OMP only the browser-OAuth paste
+ * (`showManualInput`, which carries the sign-in link and no device code) is masked, so the device-code flow
+ * keeps its own plain answer.
+ */
+function secretOAuthField(component: object, found: PromptScan): boolean {
+  if (found.loginField !== true) return false;
+  return findDescribedNode(component, (node) => isObject(node.p) && node.p.role === LOGIN_CODE_ROLE) === undefined;
+}
 
 /** The MCP add wizard's phase strip, its step title and the tone of the step on screen. */
 const WIZARD_PROGRESS_ROLE = "omp.mcpAdd.progress";
@@ -1588,6 +1609,7 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
     const detail = state.detail.length > 0 ? state.detail.join("\n") : undefined;
     return {
       input: { owner, keypath: "", props },
+      ...(state.loginDepth > 0 ? { loginField: true } : {}),
       ...(state.lastText === undefined ? {} : { label: state.lastText }),
       ...(detail === undefined ? {} : { detail }),
       ...(state.heading === undefined ? {} : { heading: state.heading }),
@@ -1609,26 +1631,32 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
   if (isObject(node.p) && typeof node.p.role === "string" && PROMPT_DETAIL_ROLES.has(node.p.role)) {
     collectPromptDetail(node, state);
   }
-  const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
-  if (!children) return undefined;
-  for (const child of children) {
-    if (!isObject(child)) continue;
-    const component = describableChild(child);
-    if (component) {
-      const found = scanPromptRoot(component, depth + 1, visited, state);
+  const loginPrompt = role === LOGIN_PROMPT_ROLE;
+  if (loginPrompt) state.loginDepth += 1;
+  try {
+    const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
+    if (!children) return undefined;
+    for (const child of children) {
+      if (!isObject(child)) continue;
+      const component = describableChild(child);
+      if (component) {
+        const found = scanPromptRoot(component, depth + 1, visited, state);
+        if (found) return found;
+        continue;
+      }
+      if (visited.has(child)) continue;
+      visited.add(child);
+      const found = scanPromptNode(child as NativeNodeLike, owner, depth, visited, state);
       if (found) return found;
-      continue;
     }
-    if (visited.has(child)) continue;
-    visited.add(child);
-    const found = scanPromptNode(child as NativeNodeLike, owner, depth, visited, state);
-    if (found) return found;
+    return undefined;
+  } finally {
+    if (loginPrompt) state.loginDepth -= 1;
   }
-  return undefined;
 }
 
 function findPrompt(component: object): PromptScan | undefined {
-  return scanPromptRoot(component, 0, new Set<object>(), { detail: [], detailSeen: new Set<object>() });
+  return scanPromptRoot(component, 0, new Set<object>(), { detail: [], detailSeen: new Set<object>(), loginDepth: 0 });
 }
 
 /** Trailing hints the terminal needs but Telegram does not ("…, then press
@@ -1905,7 +1933,7 @@ export const tspInputAdapter: DialogAdapter = {
       return { kind: "unsupported", what: "OMP text prompt closed or no longer an input" };
     }
     const title = found.heading ?? promptTitle(found.label) ?? "Input";
-    const secret = ownerMasks(found.input.owner) || SECRET_TITLE.test(title);
+    const secret = ownerMasks(found.input.owner) || SECRET_TITLE.test(title) || secretOAuthField(component, found);
     const placeholder = tspText(found.input.props.placeholder).trim();
     // An optional step may be left empty: its footer's label (Continue) or "Skip" answers that.
     const skip = wizardOptional(component) ? [{ label: wizardNextLabel(component) ?? "Skip", key: WIZARD_SKIP_KEY }] : undefined;
