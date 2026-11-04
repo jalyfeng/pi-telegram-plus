@@ -897,3 +897,33 @@ describe("command gateway /new across a runtime replacement", () => {
     expect(takePendingNotices()).toEqual([]);
   });
 });
+
+describe("/restart result (#62)", () => {
+  it("queues the result onto the ack for the replacement runtime", async () => {
+    takePendingNotices();
+    const transport = fakeTransport();
+    const origin = new OriginTracker({ isEditorFocused: () => true, readDraft: () => "", writeDraft: () => true });
+    const focus = new FocusTracker();
+    const gateway = new CommandGateway({
+      bridge: fakeBridge(Promise.resolve()),
+      origin,
+      output: new OutputCapture(transport, origin),
+      focus,
+      isEnabled: () => true,
+      hostName: () => "omp",
+      hostState: () => ({ host: "omp", mode: {}, editor: {} }),
+      readDraft: () => "",
+    });
+    gateway.start();
+
+    await gateway.run({ name: "restart", args: "", origin: { chatId: 7 }, transport });
+
+    const notices = takePendingNotices();
+    expect(notices).toEqual([expect.objectContaining({
+      chatId: 7,
+      editMessageId: 1,
+      html: "<b>▶️ /restart</b>\n\n✅ Restarted.",
+    })]);
+    gateway.dispose();
+  });
+});
