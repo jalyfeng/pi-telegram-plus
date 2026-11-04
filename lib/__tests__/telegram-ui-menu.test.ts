@@ -9,7 +9,7 @@ function setup(onMenuMessage?: (messageId: number) => void) {
   let nextId = 100;
   const renders: TelegramButton[][][] = [];
   const transport = {
-    sendText: vi.fn(async () => [{ message_id: nextId++ }]),
+    sendText: vi.fn(async (_chatId: number, _text: string) => [{ message_id: nextId++ }]),
     sendButtons: vi.fn(async (_chatId: number, _text: string, rows: TelegramButton[][]) => { renders.push(rows); return { message_id: nextId++ }; }),
     editText: vi.fn(async () => undefined),
     editButtons: vi.fn(async (_chatId: number, _messageId: number, _text: string, rows: TelegramButton[][]) => { renders.push(rows); }),
@@ -146,5 +146,23 @@ describe("telegram ui menu() edit-in-place", () => {
     expect(transport.removeInlineKeyboard).toHaveBeenCalledWith(CHAT, 100);
     await ui.closeMenu();
     expect(transport.removeInlineKeyboard).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("telegram ui notify() without a live menu", () => {
+  it("sends the text without a raw level label, with the emoji prefix for warnings and errors", async () => {
+    const env = setup();
+    const { transport, ui } = env;
+    ui.notify("Telegram disconnected for this folder.", "info");
+    ui.notify("Bot removed: omp", "warning");
+    ui.notify("Must be a number 0-10", "error");
+    await vi.waitFor(() => expect(transport.sendText).toHaveBeenCalledTimes(3));
+    const texts = transport.sendText.mock.calls.map((c) => c[1]);
+    expect(texts).toEqual([
+      "Telegram disconnected for this folder.",
+      "⚠️ Bot removed: omp",
+      "❌ Must be a number 0-10",
+    ]);
+    expect(texts.some((t) => /<b>(info|warning|error)<\/b>/.test(t))).toBe(false);
   });
 });

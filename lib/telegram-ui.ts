@@ -137,9 +137,10 @@ export function createTelegramUiRuntime(deps: {
         // Inside a command's call chain the line belongs to that command's message
         // (one command, one message); otherwise it is a message of its own.
         const prefix = level === "error" ? "❌ " : level === "warning" ? "⚠️ " : "";
-        if (routeCommandNotice(`${prefix}${escapeHtml(redact(message))}`)) return;
+        const text = `${prefix}${escapeHtml(redact(message))}`;
+        if (routeCommandNotice(text)) return;
         const fid = activeFlowByTarget.get(target);
-        void sendOrReplaceText(chatId, messageThreadId, sourceMessageId, `<b>${escapeHtml(String(level))}</b>\n${escapeHtml(redact(message))}`, fid);
+        void sendOrReplaceText(chatId, messageThreadId, sourceMessageId, text, fid);
       };
 
       // Live menu message (keyboard still attached). Successive menu() calls edit it
