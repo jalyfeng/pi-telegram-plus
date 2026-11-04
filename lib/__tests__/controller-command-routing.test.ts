@@ -357,6 +357,25 @@ describe("Terminal-only commands from Telegram", () => {
     run.mockRestore();
   });
 
+  it("answers /context with and without arguments with the terminal hint and never reaches the host", async () => {
+    const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
+    const submit = vi.fn(() => true);
+    const harness = createHarness({
+      bridge: createBridge({
+        submit,
+        getCommands: async () => [{ name: "context", description: "Show context usage", source: "builtin" as const }],
+      }),
+    });
+
+    await send(harness.controller, "/context");
+    await send(harness.controller, "/context detail");
+
+    expect(harness.calls.filter((call) => call.text === "/context only works in the terminal.")).toHaveLength(2);
+    expect(run).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    run.mockRestore();
+  });
+
   it("answers /tree and /copy with the terminal hint and never reaches the host", async () => {
     const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
     const submit = vi.fn(() => true);

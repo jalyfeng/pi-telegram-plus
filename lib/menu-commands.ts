@@ -50,7 +50,7 @@ const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description?: string }> =
 const CORE_COMMAND_PRIORITY = [
   "tools", "agents", "permissions", "hooks", "skills", "plugins", "marketplace",
   "plan", "goal", "review", "theme", "trust", "init", "help", "commands",
-  "clear", "cost", "context", "diff", "undo", "redo",
+  "clear", "cost", "diff", "undo", "redo",
 ];
 
 // Commands the plugin itself dispatches from Telegram (handlers in

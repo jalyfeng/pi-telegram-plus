@@ -401,7 +401,7 @@ describe("/more overflow keyboard", () => {
 });
 
 describe("terminal-only commands in BotMenu", () => {
-  const terminalOnly = ["local", "dump", "open", "stats", "trace", "record", "live", "git", "tree", "copy", "mcp"];
+  const terminalOnly = ["local", "dump", "open", "stats", "trace", "record", "live", "git", "tree", "copy", "mcp", "context"];
   const hostCatalog = (names: string[]) => names.map((name) => ({ name, description: `host ${name}`, source: "builtin" as const }));
 
   it("does not list /tree or /copy in the curated menu when no host catalog is captured", () => {
