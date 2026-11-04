@@ -967,7 +967,7 @@ describe("who closed a dialog and what they tapped", () => {
       focus.closeToEditor();
       await settle();
 
-      expect(lastText(transport)).toContain("✅ sk-test-123");
+      expect(lastText(transport)).toContain("✅ Sent an answer");
       expect(lastText(transport)).not.toContain("Answered in the terminal");
     } finally {
       vi.useRealTimers();
@@ -995,8 +995,29 @@ describe("who closed a dialog and what they tapped", () => {
     expect(broker.handleText(session, "sk-test-123", 57)).toEqual({ handled: true });
     await settle();
 
-    expect(lastText(transport)).toContain("✅ sk-test-123");
+    expect(lastText(transport)).toContain("✅ Sent an answer");
     expect(lastText(transport)).not.toContain("Answered in the terminal");
+  });
+
+  it("does not echo a plain input's typed text into the closing summary", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, focus, session } = await scripted(
+        { kind: "input", title: "Paste your API key", secret: false },
+        () => false,
+      );
+      expect(broker.handleText(session, "sk-test-123", 57)).toEqual({ handled: true });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+      expect(lastText(transport)).toContain("✅ Sent an answer");
+      expect(lastText(transport)).not.toContain("sk-test-123");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("says the terminal closed the dialog when the Telegram tap moved it to another list", async () => {

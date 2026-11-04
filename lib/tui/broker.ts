@@ -865,7 +865,9 @@ export class DialogBroker {
       // Decided here, while the input is still the secret field: by the time the dialog closes,
       // the model may already show the progress that the submit started.
       session.answeredSecret = secret;
-      session.lastAction = secret ? "Submitted (hidden)" : typedAnswerLabel(text);
+      // The ask dialog's typed answer is the model's answer, so its text is the summary's line; an input's text
+      // is whatever the user typed into an ordinary field, and stays out of the summary.
+      session.lastAction = secret ? "Submitted (hidden)" : session.model.kind === "questionnaire" ? typedAnswerLabel(text) : "Sent an answer";
     }
     const driven = this.inOwnerScope(session, () => purpose === "input" || purpose === "editor"
       ? this.act(subject, { type: "submit", text }, ctx)
