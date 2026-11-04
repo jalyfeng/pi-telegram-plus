@@ -130,6 +130,20 @@ function editDiffMarkdown(result: unknown): string {
   return `${fence}diff\n${shown}${truncated ? "\n(diff truncated)" : ""}\n${fence}`;
 }
 
+/**
+ * The `[path#TAG]` line OMP puts on its own line in read, write, and edit results: the
+ * reference the model cites for a later edit (`hashlineFormatHeader` in the native
+ * module: a path, then a 4-hex content tag). It is model-facing, not part of the outcome.
+ */
+const HASHLINE_RESULT_HEADER = /^\[[^[\]\n]+#[0-9A-Fa-f]{4}\]$/;
+const HASHLINE_RESULT_TOOLS = new Set(["read", "write", "edit"]);
+
+/** The result text with OMP's hashline header lines removed, for the tools that emit them. */
+function withoutHashlineHeaders(toolName: string, text: string): string {
+  if (!HASHLINE_RESULT_TOOLS.has(toolName)) return text;
+  return text.split("\n").filter((line) => !HASHLINE_RESULT_HEADER.test(line.replace(/\r$/, ""))).join("\n");
+}
+
 function stringifyShort(value: unknown, max = 900): string {
   let text: string;
   if (typeof value === "string") text = value;
@@ -423,6 +437,11 @@ export function registerTelegramRenderer(
   const toolArgs = new Map<string, unknown>();
   /** Full mode: the one message each tool call is shown in, edited as the call progresses. */
   const fullToolCalls = new Map<string, { chatId: number; messageId: number; summaryHtml: string }>();
+  /**
+   * Full mode: the send of each call's start message. The host does not await the start
+   * handler, so a fast call can end while its start message is still being sent.
+   */
+  const fullToolStarts = new Map<string, Promise<void>>();
 
   /** §4.7.4: replace this chat's tracked secrets before any escaping happens. */
   const redactFor = (turn: TelegramTurn | undefined, text: string): string => {
@@ -554,13 +573,17 @@ export function registerTelegramRenderer(
    * Full mode: the call's start message is its one message. Sent without the inline
    * dedupe, which is keyed on text and would hide a repeated call.
    */
-  const sendFullToolStart = async (toolCallId: string, brief: string): Promise<void> => {
+  const sendFullToolStart = (toolCallId: string, brief: string): Promise<void> => {
     const turn = deps.getActiveTurn();
     const chatId = turn?.chatId ?? defaultChats()[0];
     const summaryHtml = escapeHtml(redactFor(turn, brief));
-    const messageId = await sendToTurn(summaryHtml);
-    if (chatId === undefined || messageId === undefined) return;
-    fullToolCalls.set(toolCallId, { chatId, messageId, summaryHtml });
+    const started = (async () => {
+      const messageId = await sendToTurn(summaryHtml);
+      if (chatId === undefined || messageId === undefined) return;
+      fullToolCalls.set(toolCallId, { chatId, messageId, summaryHtml });
+    })();
+    fullToolStarts.set(toolCallId, started);
+    return started;
   };
 
   /**
@@ -794,6 +817,7 @@ export function registerTelegramRenderer(
     toolArgs.clear();
     toolUpdateAt.clear();
     fullToolCalls.clear();
+    fullToolStarts.clear();
     workflowNoticeSent = false;
     pendingError = undefined;
     attachRetryEvents();
@@ -823,7 +847,7 @@ export function registerTelegramRenderer(
     toolArgs.set(event.toolCallId, event.args);
     const brief = formatToolBrief(event.toolName, event.args);
     if (level === "full") {
-      await sendFullToolStart(event.toolCallId, brief);
+      await sendFullToolStart(event.toolCallId, brief).catch(renderLog.swallow("warn", "tool start send failed", { toolCallId: event.toolCallId }));
       return;
     }
     await sendInlineEvent(brief);
@@ -862,6 +886,10 @@ export function registerTelegramRenderer(
     }
     const level = renderLevel(deps.getConfig(), "tool");
     toolUpdateAt.delete(event.toolCallId);
+    const starting = fullToolStarts.get(event.toolCallId);
+    fullToolStarts.delete(event.toolCallId);
+    // A failed start send was logged by the start handler; the call then has no message to edit.
+    await starting?.catch(() => undefined);
     const call = fullToolCalls.get(event.toolCallId);
     fullToolCalls.delete(event.toolCallId);
     const args = toolArgs.get(event.toolCallId);
@@ -880,7 +908,8 @@ export function registerTelegramRenderer(
     const parts = extractToolResultParts(event.result);
     const header = `${event.isError ? "❌" : "✅"} <b>${escapeHtml(event.toolName)}</b>`;
     const diff = event.toolName === "edit" ? editDiffMarkdown(event.result) : "";
-    const resultSource = [parts.body, diff].filter((text) => text.trim()).join("\n\n");
+    const body = withoutHashlineHeaders(event.toolName, parts.body);
+    const resultSource = [body, diff].filter((text) => text.trim()).join("\n\n");
     let resultHtml: string;
     if (resultSource.trim()) {
       const rendered = markdownToTelegramHtml(redactFor(deps.getActiveTurn(), resultSource));

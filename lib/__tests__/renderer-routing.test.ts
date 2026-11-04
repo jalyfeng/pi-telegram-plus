@@ -380,7 +380,7 @@ describe("Telegram tool-call lines are readable, one per call", () => {
 });
 
 describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
-  function createFullModeHarness(options: { failStart?: boolean } = {}) {
+  function createFullModeHarness(options: { failStart?: boolean; sendDelayMs?: number } = {}) {
     const handlers = new Map<string, Array<(event: any) => Promise<void>>>();
     const sent: Array<{ chatId: number; text: string; messageId: number }> = [];
     const edits: Array<{ chatId: number; messageId: number; text: string }> = [];
@@ -393,6 +393,7 @@ describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
           startFailed = true;
           throw new Error("send failed");
         }
+        if (options.sendDelayMs) await new Promise((resolve) => setTimeout(resolve, options.sendDelayMs));
         const messageId = ++nextMessageId;
         sent.push({ chatId, text, messageId });
         return [{ message_id: messageId }];
@@ -421,10 +422,12 @@ describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
       getActiveTurn: () => getCurrentTelegramTurn(),
       hasActiveTurns: () => true,
     });
+    // The host does not await extension handlers: `dispatch` returns without waiting for them.
+    const dispatch = (event: string, payload: any) => Promise.all((handlers.get(event) ?? []).map((handler) => handler(payload)));
     const emit = async (event: string, payload: any) => {
-      await Promise.all((handlers.get(event) ?? []).map((handler) => handler(payload)));
+      await dispatch(event, payload);
     };
-    return { emit, sent, edits };
+    return { emit, dispatch, sent, edits };
   }
 
   const turn = (): TelegramTurn => ({ chatId: 111, queuedAttachments: [] });
@@ -498,6 +501,62 @@ describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
     });
 
     expect(edits.at(-1)!.text).not.toContain("diff");
+  });
+
+  it("edits the start message when the call ends before its start message is sent", async () => {
+    const { emit, dispatch, sent, edits } = createFullModeHarness({ sendDelayMs: 20 });
+
+    await runWithTelegramTurn(turn(), async () => {
+      // A fast write: the host emits its end while the start message is still being sent.
+      const starting = dispatch("tool_execution_start", { toolCallId: "write-1", toolName: "write", args: { path: "two.md", content: "one\n" } });
+      await emit("tool_execution_end", {
+        toolCallId: "write-1",
+        toolName: "write",
+        isError: false,
+        result: { content: [{ type: "text", text: "Successfully wrote 4 bytes to two.md" }], details: {} },
+      });
+      await starting;
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("🔧 write: two.md");
+    expect(edits).toHaveLength(1);
+    expect(edits[0].messageId).toBe(sent[0].messageId);
+    expect(edits[0].text).toContain("Successfully wrote 4 bytes to two.md");
+  });
+
+  it("drops the hashline header from a write result, shown with the call", async () => {
+    const { emit, edits } = createFullModeHarness();
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "write-2", toolName: "write", args: { path: "two.md", content: "one\n" } });
+      await emit("tool_execution_end", {
+        toolCallId: "write-2",
+        toolName: "write",
+        isError: false,
+        result: { content: [{ type: "text", text: "[two.md#B686]\nSuccessfully wrote 4 bytes to two.md" }], details: {} },
+      });
+    });
+
+    const final = edits.at(-1)!.text;
+    expect(final).toContain("Successfully wrote 4 bytes to two.md");
+    expect(final).not.toContain("[two.md#B686]");
+  });
+
+  it("keeps a bracketed line that is not an OMP hashline header in a bash result", async () => {
+    const { emit, edits } = createFullModeHarness();
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "bash-h", toolName: "bash", args: { command: "cat x" } });
+      await emit("tool_execution_end", {
+        toolCallId: "bash-h",
+        toolName: "bash",
+        isError: false,
+        result: { content: [{ type: "text", text: "[two.md#B686]" }] },
+      });
+    });
+
+    expect(edits.at(-1)!.text).toContain("[two.md#B686]");
   });
 
   it("sends the result as a new message when the start message could not be sent", async () => {
