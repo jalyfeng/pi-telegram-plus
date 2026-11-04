@@ -878,6 +878,11 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     refreshStatus();
   }));
 
+  // A prompt typed in the terminal ends the host origin (see clearOnTerminalSubmit in controller.ts).
+  pi.on("input", (event) => {
+    controller.terminalInput(event);
+  });
+
   pi.on("session_shutdown", () => {
     disposeRuntime();
     if (runtimeState.dispose === disposeRuntime) runtimeState.dispose = undefined;

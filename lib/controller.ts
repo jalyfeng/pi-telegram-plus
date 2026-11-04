@@ -27,6 +27,7 @@ import { log } from "./logger.ts";
 import { commandErrorMessage, getRunnerMode, restoreRunnerUiContext, setRunnerUiContext, TELEGRAM_EXTENSION_MODE } from "./pi-compat.ts";
 import { isOmpHost } from "./session-capture.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "./turn-context.ts";
+import { currentCommandScope } from "./tui/command-context.ts";
 import { OriginTracker, SCOPE_MAX_MS, type CommandScope } from "./tui/origin.ts";
 import { FocusTracker } from "./tui/focus.ts";
 import { OutputCapture, type NoticeTarget, type TurnNotice } from "./tui/output.ts";
@@ -69,7 +70,24 @@ export function createHostOriginTracker() {
     turn(): TelegramTurn | undefined {
       return current;
     },
+    clear(): void {
+      current = undefined;
+    },
   };
+}
+
+/**
+ * A prompt the user submits in the terminal ends the host origin: its turn is the user's own, not
+ * host-started activity of a Telegram message. The host reports that submit as an `input` event with
+ * `source: "interactive"`. The plugin's own submits of host commands also reach the editor, so the
+ * caller passes whether it runs inside a Telegram command, and those keep the origin.
+ */
+export function clearOnTerminalSubmit(
+  origins: { clear(): void },
+  event: { source: string },
+  inTelegramCommand: boolean,
+): void {
+  if (event.source === "interactive" && !inTelegramCommand) origins.clear();
 }
 
 /** The turns a host notice or reply belongs to: the running Telegram turns, or the remembered origin when none runs. */
@@ -144,6 +162,8 @@ export type TelegramController = {
   dispose(options?: { handOver?: boolean }): void;
   /** The Telegram message host-started turns belong to (the last prompt or host command); see createHostOriginTracker. */
   hostOriginTurn(): TelegramTurn | undefined;
+  /** A host `input` event: a terminal submit ends the host origin (see clearOnTerminalSubmit). */
+  terminalInput(event: { source: string }): void;
 };
 
 /**
@@ -2033,6 +2053,7 @@ export function createTelegramController(deps: {
     startTui,
     showPaged: (target, title, html) => dialogBroker.showPaged(target, title, html),
     hostOriginTurn: () => hostOrigins.turn(),
+    terminalInput: (event) => clearOnTerminalSubmit(hostOrigins, event, currentCommandScope() !== undefined),
     dispose(options) {
       // The output hands its final render over before the broker settles a dialog into it,
       // so a settled dialog's summary is written by the replacement runtime (P2-21).

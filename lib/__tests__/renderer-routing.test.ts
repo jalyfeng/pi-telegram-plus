@@ -1,9 +1,10 @@
+import { clearOnTerminalSubmit, createHostOriginTracker } from "../controller.ts";
 import { describe, expect, it, vi } from "vitest";
 import { registerTelegramRenderer } from "../renderer.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "../turn-context.ts";
 import type { TelegramTransport, TelegramTurn } from "../types.ts";
 
-function createRendererHarness(options: { tool?: "hidden" | "brief" | "full"; activeTurn?: () => TelegramTurn | undefined } = {}) {
+function createRendererHarness(options: { tool?: "hidden" | "brief" | "full"; activeTurn?: () => TelegramTurn | undefined; hasActiveTurns?: boolean } = {}) {
   const handlers = new Map<string, Array<(event: any) => Promise<void>>>();
   const sent: Array<{ chatId: number; text: string; messageThreadId?: number; replyToMessageId?: number; richMarkdown?: string }> = [];
   const actions: Array<{ chatId: number; action: string; messageThreadId?: number }> = [];
@@ -41,7 +42,7 @@ function createRendererHarness(options: { tool?: "hidden" | "brief" | "full"; ac
     getConfig: () => ({ botToken: "token", activeChatId: 111, tool: options.tool ?? "full", thinking: "brief" }),
     transport,
     getActiveTurn: options.activeTurn ?? (() => getCurrentTelegramTurn()),
-    hasActiveTurns: () => true,
+    hasActiveTurns: () => options.hasActiveTurns ?? true,
   });
 
   const emit = async (event: string, payload: any) => {
@@ -662,3 +663,21 @@ describe("Telegram reply target for a host-started turn (#61, #60)", () => {
     expect(sent).toEqual([expect.objectContaining({ chatId: 111, replyToMessageId: 77, text: expect.stringContaining("forced turn answer") })]);
   });
 });
+
+describe("a terminal prompt's reply does not quote a Telegram message (#61)", () => {
+  it("after a terminal submit the reply has no reply_to again", async () => {
+    const origins = createHostOriginTracker();
+    origins.note({ chatId: 111, sourceMessageId: 77 });
+    // No Telegram turn runs: the host reports no active turns, as index.ts does.
+    const { emit, sent } = createRendererHarness({ activeTurn: () => origins.turn(), hasActiveTurns: false });
+
+    await emit("message_end", { message: { role: "assistant", content: "host-started answer" } });
+    clearOnTerminalSubmit(origins, { source: "interactive" }, false);
+    await emit("message_end", { message: { role: "assistant", content: "terminal answer" } });
+
+    expect(sent[0]).toEqual(expect.objectContaining({ replyToMessageId: 77, text: expect.stringContaining("host-started answer") }));
+    expect(sent[1]).toEqual(expect.objectContaining({ chatId: 111, text: expect.stringContaining("terminal answer") }));
+    expect(sent[1]?.replyToMessageId).toBeUndefined();
+  });
+});
+
