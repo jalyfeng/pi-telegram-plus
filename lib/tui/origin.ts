@@ -52,7 +52,7 @@ export type CommandScope = {
   endReason?: ScopeEndReason;
 };
 
-export type ScopeEndReason = "idle" | "replaced" | "timeout" | "error" | "disposed";
+export type ScopeEndReason = "idle" | "replaced" | "superseded" | "timeout" | "error" | "disposed";
 
 export type ScopeDeps = {
   isEditorFocused(): boolean;
@@ -128,6 +128,19 @@ export class OriginTracker {
   markSubmitFallback(scope: CommandScope): void {
     const timer = setTimeout(() => this.markSubmitDone(scope), SUBMIT_FALLBACK_MS);
     timer.unref?.();
+  }
+
+  /**
+   * A new Telegram prompt is about to reach the host. A command whose submit
+   * already completed and that is only inside its idle window ends now, so the
+   * prompt's own dialogs are not drawn on that command's message. A command
+   * still running (submit not done, e.g. a `/goal` turn) is left alone.
+   */
+  supersede(): boolean {
+    const scope = this.activeScope;
+    if (!scope || !scope.submitDone) return false;
+    this.end(scope, "superseded");
+    return true;
   }
 
   end(scope: CommandScope, reason: ScopeEndReason): void {

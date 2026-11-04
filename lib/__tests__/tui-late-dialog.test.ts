@@ -147,3 +147,21 @@ describe("broker edit queue", () => {
     }
   });
 });
+
+describe("a dialog from a prompt that arrives after a finished command", () => {
+  it("is not drawn on the finished command's message", async () => {
+    const { ui, origin, broker, sent } = setup([{ chatId: 42, sourceMessageId: 7, queuedAttachments: [] } as TelegramTurn]);
+    const scope = origin.begin({ chatId: 42 }, "agents", "/agents", "");
+    scope.telegramMessageId = 500;
+    origin.markSubmitDone(scope);
+    // Still inside the idle window: the command's own output has stopped, nothing has ended it yet.
+    // The controller supersedes the still-open window when a new Telegram prompt is handed to the host.
+    origin.supersede();
+
+    const selector = new ExtensionSelectorComponent(() => undefined);
+    runOutsideCommand(() => ui.setFocus(selector));
+    await flush();
+    expect(broker.current()?.telegram?.messageId).not.toBe(500);
+    expect(sent.some((entry) => entry.messageId === 500 && entry.kind === "edit")).toBe(false);
+  });
+});

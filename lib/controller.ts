@@ -1245,6 +1245,9 @@ export function createTelegramController(deps: {
       return;
     }
 
+    // A finished command still in its idle window must not own this prompt's dialogs (#26).
+    originTracker.supersede();
+
     // TUI parity: a message behaves exactly like typing in the terminal.
     // While the main loop runs its own turn, steer into it; while background
     // agents run with the main loop idle, hold and deliver a plain prompt once

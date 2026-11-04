@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTelegramController, type TelegramController } from "../controller.ts";
 import { CommandGateway } from "../tui/gateway.ts";
+import { OriginTracker } from "../tui/origin.ts";
 import type { CapturedAgentSession, TelegramTransport } from "../types.ts";
 import { hostOwnsPrompts, type TuiBridgeAdapter } from "../tui-bridge.ts";
 
@@ -144,6 +145,25 @@ describe("Telegram shell commands", () => {
       expect(harness.calls.some((call) => call.text?.includes("PTP_BASH_OK"))).toBe(false);
     } finally {
       runText.mockRestore();
+    }
+  });
+
+  it("a Telegram prompt sent while the command is still in its idle window supersedes that command's scope", async () => {
+    const endSpy = vi.spyOn(OriginTracker.prototype, "end");
+    // No captured host in this harness: let the real gateway run the scope and submit.
+    const ready = vi.spyOn(CommandGateway.prototype as unknown as { hostReady(name: string): Promise<boolean> }, "hostReady").mockResolvedValue(true);
+    try {
+      const harness = createHarness();
+      await send(harness.controller, "!echo hi", 13);
+      await vi.waitFor(() => expect(harness.bridge.submit).toHaveBeenCalledWith("!echo hi"));
+
+      await send(harness.controller, "please run the probe", 14);
+
+      await vi.waitFor(() => expect(endSpy).toHaveBeenCalledWith(expect.objectContaining({ label: "!" }), "superseded"));
+      expect(harness.session.prompt).toHaveBeenCalled();
+    } finally {
+      ready.mockRestore();
+      endSpy.mockRestore();
     }
   });
 
