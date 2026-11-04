@@ -44,9 +44,10 @@ type HostRecord = Record<string, unknown>;
 export type NativeNodeLike = HostRecord & { k?: unknown; p?: unknown; c?: unknown; key?: unknown };
 
 /**
- * The text of a picker's preview children (the selected item's preview): a `kv` as `k: v` pairs on one
- * line, a `badge` in brackets, a `text` as its words, a `row` of its children on one line, a column's
- * children one line each. Nested components are not followed; a preview that holds none adds nothing.
+ * The text of a picker's preview children (the selected item's preview), one line per child: a `text` as
+ * its words, a `kv` as `k: v` pairs (one line inline, one line per fact in a grid), a `badge` in brackets,
+ * a `row` of its children on one line, a `col` of its children one line each. Nested components and other
+ * kinds are not followed.
  */
 function previewLines(children: readonly unknown[]): string[] {
   const lines: string[] = [];
@@ -58,7 +59,12 @@ function previewLines(children: readonly unknown[]): string[] {
         .filter(isObject)
         .map((item) => `${tspText(item.k)}: ${tspText(item.v)}`)
         .filter((pair) => pair !== ": ");
-      if (pairs.length > 0) lines.push(pairs.join(" · "));
+      // An inline fact line is one line; a grid of facts is one line per fact.
+      if (node.p.layout === "inline") {
+        if (pairs.length > 0) lines.push(pairs.join(" · "));
+      } else {
+        lines.push(...pairs);
+      }
     } else if (node.k === "badge" && isObject(node.p) && tspText(node.p.text) !== "") {
       lines.push(`[${tspText(node.p.text)}]`);
     } else if (node.k === "text") {
@@ -734,12 +740,15 @@ export const tspPickerAdapter: DialogAdapter = {
       const detail = item.detail === undefined ? "" : tspText(item.detail);
       const description = [detail, ...pickerFacts(item.facts, props.columns)].filter((part) => part !== "").join(" · ") || undefined;
       const badges = pickerBadges(item.badges);
-      // The pin mark leads the label, as the terminal row draws `📌 <name>`.
+      // The pin and the status dot are the row's marks, drawn before the name as the terminal row does
+      // (`📌 ● <name>`); the label is the name alone, so a summary never carries a glyph.
       const pin = item.icon === "pin" ? "📌 " : "";
-      const label = `${pin}${pickerStatusMark(item.dot)}${tspText(item.label)}`;
+      const mark = `${pin}${pickerStatusMark(item.dot)}`;
+      const name = tspText(item.label);
       return {
         key: item.id as string,
-        label: item.disabled ? `${label} (disabled)` : label,
+        label: item.disabled ? `${name} (disabled)` : name,
+        ...(mark !== "" ? { mark } : {}),
         ...(description ? { description, note: description } : {}),
         ...(badges.length > 0 ? { badges } : {}),
         current: currentIds.includes(item.id),
@@ -786,15 +795,16 @@ export const tspPickerAdapter: DialogAdapter = {
         ...(extraActions.length > 0 ? { extraActions } : {}),
       };
     }
-    // The highlighted item's preview (`compact` facts and role chips) is text under the list's head.
-    const preview = previewLines(Array.isArray(found.node.c) ? (found.node.c as unknown[]) : []).join("\n");
+    // The highlighted item's preview is text under the list's head. It goes in the subtitle, which keeps its
+    // line breaks: the body's notice is drawn as one line.
+    const preview = previewLines(Array.isArray(found.node.c) ? (found.node.c as unknown[]) : []);
+    const head = [subtitle, ...preview].filter((line): line is string => line !== undefined && line !== "").join("\n");
     return {
       kind: "select",
       title,
       items,
       total: typeof props.total === "number" ? props.total : items.length,
-      ...(subtitle ? { subtitle } : {}),
-      ...(preview !== "" ? { notice: preview } : {}),
+      ...(head !== "" ? { subtitle: head } : {}),
       ...(search ? { search } : {}),
       ...(extraActions.length > 0 ? { extraActions } : {}),
     };

@@ -244,18 +244,20 @@ describe("tsp picker read", () => {
     // The dashboard declares its kind column; facts show only for declared columns.
     const withColumns = { ...props, columns: [{ id: "kind", format: "dim" }] };
     const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: withColumns }), ctxFor()));
+    // The status glyph is the row's mark, not part of its label: a summary names the label alone.
     expect(model.items).toEqual([
-      { key: "iw4iz75jiyl7", label: "⦸ deskvnc", description: "kind: Skills", note: "kind: Skills", current: false, focused: false },
+      { key: "iw4iz75jiyl7", label: "deskvnc", mark: "⦸ ", description: "kind: Skills", note: "kind: Skills", current: false, focused: false },
       {
         key: "cmqiua1rv6z1",
-        label: "○ hf-cli",
+        label: "hf-cli",
+        mark: "○ ",
         description: "kind: Skills",
         note: "kind: Skills",
         badges: ["shadowed"],
         current: false,
         focused: false,
       },
-      { key: "1i3hwdoo7tpkv", label: "● go-add-cleanup", description: "kind: Rules", note: "kind: Rules", current: false, focused: false },
+      { key: "1i3hwdoo7tpkv", label: "go-add-cleanup", mark: "● ", description: "kind: Rules", note: "kind: Rules", current: false, focused: false },
     ]);
     const rendered = renderDialog(model, { sessionId: "s1", generation: 1 });
     expect(rendered.text).toContain("⦸ deskvnc");
@@ -2353,7 +2355,8 @@ describe("tsp picker pin marker (#38)", () => {
       },
     };
     const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
-    expect(model.items.map((item) => item.label)).toEqual(["📌 pinned one", "plain one"]);
+    expect(model.items.map((item) => item.label)).toEqual(["pinned one", "plain one"]);
+    expect(model.items.map((item) => item.mark)).toEqual(["📌 ", undefined]);
   });
 });
 
@@ -2510,11 +2513,12 @@ describe("tsp picker confirm button duplicates the tappable row (#65, #60)", () 
 });
 
 describe("tsp picker preview of the highlighted item (#64)", () => {
-  it("shows the compact preview's facts and role chips as text under the list", () => {
+  it("shows the compact preview's facts and role chips as text under the list head, one block per child", () => {
     const tree = {
       k: "picker",
       p: { items: [{ id: "m", label: "mock-model" }], selected: "m" },
       c: [
+        { k: "text", p: { text: "mock-model", role: "omp.picker.title" } },
         {
           k: "kv",
           p: {
@@ -2530,15 +2534,39 @@ describe("tsp picker preview of the highlighted item (#64)", () => {
       ],
     };
     const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
-    expect(model.notice).toBe("ctx: 200k · out: 4.1k · price: free\n[default] [smol]");
+    expect(model.subtitle).toBe("mock-model\nctx: 200k · out: 4.1k · price: free\n[default] [smol]");
+    expect(model.notice).toBeUndefined();
+  });
+
+  it("puts each item of a grid of facts on its own line, the title on its own line", () => {
+    const tree = {
+      k: "picker",
+      p: { items: [{ id: "m", label: "mock-model" }], selected: "m", subtitle: "Models" },
+      c: [
+        { k: "text", p: { text: "Mock Model", role: "omp.picker.title" } },
+        {
+          k: "kv",
+          p: {
+            items: [
+              { k: [{ t: "Context" }], v: [{ t: "200,000" }] },
+              { k: [{ t: "Compacts at" }], v: [{ t: "170,000 · 85% of window" }] },
+              { k: [{ t: "Max output" }], v: [{ t: "4,096" }] },
+            ],
+          },
+        },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.subtitle).toBe(
+      "Models\nMock Model\nContext: 200,000\nCompacts at: 170,000 · 85% of window\nMax output: 4,096",
+    );
   });
 
   it("shows nothing extra when the picker has no preview", () => {
     const tree = { k: "picker", p: { items: [{ id: "m", label: "mock-model" }] } };
-    expect(asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor())).notice).toBeUndefined();
+    expect(asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor())).subtitle).toBeUndefined();
   });
 });
-
 describe("tsp prefs submenu opened in the terminal (#34)", () => {
   const editorNode = { k: "col", p: { role: "omp.prefs.editor" }, c: [{ k: "list", p: { selected: "dark" }, c: [] }] };
 
