@@ -281,6 +281,11 @@ export type DialogSession = {
    */
   /** `key`: the button's action key when the tap ran a button (a close or back key is navigation, not an answer). */
   telegramAction?: { cancelled: boolean; drawn?: string; summary?: string; key?: string };
+  /**
+   * Summary lines of Telegram answers that moved the dialog on: the dialog they left behind is closed
+   * by the terminal, so its line is kept here and written with the close that follows.
+   */
+  tapLines?: string[];
 };
 
 /**

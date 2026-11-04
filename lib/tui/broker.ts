@@ -184,6 +184,8 @@ function typedAnswerLabel(text: string): string {
   return line.length > TYPED_ANSWER_MAX ? `${line.slice(0, TYPED_ANSWER_MAX - 1)}…` : line;
 }
 
+/** Actions that answer a step: the dialog they leave behind is a new one, and its close is not this tap's. */
+const ANSWER_ACTIONS: ReadonlySet<DialogAction["type"]> = new Set(["confirm", "choose", "approve", "submit"]);
 const TYPED_ANSWER_MAX = 200;
 
 /** An item's label as one line of plain text: no edge whitespace, no runs of spaces. */
@@ -517,7 +519,11 @@ export class DialogBroker {
       // The message is handed to the next dialog, so an answer Telegram already gave must leave its
       // line in the command's summaries now. A dialog nobody answered leaves none.
       const scope = this.scopes.get(session);
-      if (byTelegram && scope) scope.dialogSummaries.push(escapeHtml(this.redact(session, this.telegramSummary(session))));
+      if (scope) {
+        const lines = this.earlierLines(session);
+        if (byTelegram) lines.push(escapeHtml(this.redact(session, this.telegramSummary(session))));
+        if (lines.length > 0) scope.dialogSummaries.push(lines.join("\n"));
+      }
       return session.closedBy;
     }
 
@@ -535,6 +541,18 @@ export class DialogBroker {
    * there is nothing to report (an upload that finished, a spinner that stopped).
    */
   private closeSummary(session: DialogSession, byTelegram: boolean): string | null {
+    const own = this.ownCloseSummary(session, byTelegram);
+    const earlier = this.earlierLines(session);
+    if (earlier.length === 0) return own;
+    return [...earlier, ...(own === null ? [] : [own])].join("\n");
+  }
+
+  /** The answers that moved the dialog on before this close, as Telegram HTML, one line each. */
+  private earlierLines(session: DialogSession): string[] {
+    return (session.tapLines ?? []).map((line) => escapeHtml(this.redact(session, line)));
+  }
+
+  private ownCloseSummary(session: DialogSession, byTelegram: boolean): string | null {
     const redact = (text: string) => this.redact(session, text);
     // A panel button the user ran (not Close, which is a cancel tap) is an answer: its line is the
     // button's label, and the panel's text is not kept.
@@ -775,6 +793,7 @@ export class DialogBroker {
       ...(buttonKey !== undefined ? { key: buttonKey } : {}),
       ...(summary !== undefined ? { summary } : {}),
     };
+    const focusBefore = session.focus;
     const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
       session.telegramAction = previousAction;
@@ -797,7 +816,9 @@ export class DialogBroker {
         if (resolved.action.type === "toggle" || resolved.action.type === "cycle" || resolved.action.type === "submenu") {
           session.telegramAction = undefined;
         }
-        this.redrawAnswered(session);
+        // An answer that handed the message to another component left a different dialog behind (a confirm's
+        // No brings the list back on the same entry): the answer keeps its line, the close of that list is the terminal's.
+        this.redrawAnswered(session, ANSWER_ACTIONS.has(resolved.action.type) && session.focus !== focusBefore);
       } else {
         this.retire(session, this.deps.focus.current());
       }
@@ -836,6 +857,7 @@ export class DialogBroker {
     // put back if the write is refused.
     const answered = purpose === "input" || purpose === "editor";
     const before = { telegramAction: session.telegramAction, lastAction: session.lastAction, answeredSecret: session.answeredSecret };
+    const focusBefore = session.focus;
     if (answered) {
       // Text sent to a tool approval denies the call and becomes the next instruction: the card says so.
       const summary = session.model.kind === "approval" ? DENIED_BY_TEXT : undefined;
@@ -870,7 +892,7 @@ export class DialogBroker {
       return { handled: true, toast: "The host did not accept this input" };
     }
     if (this.session === session && session.state !== "closed") {
-      if (this.canDrive(session)) this.redrawAnswered(session);
+      if (this.canDrive(session)) this.redrawAnswered(session, answered && session.focus !== focusBefore);
       else this.retire(session, this.deps.focus.current());
     }
     return { handled: true };
@@ -881,15 +903,21 @@ export class DialogBroker {
    * set aside while the model is re-read and drawn, then re-anchored to what this draw says: a later
    * draw that says something different is the dialog moving on.
    */
-  private redrawAnswered(session: DialogSession): void {
+  private redrawAnswered(session: DialogSession, handedOver = false): void {
     const action = session.telegramAction;
     if (action === undefined) {
       this.redraw(session);
       return;
     }
+    const line = this.telegramSummary(session);
     session.telegramAction = undefined;
     this.redraw(session);
-    if (session.state !== "closed") session.telegramAction = { ...action, drawn: this.contentOf(session) };
+    if (session.state === "closed") return;
+    if (handedOver) {
+      session.tapLines = [...(session.tapLines ?? []), line];
+      return;
+    }
+    session.telegramAction = { ...action, drawn: this.contentOf(session) };
   }
 
   /** `/stop` (§4.5 rule 6): cancel the dialog this chat owns, if any. */

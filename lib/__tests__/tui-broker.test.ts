@@ -1607,3 +1607,45 @@ describe("the questionnaire's answers and typed answers in the closing summary (
     }
   });
 });
+
+describe("a tap that hands the message to another dialog keeps its line (#41)", () => {
+  const lastText = (transport: { edits: Array<{ text: string }> }) => transport.edits.at(-1)?.text ?? "";
+
+  it("ends with the tap's answer and then the terminal's close of the dialog it handed over to", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+        // Both dialogs belong to one host entry, so the list the confirm hands over to keeps this session.
+        const entry = { kind: "select", source: "omp" } as unknown as EntryInfo;
+        const { broker, transport, focus } = makeBroker({ turns: [turn(42)], entry });
+        focus.openDialog({});
+        await settle();
+        const session = broker.current()!;
+        const list = {};
+        let current: DialogModel = { kind: "confirm", title: "Delete session?" };
+        session.adapter = {
+          id: "scripted",
+          detect: () => true,
+          read: () => current,
+          act: (_component, action) => {
+            if (action.type === "confirm") {
+              current = { kind: "select", title: "Resume", items: [{ key: "s1", label: "session one" }], total: 1 };
+              focus.openDialog(list);
+            }
+            return true;
+          },
+        };
+        session.model = current;
+        broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
+        await settle();
+        await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+        focus.closeToEditor();
+        await settle();
+        await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+        expect(lastText(transport)).toContain("✅ No");
+        expect(lastText(transport)).toContain("Answered in the terminal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
