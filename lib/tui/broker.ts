@@ -793,7 +793,7 @@ export class DialogBroker {
       ...(buttonKey !== undefined ? { key: buttonKey } : {}),
       ...(summary !== undefined ? { summary } : {}),
     };
-    const focusBefore = session.focus;
+    const kindBefore = session.model.kind;
     const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
       session.telegramAction = previousAction;
@@ -816,9 +816,9 @@ export class DialogBroker {
         if (resolved.action.type === "toggle" || resolved.action.type === "cycle" || resolved.action.type === "submenu") {
           session.telegramAction = undefined;
         }
-        // An answer that handed the message to another component left a different dialog behind (a confirm's
-        // No brings the list back on the same entry): the answer keeps its line, the close of that list is the terminal's.
-        this.redrawAnswered(session, ANSWER_ACTIONS.has(resolved.action.type) && session.focus !== focusBefore);
+        const type = resolved.action.type;
+        const change = ANSWER_ACTIONS.has(type) ? "answer" : type === "key" || type === "question" ? "navigation" : undefined;
+        this.redrawAnswered(session, change, kindBefore);
       } else {
         this.retire(session, this.deps.focus.current());
       }
@@ -857,7 +857,7 @@ export class DialogBroker {
     // put back if the write is refused.
     const answered = purpose === "input" || purpose === "editor";
     const before = { telegramAction: session.telegramAction, lastAction: session.lastAction, answeredSecret: session.answeredSecret };
-    const focusBefore = session.focus;
+    const kindBefore = session.model.kind;
     if (answered) {
       // Text sent to a tool approval denies the call and becomes the next instruction: the card says so.
       const summary = session.model.kind === "approval" ? DENIED_BY_TEXT : undefined;
@@ -894,7 +894,7 @@ export class DialogBroker {
       return { handled: true, toast: "The host did not accept this input" };
     }
     if (this.session === session && session.state !== "closed") {
-      if (this.canDrive(session)) this.redrawAnswered(session, answered && session.focus !== focusBefore);
+      if (this.canDrive(session)) this.redrawAnswered(session, answered ? "answer" : undefined, kindBefore);
       else this.retire(session, this.deps.focus.current());
     }
     return { handled: true };
@@ -905,7 +905,7 @@ export class DialogBroker {
    * set aside while the model is re-read and drawn, then re-anchored to what this draw says: a later
    * draw that says something different is the dialog moving on.
    */
-  private redrawAnswered(session: DialogSession, handedOver = false): void {
+  private redrawAnswered(session: DialogSession, change: "answer" | "navigation" | undefined, kindBefore: string): void {
     const action = session.telegramAction;
     if (action === undefined) {
       this.redraw(session);
@@ -915,8 +915,13 @@ export class DialogBroker {
     session.telegramAction = undefined;
     this.redraw(session);
     if (session.state === "closed") return;
-    if (handedOver) {
-      session.tapLines = [...(session.tapLines ?? []), line];
+    // The tap is consumed once the dialog is published again with its keyboard, so the user is waiting on it,
+    // when the tap was navigation (a tab, a scope, a page) or when an answer brought a different kind of dialog
+    // back (a confirm's No brings the list). Only an answer keeps a line; the close that follows is the terminal's.
+    const keyboard = renderDialog(session.model, { sessionId: session.id, generation: session.generation, page: session.page }).rows.length > 0;
+    const consumed = change === "navigation" || (change === "answer" && session.model.kind !== kindBefore);
+    if (change !== undefined && consumed && keyboard) {
+      if (change === "answer") session.tapLines = [...(session.tapLines ?? []), line];
       return;
     }
     session.telegramAction = { ...action, drawn: this.contentOf(session) };

@@ -1003,7 +1003,7 @@ describe("who closed a dialog and what they tapped", () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
     try {
       const picker: DialogModel = { kind: "select", title: "Sessions", items: [{ key: "a", label: "alpha" }], total: 1, extraActions: [{ label: "All", mark: "● ", key: "scope:2" }] };
-      const { broker, transport, focus, session } = await scripted(picker, () => false);
+      const { broker, transport, focus, session } = await scripted(picker, (action) => action.type === "key");
       session.keyMap.set(session.generation, new Map([["scope:2", "scope:2"]]));
       broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "k", arg: "scope:2" });
       await settle();
@@ -1068,8 +1068,8 @@ describe("who closed a dialog and what they tapped", () => {
       focus.closeToEditor();
       await settle();
 
-      expect(lastText(transport)).toContain("Answered in the terminal");
-      expect(lastText(transport)).not.toContain("✅");
+      // The confirm was answered and a list came back on the same message: the answer keeps its line (#41).
+      expect(lastText(transport)).toContain("✅ No\nAnswered in the terminal");
     } finally {
       vi.useRealTimers();
     }
@@ -1649,42 +1649,63 @@ describe("the questionnaire's answers and typed answers in the closing summary (
   });
 });
 
-describe("a tap that hands the message to another dialog keeps its line (#41)", () => {
+describe("a tap whose dialog comes back interactive is consumed (#41)", () => {
   const lastText = (transport: { edits: Array<{ text: string }> }) => transport.edits.at(-1)?.text ?? "";
 
-  it("ends with the tap's answer and then the terminal's close of the dialog it handed over to", async () => {
+  it("ends with the answer's line, then the terminal's close, when a confirm's No brings the list back in the same picker", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
     try {
-        // Both dialogs belong to one host entry, so the list the confirm hands over to keeps this session.
-        const entry = { kind: "select", source: "omp" } as unknown as EntryInfo;
-        const { broker, transport, focus } = makeBroker({ turns: [turn(42)], entry });
-        focus.openDialog({});
-        await settle();
-        const session = broker.current()!;
-        const list = {};
-        let current: DialogModel = { kind: "confirm", title: "Delete session?" };
-        session.adapter = {
-          id: "scripted",
-          detect: () => true,
-          read: () => current,
-          act: (_component, action) => {
-            if (action.type === "confirm") {
-              current = { kind: "select", title: "Resume", items: [{ key: "s1", label: "session one" }], total: 1 };
-              focus.openDialog(list);
-            }
-            return true;
-          },
-        };
-        session.model = current;
-        broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
-        await settle();
-        await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
-        focus.closeToEditor();
-        await settle();
-        await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      // One component throughout: the confirm is a sub-state of the picker's own tree, as the host draws it.
+      const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+      focus.openDialog({});
+      await settle();
+      const session = broker.current()!;
+      let current: DialogModel = { kind: "confirm", title: "Delete session?" };
+      session.adapter = {
+        id: "scripted",
+        detect: () => true,
+        read: () => current,
+        act: (_component, action) => {
+          if (action.type === "confirm") current = { kind: "select", title: "Resume", items: [{ key: "s1", label: "session one" }], total: 1 };
+          return true;
+        },
+      };
+      session.model = current;
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      expect(session.telegramAction).toBeUndefined();
+      focus.closeToEditor();
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
 
-        expect(lastText(transport)).toContain("✅ No");
-        expect(lastText(transport)).toContain("Answered in the terminal");
+      expect(lastText(transport)).toContain("✅ No\nAnswered in the terminal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends a tab tap with the terminal's close, not with the tab's name", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const picker: DialogModel = { kind: "select", title: "Sessions", items: [{ key: "a", label: "alpha" }], total: 1, extraActions: [{ label: "All", mark: "● ", key: "scope:2" }] };
+      const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+      focus.openDialog({});
+      await settle();
+      const session = broker.current()!;
+      // A scope tab is navigation: the picker stays, with its keyboard, and only the terminal ends it.
+      session.adapter = { id: "scripted", detect: () => true, read: () => picker, act: () => true };
+      session.model = picker;
+      session.keyMap.set(session.generation, new Map([["scope:2", "scope:2"]]));
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "k", arg: "scope:2" });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+      expect(lastText(transport)).toContain("Answered in the terminal");
+      expect(lastText(transport)).not.toContain("All");
     } finally {
       vi.useRealTimers();
     }
