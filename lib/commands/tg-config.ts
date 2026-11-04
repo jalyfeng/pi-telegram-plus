@@ -66,17 +66,25 @@ export async function configRetryFlow(
 ): Promise<void> {
   const config = deps.getConfig();
   const currentRetry = config.retryCount ?? 3;
-  const inputValue = value ?? await ui.input("Retry count (0-10)", `Current: ${currentRetry}`);
-  if (!inputValue) return;
-  const n = parseInt(inputValue, 10);
-  if (!Number.isInteger(n) || n < 0 || n > 10) {
-    ui.notify("Must be a number 0-10", "error");
-    return;
+  let inputValue = value ?? await ui.input("Retry count (0-10)", `Current: ${currentRetry}`);
+  // An invalid typed value says why and keeps the prompt open; a value passed in is not asked again.
+  while (inputValue) {
+    const n = parseInt(inputValue, 10);
+    if (Number.isInteger(n) && n >= 0 && n <= 10) {
+      const next = { ...config, retryCount: n };
+      deps.setConfig(next);
+      await deps.persistConfig(next);
+      ui.notify(`${KEY_LABELS.retry} set to ${n}`, "info");
+      return;
+    }
+    // A value passed in is not asked again: the reason goes to the caller as a notice.
+    if (value !== undefined) {
+      ui.notify("Must be a number 0-10", "error");
+      return;
+    }
+    // The reason is the re-opened prompt's own placeholder, so it stays visible on the menu message.
+    inputValue = await ui.input("Retry count (0-10)", `Must be a number 0-10 (you sent "${inputValue}"). Current: ${currentRetry}`);
   }
-  const next = { ...config, retryCount: n };
-  deps.setConfig(next);
-  await deps.persistConfig(next);
-  ui.notify(`${KEY_LABELS.retry} set to ${n}`, "info");
 }
 
 export async function configBashFlow(

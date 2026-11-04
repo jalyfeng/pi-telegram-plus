@@ -999,6 +999,47 @@ describe("who closed a dialog and what they tapped", () => {
     expect(lastText(transport)).not.toContain("Answered in the terminal");
   });
 
+  it("ends a tab or scope tap with its label, not the marker the host draws on the active one", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const picker: DialogModel = { kind: "select", title: "Sessions", items: [{ key: "a", label: "alpha" }], total: 1, extraActions: [{ label: "All", mark: "● ", key: "scope:2" }] };
+      const { broker, transport, focus, session } = await scripted(picker, (action) => action.type === "key");
+      session.keyMap.set(session.generation, new Map([["scope:2", "scope:2"]]));
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "k", arg: "scope:2" });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+      expect(lastText(transport)).toContain("✅ All");
+      expect(lastText(transport)).not.toContain("●");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not echo a plain input's typed text into the closing summary", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, focus, session } = await scripted(
+        { kind: "input", title: "Paste your API key", secret: false },
+        () => false,
+      );
+      expect(broker.handleText(session, "sk-test-123", 57)).toEqual({ handled: true });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+      expect(lastText(transport)).toContain("✅ Sent an answer");
+      expect(lastText(transport)).not.toContain("sk-test-123");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("says the terminal closed the dialog when the Telegram tap moved it to another list", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
@@ -1027,8 +1068,8 @@ describe("who closed a dialog and what they tapped", () => {
       focus.closeToEditor();
       await settle();
 
-      expect(lastText(transport)).toContain("Answered in the terminal");
-      expect(lastText(transport)).not.toContain("✅");
+      // The confirm was answered and a list came back on the same message: the answer keeps its line (#41).
+      expect(lastText(transport)).toContain("✅ No\nAnswered in the terminal");
     } finally {
       vi.useRealTimers();
     }
@@ -1507,6 +1548,17 @@ describe("a read-only panel that closes keeps the page it showed", () => {
     expect(edit?.text).not.toContain("line 0 ");
   });
 
+  it("ends a choice with the item's name, not the mark the row draws before it", async () => {
+    const choice: DialogModel = { kind: "select", title: "Logout", items: [{ key: "a", label: "MockAuth (test only)", mark: "● " }], total: 1 };
+    const { broker, transport, session } = await openedPanel(choice);
+    session.keyMap.set(session.generation, new Map([["a", "a"]]));
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "c", arg: "a" });
+    await settle();
+
+    expect(lastEdit(transport)?.text).toContain("✅ MockAuth (test only)");
+    expect(lastEdit(transport)?.text).not.toContain("●");
+  });
+
   it("still ends a choice with its answer rather than the panel status", async () => {
     const choice: DialogModel = { kind: "select", title: "Pick", items: [{ key: "a", label: "alpha" }], total: 1 };
     const { broker, transport, session } = await openedPanel(choice);
@@ -1516,5 +1568,146 @@ describe("a read-only panel that closes keeps the page it showed", () => {
 
     expect(lastEdit(transport)?.text).toContain("✅ alpha");
     expect(lastEdit(transport)?.text).not.toContain("Closed");
+  });
+});
+
+describe("the questionnaire's answers and typed answers in the closing summary (#57, #58)", () => {
+  async function questionnaire(model: DialogModel) {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    const acts: DialogAction[] = [];
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: (_component, action) => {
+        acts.push(action);
+        if (action.type === "submit") focus.closeToEditor();
+        return true;
+      },
+    };
+    session.model = model;
+    return { broker, transport, focus, session, acts };
+  }
+  const lastText = (transport: { edits: Array<{ text: string }> }) => transport.edits.at(-1)?.text ?? "";
+
+  it("ends a submitted questionnaire with each question and its answer", async () => {
+    const { broker, transport, session } = await questionnaire({
+      kind: "questionnaire",
+      title: "Order",
+      active: 1,
+      canSubmit: true,
+      questions: [
+        { id: "t", prompt: "Pick toppings", multi: true, allowCustom: false, answered: true, answers: ["cheese", "olive"], items: [] },
+        { id: "s", prompt: "Pick a size", multi: false, allowCustom: false, answered: true, answers: ["large"], items: [] },
+      ],
+    });
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "k", arg: "enter" });
+    await settle();
+
+    expect(lastText(transport)).toContain("Pick toppings: cheese, olive");
+    expect(lastText(transport)).toContain("Pick a size: large");
+  });
+
+  it("says the message waits for a typed answer once Type an answer is tapped", async () => {
+    const { broker, transport, session } = await questionnaire({
+      kind: "questionnaire",
+      title: "Colour",
+      active: 0,
+      canSubmit: false,
+      questions: [{ id: "c", prompt: "Pick a colour", multi: false, allowCustom: true, answered: false, items: [{ key: "red", label: "red" }] }],
+    });
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "i" });
+    await settle();
+
+    expect(lastText(transport)).toContain("Send a message as the answer");
+  });
+
+  it("ends a typed answer to a single question with the answer's text", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, session } = await questionnaire({
+        kind: "questionnaire",
+        title: "Colour",
+        active: 0,
+        canSubmit: false,
+        questions: [{ id: "c", prompt: "Pick a colour", multi: false, allowCustom: true, answered: false, items: [{ key: "red", label: "red" }] }],
+      });
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "i" });
+      await settle();
+      expect(broker.handleText(session, "purple please", 57)).toEqual({ handled: true });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+      expect(lastText(transport)).toContain("✅ purple please");
+      expect(lastText(transport)).not.toContain("Sent an answer");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("a tap whose dialog comes back interactive is consumed (#41)", () => {
+  const lastText = (transport: { edits: Array<{ text: string }> }) => transport.edits.at(-1)?.text ?? "";
+
+  it("ends with the answer's line, then the terminal's close, when a confirm's No brings the list back in the same picker", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      // One component throughout: the confirm is a sub-state of the picker's own tree, as the host draws it.
+      const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+      focus.openDialog({});
+      await settle();
+      const session = broker.current()!;
+      let current: DialogModel = { kind: "confirm", title: "Delete session?" };
+      session.adapter = {
+        id: "scripted",
+        detect: () => true,
+        read: () => current,
+        act: (_component, action) => {
+          if (action.type === "confirm") current = { kind: "select", title: "Resume", items: [{ key: "s1", label: "session one" }], total: 1 };
+          return true;
+        },
+      };
+      session.model = current;
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "n" });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      expect(session.telegramAction).toBeUndefined();
+      focus.closeToEditor();
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+      expect(lastText(transport)).toContain("✅ No\nAnswered in the terminal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends a tab tap with the terminal's close, not with the tab's name", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const picker: DialogModel = { kind: "select", title: "Sessions", items: [{ key: "a", label: "alpha" }], total: 1, extraActions: [{ label: "All", mark: "● ", key: "scope:2" }] };
+      const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+      focus.openDialog({});
+      await settle();
+      const session = broker.current()!;
+      // A scope tab is navigation: the picker stays, with its keyboard, and only the terminal ends it.
+      session.adapter = { id: "scripted", detect: () => true, read: () => picker, act: () => true };
+      session.model = picker;
+      session.keyMap.set(session.generation, new Map([["scope:2", "scope:2"]]));
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: session.generation, op: "k", arg: "scope:2" });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+      focus.closeToEditor();
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+      expect(lastText(transport)).toContain("Answered in the terminal");
+      expect(lastText(transport)).not.toContain("All");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

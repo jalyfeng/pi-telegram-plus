@@ -17,6 +17,8 @@ import { confirmDeclineLabel } from "./model.ts";
 import type { DialogItem, DialogModel, SearchModel } from "./model.ts";
 
 /** §4.7.2: ten items per page, one button per row. */
+/** The hint every secret prompt carries; plugin prompts outside the host dialogs use it too. */
+export const SECRET_INPUT_HINT = "Secret input: send a message; the bot will not echo it.";
 export const PAGE_SIZE = 10;
 export const BUTTONS_PER_ROW = 3;
 const MAX_LABEL = 45;
@@ -42,6 +44,8 @@ export type RenderContext = {
   sessionId: string;
   generation: number;
   page?: number;
+  /** The next message from the chat is this dialog's typed answer (the Broker set it on a text button). */
+  awaitingText?: boolean;
   /** §4.7.4: applied to every string of the model *before* anything is escaped. */
   redact?: (text: string) => string;
 };
@@ -99,7 +103,7 @@ function itemLabel(item: DialogItem, multi = false): string {
   const current = item.current ? "✓" : "";
   const marker = [checkbox, cursor, current].filter((part) => part !== "").join("");
   const value = item.value ? `: ${shorten(item.value, 18)}` : "";
-  return shorten(`${marker}${marker ? " " : ""}${item.label}${value}`, MAX_LABEL);
+  return shorten(`${marker}${marker ? " " : ""}${item.mark ?? ""}${item.label}${value}`, MAX_LABEL);
 }
 
 /** Item buttons, one per row, labelled with cursor/state markers. */
@@ -211,7 +215,7 @@ function renderSelect(model: Extract<DialogModel, { kind: "select" }>, ctx: Rend
   // buttons (OMP /agents: 2 scope + 5 action + Search + Cancel) is rejected
   // by the Bot API (max 8 per row), so the whole list never reaches the chat.
   const extras = keep((model.extraActions ?? []).map(
-    (extra) => button(shorten(extra.label, MAX_LABEL), ctx, "k", extra.key),
+    (extra) => button(shorten(`${extra.mark ?? ""}${extra.label}`, MAX_LABEL), ctx, "k", extra.key),
   ));
   actions.push(...cancelRow(ctx));
   const nav = pageButtons(shown, page, ctx);
@@ -261,7 +265,7 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
     const values = item.values ?? [];
     if (item.hasSubmenu) {
       const arg = `${page}.${index}`;
-      const built = button(`▸ ${shorten(`${item.label}${item.value ? `: ${item.value}` : ""}`, MAX_LABEL)}`, ctx, "m", arg);
+      const built = button(`▸ ${shorten(`${item.mark ?? ""}${item.label}${item.value ? `: ${item.value}` : ""}`, MAX_LABEL)}`, ctx, "m", arg);
       if (!built) return;
       rows.push([built]);
       keyMap.set(arg, item.key);
@@ -314,6 +318,8 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
   };
 }
 
+const TYPED_ANSWER_HINT = "Send a message as the answer, or tap Cancel.";
+
 function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire" }>, ctx: RenderContext): RenderedDialog {
   const activeIndex = Math.max(0, Math.min(model.active, model.questions.length - 1));
   const active = model.questions[activeIndex];
@@ -326,7 +332,9 @@ function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire"
   const status = multiple
     ? `Question ${activeIndex + 1} of ${model.questions.length} · answered: ${answeredCount}`
     : undefined;
-  const body = `${escapeHtml(shorten(active.prompt, 300))}\n`;
+  const body = [`${escapeHtml(shorten(active.prompt, 300))}\n`];
+  // The same wording the input dialogs use for their text, so a typed answer is asked for the same way.
+  if (ctx.awaitingText) body.push(`${escapeHtml(TYPED_ANSWER_HINT)}\n`);
   const { rows, keyMap } = itemButtons(active.items, 0, ctx, active.multi ? "t" : "c");
   if (multiple) {
     const switchRow = keep([
@@ -347,7 +355,7 @@ function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire"
   }
   actions.push(...cancelRow(ctx));
   rows.push(...chunk(actions));
-  return { text: header(model.title, status, [body]), rows, keyMap, page: 0, pages: 1 };
+  return { text: header(model.title, status, body), rows, keyMap, page: 0, pages: 1 };
 }
 
 /** What a tool-approval card says about typed text: a message denies the call and gives the new instructions. */
@@ -378,7 +386,8 @@ function renderConfirm(model: Extract<DialogModel, { kind: "confirm" }>, ctx: Re
     ]);
     return { text: header(model.title, undefined, [body]), rows: [answers], keyMap: new Map(), page: 0, pages: 1 };
   }
-  const rows = [keep([button("✅ Yes", ctx, "y"), button("❌ No", ctx, "n")]), cancelRow(ctx)];
+  // Yes and No only: No is the decline, so a separate Cancel would be the same answer twice.
+  const rows = [keep([button("✅ Yes", ctx, "y"), button("❌ No", ctx, "n")])];
   return { text: header(model.title, undefined, [body]), rows, keyMap: new Map(), page: 0, pages: 1 };
 }
 
@@ -424,12 +433,13 @@ function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: Render
   const body = [
     ...steps,
     detail ? `${escapeHtml(detail)}\n` : "",
-    model.placeholder ? `<pre>${escapeHtml(shorten(model.placeholder, 300))}</pre>\n` : "",
-    model.secret ? "<i>Secret input: send a message; the bot will not echo it.</i>\n" : "",
+    // The host's placeholder is plain text, as the host writes it (not a code block).
+    model.placeholder ? `${escapeHtml(shorten(model.placeholder, 300))}\n` : "",
+    model.secret ? `<i>${escapeHtml(SECRET_INPUT_HINT)}</i>\n` : "",
     "Send a message as the input, or tap Cancel.",
   ];
   // The input's extra buttons (e.g. Skip) sit above Cancel, as a select's do.
-  const extras = keep((model.extraActions ?? []).map((extra) => button(shorten(extra.label, MAX_LABEL), ctx, "k", extra.key)));
+  const extras = keep((model.extraActions ?? []).map((extra) => button(shorten(`${extra.mark ?? ""}${extra.label}`, MAX_LABEL), ctx, "k", extra.key)));
   return { text: header(model.title, undefined, body), rows: [...chunk(extras), cancelRow(ctx)], keyMap: new Map(), page: 0, pages: 1 };
 }
 

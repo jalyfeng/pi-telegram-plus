@@ -1,7 +1,9 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import { readBotRegistry, readProjectBinding } from "../config.ts";
+import { readBotRegistry, readProjectBinding, updateBot } from "../config.ts";
+import { getTelegramBotUsername } from "../telegram-api.ts";
+import { log } from "../logger.ts";
 import type { TelegramInstanceMetadata } from "../instance-coordinator.ts";
 import type { TelegramInstanceCoordinator } from "../instance-coordinator.ts";
 import type { MenuUi, TelegramCommandDeps, TelegramConnectionState } from "./telegram-commands.ts";
@@ -120,6 +122,7 @@ function closeOnCancel(ui: TgMenuUi): TgMenuUi {
     ...(ui.inputSecret ? { inputSecret: async (title: string, placeholder?: string) => answered(await ui.inputSecret!(title, placeholder)) } : {}),
     ...(ui.menu ? { menu: async (title: string, options: string[], body?: string) => answered(await ui.menu!(title, options, body)) } : {}),
     ...(ui.menuMessageId ? { menuMessageId: ui.menuMessageId } : {}),
+    ...(ui.menuEnd ? { menuEnd: ui.menuEnd } : {}),
   };
 }
 
@@ -307,7 +310,23 @@ async function defaultBotMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string
 
 // ── Bot list (object-first: pick a bot → per-bot actions) ──────────────────
 
+const tgMenuLog = log.child("tg-menu");
+
+/** Store the getMe username of registered bots that have none yet (bots added
+ *  before the username was saved). Runs once per list entry, never per render;
+ *  a bot whose getMe fails keeps no username and is tried again on the next entry. */
+async function backfillBotUsernames(): Promise<void> {
+  const registry = await readBotRegistry();
+  for (const bot of registry.bots) {
+    if (bot.botUsername) continue;
+    const botUsername = await getTelegramBotUsername(bot.token, bot.apiBase)
+      .catch(tgMenuLog.swallow("warn", "getTelegramBotUsername failed while backfilling bot username"));
+    if (botUsername) await updateBot(bot.id, { botUsername });
+  }
+}
+
 async function botListMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): Promise<void> {
+  await backfillBotUsernames();
   while (true) {
     const registry = await readBotRegistry();
     if (registry.bots.length === 0) {
@@ -460,11 +479,17 @@ async function projectMenu(ui: MenuUi, deps: TelegramCommandDeps, cwd: string): 
         // flow awaits reconcile, so the next render shows the new state.
         await enableProjectFlow(ui, deps, cwd);
       } else {
-        const ok = await ui.confirm(
-          "Disconnect Telegram for this folder?",
-          "Telegram will stop responding. Reconnect only from the terminal with /tg.",
-        );
-        if (ok) await disableProjectFlow(ui, deps, cwd);
+        const question = "Disconnect Telegram for this folder?";
+        const message = "Telegram will stop responding. Reconnect only from the terminal with /tg.";
+        const ok = await ui.confirm(question, message);
+        if (ok) {
+          // The question and its answer stay on the menu message, with no keyboard.
+          await ui.menuEnd?.(question, message, "✅ Yes");
+          await disableProjectFlow(ui, deps, cwd);
+          // Disconnected: the menu ends here. Its message keeps the question, the
+          // answer and the disconnect notice, with no keyboard left to press.
+          return false;
+        }
       }
     }
     // loop re-renders Project (binding + live connection state)

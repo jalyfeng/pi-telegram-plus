@@ -27,7 +27,8 @@ import { log } from "./logger.ts";
 import { commandErrorMessage, getRunnerMode, restoreRunnerUiContext, setRunnerUiContext, TELEGRAM_EXTENSION_MODE } from "./pi-compat.ts";
 import { isOmpHost } from "./session-capture.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "./turn-context.ts";
-import { OriginTracker, type CommandScope } from "./tui/origin.ts";
+import { currentCommandScope } from "./tui/command-context.ts";
+import { OriginTracker, SCOPE_MAX_MS, type CommandScope } from "./tui/origin.ts";
 import { FocusTracker } from "./tui/focus.ts";
 import { OutputCapture, type NoticeTarget, type TurnNotice } from "./tui/output.ts";
 import { CommandGateway } from "./tui/gateway.ts";
@@ -55,6 +56,46 @@ function suppressedByShownError(target: NoticeTarget, html: string, turn: Telegr
 
 /** Forwards host notices raised during a Telegram turn to that turn's chat. The newest
  * active turn owns the notice; with no active turn the notice stays in the terminal. */
+/**
+ * The Telegram message that last started host activity (a prompt, or a command the host runs):
+ * host-started turns (a forced turn, a `/loop` repeat, a `/goal` continuation) belong to it, so
+ * their replies quote it and their host notices reach its chat (#61, #60).
+ */
+export function createHostOriginTracker() {
+  let current: TelegramTurn | undefined;
+  return {
+    note(origin: { chatId: number; messageThreadId?: number; sourceMessageId?: number }): void {
+      current = { chatId: origin.chatId, messageThreadId: origin.messageThreadId, sourceMessageId: origin.sourceMessageId, queuedAttachments: [] };
+    },
+    turn(): TelegramTurn | undefined {
+      return current;
+    },
+    clear(): void {
+      current = undefined;
+    },
+  };
+}
+
+/**
+ * A prompt the user submits in the terminal ends the host origin: its turn is the user's own, not
+ * host-started activity of a Telegram message. The host reports that submit as an `input` event with
+ * `source: "interactive"`. The plugin's own submits of host commands also reach the editor, so the
+ * caller passes whether it runs inside a Telegram command, and those keep the origin.
+ */
+export function clearOnTerminalSubmit(
+  origins: { clear(): void },
+  event: { source: string },
+  inTelegramCommand: boolean,
+): void {
+  if (event.source === "interactive" && !inTelegramCommand) origins.clear();
+}
+
+/** The turns a host notice or reply belongs to: the running Telegram turns, or the remembered origin when none runs. */
+export function turnsOrHostOrigin(active: TelegramTurn[], hostOrigin: TelegramTurn | undefined): TelegramTurn[] {
+  if (active.length > 0 || !hostOrigin) return active;
+  return [hostOrigin];
+}
+
 export function createTurnNotice(
   getTurns: () => TelegramTurn[],
   transport: Pick<TelegramTransport, "sendText">,
@@ -119,6 +160,10 @@ export type TelegramController = {
   showPaged(target: { chatId: number; messageThreadId?: number; messageId: number }, title: string, html: string): void;
   /** `handOver`: the runtime is being replaced or shut down; see OutputCapture.handOver (P2-21). */
   dispose(options?: { handOver?: boolean }): void;
+  /** The Telegram message host-started turns belong to (the last prompt or host command); see createHostOriginTracker. */
+  hostOriginTurn(): TelegramTurn | undefined;
+  /** A host `input` event: a terminal submit ends the host origin (see clearOnTerminalSubmit). */
+  terminalInput(event: { source: string }): void;
 };
 
 /**
@@ -130,6 +175,36 @@ function dialogBusyNotice(session: DialogSession): string {
   const model = session.model;
   const title = "title" in model ? model.title : undefined;
   return `A dialog is waiting in the terminal${title ? ` (${title})` : ""}. Answer it with the buttons, or send /stop to cancel.`;
+}
+
+/**
+ * Polls until the dialog a busy notice refers to is gone, then runs `remove` once (#73).
+ * The broker has no close event for the controller, so the check is a short interval;
+ * the watch also stops after `maxMs` (the scope cap), so it can never outlive a stuck dialog.
+ */
+export function watchDialogNotice(
+  isStillOpen: () => boolean,
+  remove: () => void,
+  options: { intervalMs?: number; maxMs?: number } = {},
+): () => void {
+  const intervalMs = options.intervalMs ?? 250;
+  const maxMs = options.maxMs ?? SCOPE_MAX_MS;
+  const startedAt = Date.now();
+  let timer: NodeJS.Timeout | undefined;
+  const stop = () => {
+    if (timer) clearInterval(timer);
+    timer = undefined;
+  };
+  timer = setInterval(() => {
+    if (isStillOpen()) {
+      if (Date.now() - startedAt >= maxMs) stop();
+      return;
+    }
+    stop();
+    remove();
+  }, intervalMs);
+  timer.unref?.();
+  return stop;
 }
 
 function getIncomingDocumentName(document?: TelegramDocument): string {
@@ -605,25 +680,20 @@ function createHostPromptUi(baseUi: unknown, telegramUi: ExtensionUIContext): Ex
       }
       const name = String(prop);
       if (name === "notify") {
-        // Notifications are not prompts: the terminal still prints them, and the chat keeps
-        // receiving what it used to. When the base UI is already the plugin's routed context -
+        // A notice a Telegram-issued command reports belongs to the chat that issued it: it is
+        // delivered there and never forwarded to the host's ui.notify, which would print it in the
+        // terminal transcript too. When the base UI is already the plugin's routed context -
         // which is exactly what pi hands a command context - its own notify reaches this chat,
-        // so copying it here would send the same line two or three times.
+        // and it is used as is.
         if (baseReachesChat) return value.bind(target);
         return (...args: unknown[]) => {
-          let result: unknown;
-          try {
-            result = (value as (...notifyArgs: unknown[]) => unknown).apply(target, args);
-          } catch {
-            // Host notification failures must not block the chat copy.
-          }
           try {
             const chatNotify = (telegramUi as unknown as Record<string, unknown>).notify;
             if (typeof chatNotify === "function") (chatNotify as (...a: unknown[]) => unknown).apply(telegramUi, args);
           } catch {
-            // Chat notification is best-effort.
+            // Chat notification is best-effort; there is no terminal fallback.
           }
-          return result;
+          return undefined;
         };
       }
       return value.bind(target);
@@ -764,10 +834,11 @@ async function holdThroughEnqueuedTurns(ctx: unknown, wasIdle: boolean): Promise
 // Host-control and terminal-only mappings (§9 decisions 21/22, §4.8): these run the
 // plugin's native handler instead of submitting to the host editor - editor
 // submission reloads the extension runtime outside pi's withSession sequencing.
-// copy/hotkeys/quit/exit are terminal-only mappings (stage 4 revisits them).
+// hotkeys/quit/exit are terminal-only mappings (stage 4 revisits them). /copy is
+// terminal-only too (terminal-only-commands.ts), so it never reaches this table.
 const NATIVE_HANDLER_COMMANDS: Record<string, true> = {
   new: true, reload: true, import: true,
-  copy: true, hotkeys: true, quit: true, exit: true,
+  hotkeys: true, quit: true, exit: true,
 };
 
 /** Plugin-owned bot-management commands: reachable even when the host bridge is down (v6 decision 48). */
@@ -885,11 +956,12 @@ export function createTelegramController(deps: {
     holdOpen: (): boolean => outputCapture.hasRunningBash(),
   });
   const secretStore = deps.secrets ?? new SecretStore();
+  const hostOrigins = createHostOriginTracker();
   const outputCapture = new OutputCapture(
     deps.transport,
     originTracker,
     secretStore,
-    createTurnNotice(() => deps.getActiveTurns?.() ?? [], deps.transport),
+    createTurnNotice(() => turnsOrHostOrigin(deps.getActiveTurns?.() ?? [], hostOrigins.turn()), deps.transport),
   );
   const commandGateway = new CommandGateway({
     bridge,
@@ -938,6 +1010,25 @@ export function createTelegramController(deps: {
     // there it must stay completely inert - see hostOwnsPrompts.
     enabled: () => hostOwnsPrompts(bridge),
   });
+  // The "dialog is waiting" notice is removed once the dialog it refers to has closed (#73).
+  const sendDialogBusyNotice = async (
+    busy: DialogSession,
+    chatId: number,
+    messageThreadId: number | undefined,
+    sourceMessageId: number | undefined,
+  ): Promise<void> => {
+    const sent = await deps.transport.sendText(chatId, dialogBusyNotice(busy), messageThreadId, sourceMessageId)
+      .catch(ctrlLog.swallow("warn", "sendText dialog busy notice failed", { chatId }));
+    const messageId = sent?.[0]?.message_id;
+    if (messageId === undefined) return;
+    watchDialogNotice(
+      () => dialogBroker.sessionFor(chatId, messageThreadId) === busy,
+      () => {
+        void deps.transport.deleteMessage(chatId, messageId)
+          .catch(ctrlLog.swallow("warn", "delete dialog busy notice failed", { chatId }));
+      },
+    );
+  };
   // Output too long for the command's message is paged on it by the broker.
   // attachPager only stores the callback; it starts nothing, so it stays here.
   outputCapture.attachPager((target, title, html) => dialogBroker.showPaged(target, title, html));
@@ -1210,6 +1301,7 @@ export function createTelegramController(deps: {
   // starts a fresh main-thread turn.
   const runMainDelivery = async (text: string, chatId: number, replaceMessageId: number | undefined, messageThreadId: number | undefined, sourceMessageId: number | undefined, onTaken: TakenSignal) => {
     const turn = deps.beginTelegramTurn(chatId, replaceMessageId, messageThreadId, sourceMessageId);
+    if (turn) hostOrigins.note({ chatId, messageThreadId, sourceMessageId });
     if (!turn) {
       // Target already has an active turn — reject with a busy message.
       if (replaceMessageId !== undefined) await deps.transport.editText(chatId, replaceMessageId, "⏳ π is busy. Try again shortly.");
@@ -1280,6 +1372,7 @@ export function createTelegramController(deps: {
       if (!existingTurn) {
         // No active turn to steer into — fall back to a new prompt.
         const turn = deps.beginTelegramTurn(chatId, undefined, messageThreadId, sourceMessageId);
+        if (turn) hostOrigins.note({ chatId, messageThreadId, sourceMessageId });
         if (!turn) {
           await deps.transport.sendText(chatId, "⏳ π is busy. Try again shortly.", messageThreadId, sourceMessageId);
           return;
@@ -1412,7 +1505,7 @@ export function createTelegramController(deps: {
     //
     // Host mode still has to hand the command context a *routed* ui: the context's own `ui`
     // is the host's raw one, whose `notify` only prints in the terminal, so a command that
-    // just reports something (`/changelog`, `/copy`, `/debug`) left the chat with nothing at
+    // just reports something (`/changelog`, `/debug`) left the chat with nothing at
     // all. The routed proxy keeps every prompt with the host and copies notifications to the
     // chat, which is the whole point of running the command here.
     const hostCommandUi = (ctx as { ui?: unknown }).ui;
@@ -1623,6 +1716,8 @@ export function createTelegramController(deps: {
       // A suffixed name keeps its suffix (`force` + `:read`), and usage records the base only.
       const hostName = suffixed?.served ? `${suffixed.served.name}${suffixed.suffix}` : served.name;
       const usageName = suffixed?.served ? suffixed.base : name;
+      // The host runs this command and whatever turns it starts: they belong to this message (#61).
+      hostOrigins.note({ chatId, messageThreadId, sourceMessageId });
       const handled = await commandGateway.run({
         name: hostName,
         args,
@@ -1780,8 +1875,7 @@ export function createTelegramController(deps: {
         if (busySession !== undefined) {
           // §4.2: the dialog owns the keyboard, so the shell command has nowhere
           // to land; say so instead of queueing it behind the dialog.
-          await deps.transport.sendText(chatId, dialogBusyNotice(busySession), messageThreadId, sourceMessageId)
-            .catch(ctrlLog.swallow("warn", "sendText dialog busy notice failed", { chatId }));
+          await sendDialogBusyNotice(busySession, chatId, messageThreadId, sourceMessageId);
           return;
         }
 
@@ -1913,8 +2007,7 @@ export function createTelegramController(deps: {
         // reach the prompt either (decision 54), so queueing a prompt behind it would only
         // bury the next six messages under a dialog nobody answered.
         if (dialogBroker.sessionFor(chatId, messageThreadId) !== undefined) {
-          await deps.transport.sendText(chatId, dialogBusyNotice(dialogSession), messageThreadId, sourceMessageId)
-            .catch(ctrlLog.swallow("warn", "sendText dialog busy notice failed", { chatId }));
+          await sendDialogBusyNotice(dialogSession, chatId, messageThreadId, sourceMessageId);
           return;
         }
       }
@@ -1959,6 +2052,8 @@ export function createTelegramController(deps: {
 
     startTui,
     showPaged: (target, title, html) => dialogBroker.showPaged(target, title, html),
+    hostOriginTurn: () => hostOrigins.turn(),
+    terminalInput: (event) => clearOnTerminalSubmit(hostOrigins, event, currentCommandScope() !== undefined),
     dispose(options) {
       // The output hands its final render over before the broker settles a dialog into it,
       // so a settled dialog's summary is written by the replacement runtime (P2-21).

@@ -85,7 +85,7 @@ describe("input dialog shows the login body as plain text", () => {
   it("renders without detail exactly as before", () => {
     const model: DialogModel = { kind: "input", title: "Paste your API key", placeholder: "sk-...", secret: false };
     expect(renderDialog(model, CTX).text).toBe(
-      "<b>Paste your API key</b>\n<pre>sk-...</pre>\nSend a message as the input, or tap Cancel.",
+      "<b>Paste your API key</b>\nsk-...\nSend a message as the input, or tap Cancel.",
     );
   });
 });
@@ -199,9 +199,34 @@ describe("host detail shown as message text (Y-2)", () => {
     expect(texts(rows)).toEqual([["Continue"], ["Cancel"]]);
   });
 
-  it("keeps Yes and No for a confirm without host labels", () => {
+  it("offers Yes and No only for a confirm without host labels", () => {
     const { rows } = renderDialog({ kind: "confirm", title: "Sure?" }, CTX);
-    expect(texts(rows)).toEqual([["✅ Yes", "❌ No"], ["Cancel"]]);
+    expect(texts(rows)).toEqual([["✅ Yes", "❌ No"]]);
+  });
+
+  it("says a questionnaire waits for a typed answer while Type an answer is pending", () => {
+    const model: DialogModel = {
+      kind: "questionnaire",
+      title: "Colour",
+      active: 0,
+      canSubmit: false,
+      questions: [{ id: "c", prompt: "Pick a colour", multi: false, allowCustom: true, answered: false, items: [] }],
+    };
+    const { text } = renderDialog(model, { ...CTX, awaitingText: true });
+    expect(text).toContain("Send a message as the answer");
+  });
+
+  it("draws an extra action's mark before its label on its button", () => {
+    const model: DialogModel = { kind: "select", title: "Sessions", items: [{ key: "a", label: "alpha" }], total: 1, extraActions: [{ label: "All", mark: "● ", key: "scope:2" }] };
+    const { rows } = renderDialog(model, CTX);
+    expect(texts(rows)).toContainEqual(["● All"]);
+  });
+
+  it("draws an item's mark before its label, on the button and in the body", () => {
+    const model: DialogModel = { kind: "select", title: "Logout", items: [{ key: "a", label: "MockAuth", mark: "● " }], total: 1 };
+    const { rows, text } = renderDialog(model, CTX);
+    expect(texts(rows)).toContainEqual(["● MockAuth"]);
+    expect(text).toContain("● MockAuth");
   });
 
   it("declines with No when the host names only its confirm button", () => {

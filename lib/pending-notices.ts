@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { getAgentDir } from "./config.ts";
 import { log } from "./logger.ts";
 import type { TelegramDelivery, TelegramTransport } from "./types.ts";
 
@@ -110,7 +113,66 @@ export function supersedePendingEdit(chatId: number, messageId: number): void {
 }
 
 /** Drain the queue, dropping notices older than their TTL. */
+/**
+ * A notice that must reach the chat although the host replaces its own process (`/restart`
+ * re-execs the host: memory is lost). It is recorded on disk under this process's PID; the
+ * re-exec keeps the PID, so the replacement image reads and removes the same record. Other
+ * instances sharing the agent dir never read it.
+ */
+export function queueDurablePendingNotice(notice: PendingNotice): void {
+  const file = durableNoticePath(process.pid);
+  const list = readDurableNotices(file);
+  list.push(notice);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(list));
+  noticeLog.debug("durable pending notice recorded", { chatId: notice.chatId, pid: process.pid });
+}
+
+function durableDir(): string {
+  return join(getAgentDir(), "pending-notices");
+}
+
+function durableNoticePath(pid: number): string {
+  return join(durableDir(), `${pid}.json`);
+}
+
+function readDurableNotices(file: string): PendingNotice[] {
+  if (!existsSync(file)) return [];
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+    return Array.isArray(parsed) ? parsed as PendingNotice[] : [];
+  } catch (error) {
+    noticeLog.warn("durable pending notices unreadable; dropped", { file, error });
+    return [];
+  }
+}
+
+const noticeExpired = (notice: PendingNotice, now: number): boolean =>
+  now - notice.createdAt > (isMustDeliver(notice) ? MUST_DELIVER_TTL_MS : PENDING_NOTICE_TTL_MS);
+
+/**
+ * Move this process's record into the queue and remove it, so it is delivered once. Records
+ * of other PIDs are only removed when every notice in them is past its TTL (stale leftovers).
+ */
+function takeDurableNotices(now: number): void {
+  const own = durableNoticePath(process.pid);
+  const list = readDurableNotices(own);
+  if (existsSync(own)) rmSync(own, { force: true });
+  if (list.length > 0) {
+    noticeLog.debug("durable pending notices taken", { count: list.length, pid: process.pid });
+    getPendingNoticeQueue().push(...list);
+  }
+  if (!existsSync(durableDir())) return;
+  for (const name of readdirSync(durableDir())) {
+    if (!name.endsWith(".json") || name === `${process.pid}.json`) continue;
+    const file = join(durableDir(), name);
+    const others = readDurableNotices(file);
+    if (others.every((notice) => noticeExpired(notice, now))) rmSync(file, { force: true });
+  }
+}
+
 export function takePendingNotices(now = Date.now()): PendingNotice[] {
+  takeDurableNotices(now);
   const queue = getPendingNoticeQueue();
   return queue.splice(0, queue.length).filter((notice) => {
     const ttl = isMustDeliver(notice) ? MUST_DELIVER_TTL_MS : PENDING_NOTICE_TTL_MS;

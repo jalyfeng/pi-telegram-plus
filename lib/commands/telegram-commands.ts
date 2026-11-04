@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { addBot, bindProjectTelegram, clearDefaultBot, findBotByIdOrName, readBotRegistry, removeBot, removeProjectBinding, setDefaultBot, unbindProjectTelegram, updateBot, updateProjectBindingLocked, readProjectBinding, readResolvedTelegramConfig, withTelegramConfigLock } from "../config.ts";
-import { escapeHtml } from "../html.ts";
 import { getTelegramBotUsername } from "../telegram-api.ts";
 import { createTelegramPairingCode, ensureTelegramPairingCode, formatPairingInstructions } from "../pairing.ts";
 import type { BotRecord, ResolvedTelegramConfig, TelegramConfig, TelegramTransport } from "../types.ts";
@@ -45,6 +44,8 @@ export type MenuUi = {
   menu?: (title: string, options: string[], body?: string) => Promise<string | undefined>;
   /** Telegram only: drop the keyboard of the live menu message. */
   closeMenu?: () => Promise<void>;
+  /** Telegram only: end the live menu page with its question and answer, no keyboard left. */
+  menuEnd?: (title: string, body?: string, answer?: string) => Promise<void>;
 };
 
 // ── Reusable flow functions (shared by the /tg menu) ───────────────────────
@@ -59,7 +60,7 @@ export async function listBotsFlow(ui: MenuUi): Promise<void> {
     const defaultMarker = registry.defaultBotId === bot.id ? " ⭐ default" : "";
     const username = bot.botUsername ? `@${bot.botUsername}` : "no username";
     const paired = bot.allowedUserId !== undefined ? `paired (user ${bot.allowedUserId})` : bot.pairingCode ? `pairing: ${bot.pairingCode}` : "not paired";
-    return `- ${escapeHtml(bot.name)} (${bot.id.slice(0, 8)}) · ${username} · ${paired}${defaultMarker}`;
+    return `- ${bot.name} (${bot.id.slice(0, 8)}) · ${username} · ${paired}${defaultMarker}`;
   });
   ui.notify(`Registered bots:\n${lines.join("\n")}`, "info");
 }
@@ -76,7 +77,7 @@ export async function addBotFlow(
   if (!botToken) return;
   const registry = await readBotRegistry();
   if (registry.bots.some((b) => b.name.toLowerCase() === botName.toLowerCase())) {
-    ui.notify(`A bot named "${escapeHtml(botName)}" already exists. Choose a different name.`, "error");
+    ui.notify(`A bot named "${botName}" already exists. Choose a different name.`, "error");
     return;
   }
   const apiBase = deps.getConfig().apiBase;
@@ -95,7 +96,7 @@ export async function addBotFlow(
   await deps.syncTelegramCommands();
   deps.refreshStatus();
   ui.notify(
-    `Bot added: ${escapeHtml(botName)}${botUsername ? ` (@${botUsername})` : ""}${isDefault ? " — set as default" : ""}\n${formatPairingInstructions({ ...bot, botToken } as TelegramConfig)}`,
+    `Bot added: ${botName}${botUsername ? ` (@${botUsername})` : ""}${isDefault ? " — set as default" : ""}\n${formatPairingInstructions({ ...bot, botToken } as TelegramConfig)}`,
     "info",
   );
 }
@@ -111,13 +112,13 @@ export async function setBotDefaultFlow(
   cwd?: string,
 ): Promise<boolean> {
   const bot = findBotByIdOrName(await readBotRegistry(), botId);
-  const label = `${escapeHtml(bot?.name ?? botId)} (${botId.slice(0, 8)})`;
+  const label = `${bot?.name ?? botId} (${botId.slice(0, 8)})`;
   const currentToken = deps?.getConfig().botToken;
   const switching = !!bot && !!cwd && !!currentToken && bot.token !== currentToken
     && !(await readProjectBinding(cwd));
   if (switching) {
     ui.notify(
-      `Default bot set to: ${label}. This project has no binding and follows the default, so it now switches to ${bot.botUsername ? `@${escapeHtml(bot.botUsername)}` : escapeHtml(bot.name)} — if /tg is open, it will close; reopen it there to continue.`,
+      `Default bot set to: ${label}. This project has no binding and follows the default, so it now switches to ${bot.botUsername ? `@${bot.botUsername}` : bot.name} — if /tg is open, it will close; reopen it there to continue.`,
       "info",
     );
     await ui.closeMenu?.();
@@ -186,9 +187,9 @@ export async function updateBotFlow(
     ui.notify(`Bot not found: ${botId.slice(0, 8)}`, "error");
     return;
   }
-  const selectedField = field ?? await ui.input("Field to update (token, name, allowedUserId, apiBase)");
-  if (!selectedField) return;
   const validFields = ["token", "name", "allowedUserId", "apiBase"];
+  const selectedField = field ?? await ui.select("Field to update", validFields);
+  if (!selectedField) return;
   if (!validFields.includes(selectedField)) {
     ui.notify(`Invalid field. Choose from: ${validFields.join(", ")}`, "error");
     return;
@@ -207,7 +208,7 @@ export async function updateBotFlow(
     if (botUsername) updates.botUsername = botUsername;
   } else if (selectedField === "name") {
     if (registry.bots.some((b) => b.id !== bot.id && b.name.toLowerCase() === fieldValue!.toLowerCase())) {
-      ui.notify(`A bot named "${escapeHtml(fieldValue)}" already exists.`, "error");
+      ui.notify(`A bot named "${fieldValue}" already exists.`, "error");
       return;
     }
     updates.name = fieldValue;
@@ -228,7 +229,9 @@ export async function updateBotFlow(
     await deps.syncTelegramCommands();
     deps.refreshStatus();
   }
-  ui.notify(`Bot updated: ${escapeHtml(bot.name)} (${bot.id.slice(0, 8)})`, "info");
+  // A rename is reported under the new name.
+  const shownName = selectedField === "name" ? fieldValue : bot.name;
+  ui.notify(`Bot updated: ${shownName} (${bot.id.slice(0, 8)})`, "info");
 }
 
 export async function removeBotFlow(
@@ -254,7 +257,7 @@ export async function removeBotFlow(
     ui.notify(`Warning: removed bot was the default. ${registry.bots.length > 1 ? "A remaining bot was promoted." : "No default bot is set."}`, "warning");
   }
   ui.notify(
-    `Bot removed: ${escapeHtml(bot.name)} (${bot.id.slice(0, 8)})\nAny project .pi/telegram.json referencing this bot will lose its binding.`,
+    `Bot removed: ${bot.name} (${bot.id.slice(0, 8)})\nAny project .pi/telegram.json referencing this bot will lose its binding.`,
     "warning",
   );
   const currentBot = deps.getResolvedConfig()?.bot;
@@ -321,7 +324,7 @@ export async function bindProjectFlow(
   if (botId) {
     bot = registry.bots.find((b) => b.id === botId) ?? findBotByIdOrName(registry, botId);
     if (!bot) {
-      ui.notify(`Bot not found: ${escapeHtml(botId)}. Use /tg → Bots → Bot list to see registered bots.`, "error");
+      ui.notify(`Bot not found: ${botId}. Use /tg → Bots → Bot list to see registered bots.`, "error");
       return;
     }
   } else {
@@ -346,7 +349,7 @@ export async function bindProjectFlow(
   // (no prior bot) so that case only gets the normal "Project bound" notice.
   if (prevBotToken && bot.token !== prevBotToken) {
     ui.notify(
-      `Switching bot to ${escapeHtml(bot.name)}${bot.botUsername ? ` (@${bot.botUsername})` : ""}. ${escapeHtml(workspacePath)} — if /tg is open, it will close; reopen it to continue.`,
+      `Switching bot to ${bot.name}${bot.botUsername ? ` (@${bot.botUsername})` : ""}. ${workspacePath} — if /tg is open, it will close; reopen it to continue.`,
       "info",
     );
   }
@@ -361,7 +364,7 @@ export async function bindProjectFlow(
   deps.startStatusHeartbeat();
   deps.refreshStatus();
   ui.notify(
-    `Project bound to bot: ${escapeHtml(bot.name)}${bot.botUsername ? ` (@${bot.botUsername})` : ""}\n${escapeHtml(workspacePath)}\n${formatPairingInstructions(config)}`,
+    `Project bound to bot: ${bot.name}${bot.botUsername ? ` (@${bot.botUsername})` : ""}\n${workspacePath}\n${formatPairingInstructions(config)}`,
     "info",
   );
 }
@@ -455,5 +458,5 @@ export async function unbindProjectFlow(
   if (deps.isTelegramEnabled()) deps.getPolling().start();
   await deps.syncTelegramCommands();
   deps.refreshStatus();
-  ui.notify(`Removed Telegram project binding:\n${escapeHtml(project.path)}\nProject now uses the default bot (if any).`, "info");
+  ui.notify(`Removed Telegram project binding:\n${project.path}\nProject now uses the default bot (if any).`, "info");
 }

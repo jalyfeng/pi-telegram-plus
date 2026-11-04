@@ -1,4 +1,6 @@
 import { getCurrentTelegramTurn } from "../turn-context.ts";
+import { escapeHtml } from "../html.ts";
+import type { TelegramTransport } from "../types.ts";
 import { queuePendingNotice } from "../pending-notices.ts";
 import { hostCommandName } from "../session-capture.ts";
 import { currentCommandScope } from "../tui/command-context.ts";
@@ -11,7 +13,12 @@ import type { CommandRegistry } from "./register.ts";
  * after a session replacement; the captured reference keeps the TelegramUi
  * alive via its closure over chatId + transport.
  */
-export function registerLifecycleCommands(registry: CommandRegistry): void {
+/** Transport for the one write a Telegram-answered shutdown makes before the host exits. */
+export type LifecycleDeps = {
+  transport?: Pick<TelegramTransport, "editText" | "sendText">;
+};
+
+export function registerLifecycleCommands(registry: CommandRegistry, deps: LifecycleDeps = {}): void {
 
   // ── /reload ────────────────────────────────────────────────────────────
   registry.registerCommand("reload", {
@@ -70,22 +77,35 @@ export function registerLifecycleCommands(registry: CommandRegistry): void {
   // ── /quit, /exit ───────────────────────────────────────────────────────
   // Both confirm before shutting down: on Telegram the TUI may be unreachable,
   // so an accidental tap should not kill the host silently.
-  const shutdownAfterConfirm = async (_args: string, ctx: ExtensionCommandContext): Promise<void> => {
+  // Answered from Telegram, the confirmation's message is written before the host exits: the
+  // answer and one stopped line are awaited, so nothing is sent after the host is gone (#63).
+  const shutdownAfterConfirm = (name: "quit" | "exit") => async (_args: string, ctx: ExtensionCommandContext): Promise<void> => {
     const ui = ctx.ui;
     const host = hostCommandName();
     const confirmed = await ui.confirm(`Quit ${host}?`, `${host} will exit and Telegram will stop responding.`);
-    if (confirmed) {
+    if (!confirmed) return;
+    const turn = getCurrentTelegramTurn();
+    if (turn && deps.transport) {
+      const stopped = `<b>▶️ /${name}</b>\n\nQuit ${escapeHtml(host)}?\n✅ Yes\n\n<i>${escapeHtml(host)} stopped. Telegram will stop responding.</i>`;
+      const messageId = currentCommandScope()?.telegramMessageId;
+      if (messageId !== undefined) {
+        await deps.transport.editText(turn.chatId, messageId, stopped).catch(() => undefined);
+      } else {
+        await deps.transport.sendText(turn.chatId, stopped, turn.messageThreadId, turn.sourceMessageId).catch(() => undefined);
+      }
       ctx.shutdown();
-      ui.notify(`Shutdown requested. If ${host} keeps running, stop it from the TUI/terminal.`, "info");
+      return;
     }
+    ctx.shutdown();
+    ui.notify(`Shutdown requested. If ${host} keeps running, stop it from the TUI/terminal.`, "info");
   };
   registry.registerCommand("quit", {
     description: "Shut down the host after confirmation",
-    handler: shutdownAfterConfirm,
+    handler: shutdownAfterConfirm("quit"),
   });
   registry.registerCommand("exit", {
     description: "Shut down the host after confirmation",
-    handler: shutdownAfterConfirm,
+    handler: shutdownAfterConfirm("exit"),
   });
 
 }

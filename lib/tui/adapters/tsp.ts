@@ -43,6 +43,41 @@ type HostRecord = Record<string, unknown>;
 /** A described node, matched by shape only (the host may load its own copy). */
 export type NativeNodeLike = HostRecord & { k?: unknown; p?: unknown; c?: unknown; key?: unknown };
 
+/**
+ * The text of a picker's preview children (the selected item's preview), one line per child: a `text` as
+ * its words, a `kv` as `k: v` pairs (one line inline, one line per fact in a grid), a `badge` in brackets,
+ * a `row` of its children on one line, a `col` of its children one line each. Nested components and other
+ * kinds are not followed.
+ */
+function previewLines(children: readonly unknown[]): string[] {
+  const lines: string[] = [];
+  for (const child of children) {
+    if (!isObject(child) || describableChild(child)) continue;
+    const node = child as NativeNodeLike;
+    if (node.k === "kv" && isObject(node.p) && Array.isArray(node.p.items)) {
+      const pairs = (node.p.items as unknown[])
+        .filter(isObject)
+        .map((item) => `${tspText(item.k)}: ${tspText(item.v)}`)
+        .filter((pair) => pair !== ": ");
+      // An inline fact line is one line; a grid of facts is one line per fact.
+      if (node.p.layout === "inline") {
+        if (pairs.length > 0) lines.push(pairs.join(" · "));
+      } else {
+        lines.push(...pairs);
+      }
+    } else if (node.k === "badge" && isObject(node.p) && tspText(node.p.text) !== "") {
+      lines.push(`[${tspText(node.p.text)}]`);
+    } else if (node.k === "text") {
+      const text = nodeText(node).trim();
+      if (text !== "") lines.push(text);
+    } else if (node.k === "row" || node.k === "col") {
+      const inner = previewLines(Array.isArray(node.c) ? (node.c as unknown[]) : []);
+      if (inner.length > 0) lines.push(node.k === "row" ? inner.join(" ") : inner.join("\n"));
+    }
+  }
+  return lines;
+}
+
 /** The picker props this adapter reads (`TspPickerProps` in pi-wire). */
 type PickerProps = {
   title?: unknown;
@@ -97,6 +132,8 @@ type PickerItemLike = {
   dot?: unknown;
   /** Column values by column id (`TspPickerItem.facts`); the category of an extension row. */
   facts?: unknown;
+  /** Leading icon name (`TspPickerItem.icon`); the session picker marks a pinned session `pin`. */
+  icon?: unknown;
 };
 
 /** The picker's action strip: chips the user picks after activating an item. */
@@ -119,12 +156,12 @@ type PrefsProps = {
 
 type PrefsPageLike = { id?: unknown; label?: unknown; disabled?: unknown };
 
-type PrefsSectionLike = { id?: unknown; title?: unknown; rows?: unknown };
+type PrefsSectionLike = { id?: unknown; title?: unknown; page?: unknown; rows?: unknown };
 
-type PrefsRowLike = { id?: unknown; label?: unknown; hint?: unknown; disabled?: unknown; control?: unknown };
+type PrefsRowLike = { id?: unknown; label?: unknown; hint?: unknown; warning?: unknown; disabled?: unknown; control?: unknown };
 
 /** A settings page's section: the heading its rows sit under (`TspPrefsSection.title`). */
-type PrefsGroupedRow = { row: PrefsRowLike; group?: string };
+type PrefsGroupedRow = { row: PrefsRowLike; group?: string; page?: string };
 
 /** The text-field props this adapter reads (`TspInputProps` in pi-wire):
  * what the field holds (mask dots when the host masks it) and the placeholder. */
@@ -135,7 +172,7 @@ type NodePropsByKind = { picker: PickerProps; prefs: PrefsProps; input: InputPro
 
 type NodeKind = keyof NodePropsByKind;
 
-type NodeFound<K extends NodeKind> = { owner: object; keypath: string; props: NodePropsByKind[K] };
+type NodeFound<K extends NodeKind> = { owner: object; keypath: string; props: NodePropsByKind[K]; node: NativeNodeLike };
 
 type Describable = object & {
   describe(cx: unknown): unknown;
@@ -210,7 +247,7 @@ export function childKeypath(parent: string, child: NativeNodeLike, index: numbe
 
 function walkNode<K extends NodeKind>(node: NativeNodeLike, keypath: string, owner: object, kind: K, depth: number, visited: Set<object>): NodeFound<K> | undefined {
   const props = nodeProps(node, kind);
-  if (props) return { owner, keypath, props };
+  if (props) return { owner, keypath, props, node };
   const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
   if (!children) return undefined;
   for (let i = 0; i < children.length; i++) {
@@ -552,24 +589,27 @@ const BAR_KEY_PREFIX = "act:";
 /** The extraAction key of the Clear search button: its tap empties the search box and nothing else. */
 const CLEAR_SEARCH_KEY = "clear-search";
 
-/** Action-bar ids the renderer's own cancel row already covers. */
-const BAR_HIDDEN_IDS: Record<string, true> = { close: true, cancel: true };
+/**
+ * Action-bar ids the renderer's own cancel row already covers, plus `confirm`: a picker's primary
+ * "confirm" acts on the highlighted row, and a Telegram row is tappable, so its button only repeats the tap.
+ */
+const BAR_HIDDEN_IDS: Record<string, true> = { close: true, cancel: true, confirm: true };
 
 /** The tab / scope / action-bar buttons Telegram shows beside the list. */
-function pickerExtraActions(props: PickerProps): { label: string; key: string }[] {
-  const extras: { label: string; key: string }[] = [];
+function pickerExtraActions(props: PickerProps): { label: string; mark?: string; key: string }[] {
+  const extras: { label: string; mark?: string; key: string }[] = [];
   if (Array.isArray(props.tabs)) {
     props.tabs.forEach((tab, index) => {
       if (!isObject(tab) || typeof tab.id !== "string") return;
-      const marker = props.tab === tab.id ? "● " : "";
-      extras.push({ label: `${marker}${tspText(tab.label)}`, key: `${TAB_KEY_PREFIX}${index}` });
+      const mark = props.tab === tab.id ? "● " : undefined;
+      extras.push({ label: tspText(tab.label), ...(mark ? { mark } : {}), key: `${TAB_KEY_PREFIX}${index}` });
     });
   }
   if (Array.isArray(props.scopes)) {
     props.scopes.forEach((scope, index) => {
       if (!isObject(scope) || typeof scope.id !== "string" || scope.disabled) return;
-      const marker = props.scope === scope.id ? "● " : "";
-      extras.push({ label: `${marker}${tspText(scope.label)}`, key: `${SCOPE_KEY_PREFIX}${index}` });
+      const mark = props.scope === scope.id ? "● " : undefined;
+      extras.push({ label: tspText(scope.label), ...(mark ? { mark } : {}), key: `${SCOPE_KEY_PREFIX}${index}` });
     });
   }
   if (Array.isArray(props.actions)) {
@@ -700,10 +740,15 @@ export const tspPickerAdapter: DialogAdapter = {
       const detail = item.detail === undefined ? "" : tspText(item.detail);
       const description = [detail, ...pickerFacts(item.facts, props.columns)].filter((part) => part !== "").join(" · ") || undefined;
       const badges = pickerBadges(item.badges);
-      const label = `${pickerStatusMark(item.dot)}${tspText(item.label)}`;
+      // The pin and the status dot are the row's marks, drawn before the name as the terminal row does
+      // (`📌 ● <name>`); the label is the name alone, so a summary never carries a glyph.
+      const pin = item.icon === "pin" ? "📌 " : "";
+      const mark = `${pin}${pickerStatusMark(item.dot)}`;
+      const name = tspText(item.label);
       return {
         key: item.id as string,
-        label: item.disabled ? `${label} (disabled)` : label,
+        label: item.disabled ? `${name} (disabled)` : name,
+        ...(mark !== "" ? { mark } : {}),
         ...(description ? { description, note: description } : {}),
         ...(badges.length > 0 ? { badges } : {}),
         current: currentIds.includes(item.id),
@@ -721,7 +766,10 @@ export const tspPickerAdapter: DialogAdapter = {
     const extraActions = search && search.query !== ""
       ? [...barExtras, { label: "✖ Clear search", key: CLEAR_SEARCH_KEY }]
       : barExtras;
-    const title = typeof props.title === "string" ? props.title : "Select";
+    // A picker that names no title of its own (the session picker) takes the
+    // title its component carries: the host's own header, e.g. "Resume Session (current folder)".
+    const ownerTitle = (found.owner as { title?: unknown }).title;
+    const title = typeof props.title === "string" ? props.title : typeof ownerTitle === "string" && ownerTitle !== "" ? ownerTitle : "Select";
     const subtitle = pending
       ? `${tspText(pending.label) || pending.id}: choose a ${pickerNoun(props)}`
       : tspText(props.subtitle) || undefined;
@@ -747,12 +795,16 @@ export const tspPickerAdapter: DialogAdapter = {
         ...(extraActions.length > 0 ? { extraActions } : {}),
       };
     }
+    // The highlighted item's preview is text under the list's head. It goes in the subtitle, which keeps its
+    // line breaks: the body's notice is drawn as one line.
+    const preview = previewLines(Array.isArray(found.node.c) ? (found.node.c as unknown[]) : []);
+    const head = [subtitle, ...preview].filter((line): line is string => line !== undefined && line !== "").join("\n");
     return {
       kind: "select",
       title,
       items,
       total: typeof props.total === "number" ? props.total : items.length,
-      ...(subtitle ? { subtitle } : {}),
+      ...(head !== "" ? { subtitle: head } : {}),
       ...(search ? { search } : {}),
       ...(extraActions.length > 0 ? { extraActions } : {}),
     };
@@ -989,18 +1041,39 @@ function prefsRows(props: PrefsProps): PrefsRowLike[] {
   return prefsGroupedRows(props).map((entry) => entry.row);
 }
 
-/** The live page's rows with the title of the section each sits under. */
+/** The live page's rows with the title of the section each sits under, and (in a search) the page that section belongs to. */
 function prefsGroupedRows(props: PrefsProps): PrefsGroupedRow[] {
   const sections = Array.isArray(props.sections) ? (props.sections as readonly PrefsSectionLike[]) : [];
   const rows: PrefsGroupedRow[] = [];
   for (const section of sections) {
     if (!isObject(section) || !Array.isArray(section.rows)) continue;
     const group = tspText(section.title).trim() || undefined;
+    const page = typeof section.page === "string" && section.page !== "" ? section.page : undefined;
     for (const row of section.rows as readonly unknown[]) {
-      if (isObject(row) && typeof (row as PrefsRowLike).id === "string") rows.push({ row: row as PrefsRowLike, group });
+      if (isObject(row) && typeof (row as PrefsRowLike).id === "string") rows.push({ row: row as PrefsRowLike, group, page });
     }
   }
   return rows;
+}
+
+/**
+ * The search results' per-tab counts as header text (`Model (8) · Appearance (2)`), in the
+ * page order the host lists its tabs in. A page with no matching row is left out.
+ */
+function prefsSearchCounts(props: PrefsProps): string {
+  const pages = Array.isArray(props.pages) ? (props.pages as readonly PrefsPageLike[]) : [];
+  const counts = new Map<string, number>();
+  for (const { row, page } of prefsGroupedRows(props)) {
+    if (!page || row.disabled) continue;
+    counts.set(page, (counts.get(page) ?? 0) + 1);
+  }
+  const parts: string[] = [];
+  for (const page of pages) {
+    if (!isObject(page) || typeof page.id !== "string") continue;
+    const count = counts.get(page.id);
+    if (count) parts.push(`${tspText(page.label).trim()} (${count})`);
+  }
+  return parts.join(" · ");
 }
 
 /** A choice control's usable options: entries carrying a string `value`. */
@@ -1100,6 +1173,19 @@ type PrefsSubmenuKind = "text" | "number" | "multi" | "choice";
 /** The submenu open on the plugin side, per prefs component: the row it edits and its kind. */
 const prefsSubmenus = new WeakMap<object, { rowId: string; kind: PrefsSubmenuKind }>();
 
+/** Owners whose open submenu state came from the terminal's own editor (not from a Telegram tap). */
+const terminalSubmenus = new WeakSet<object>();
+
+/**
+ * Whether the page holds the editor the terminal opened. The host places an open submenu among the page's
+ * children: a component child (a `SelectFormField`, described on its own), or a node with the
+ * `omp.prefs.editor` role for a plain editor. The page's previews are plain nodes with other roles.
+ */
+function prefsEditorOpen(node: NativeNodeLike): boolean {
+  const children = Array.isArray(node.c) ? (node.c as unknown[]) : [];
+  return children.some((child) => isObject(child) && (describableChild(child) !== undefined || (isObject(child.p) && child.p.role === "omp.prefs.editor")));
+}
+
 /** A choice's option detail for its current value, when the host gives one. */
 function choiceDetail(control: HostRecord): string | undefined {
   const options = Array.isArray(control.options) ? (control.options as readonly unknown[]) : [];
@@ -1121,7 +1207,10 @@ function prefsRowItem(row: PrefsRowLike, group?: string): DialogItem & { values?
   const item = prefsControlItem(row);
   const control = isObject(row.control) ? row.control : undefined;
   const note = prefsRowNote(row, control);
-  return { ...item, ...(note ? { note } : {}), ...(group ? { group } : {}) };
+  // The terminal marks a row whose description carries a `warning` with a glyph after its label.
+  const warned = typeof row.warning === "string" && row.warning !== "";
+  const label = warned ? `${item.label} ⚠` : item.label;
+  return { ...item, label, ...(note ? { note } : {}), ...(group ? { group } : {}) };
 }
 
 /** The row's label, value and submenu flag, from its control. */
@@ -1337,13 +1426,30 @@ export const tspPrefsAdapter: DialogAdapter = {
   read(component, ctx): DialogModel {
     const found = findNode(component, "prefs");
     if (!found) return { kind: "unsupported", what: "OMP settings page closed or no longer a settings page" };
-    const { owner, props } = found;
+    const { owner, props, node } = found;
+    // The terminal's own editor (opened on the focused row) becomes the same submenu Telegram opens for that row,
+    // and is dropped again once the terminal closes it.
+    if (prefsEditorOpen(node)) {
+      const focus = props.focus;
+      const row = typeof focus === "string" ? prefsRows(props).find((candidate) => candidate.id === focus) : undefined;
+      const control = row && isObject(row.control) ? row.control : undefined;
+      if (typeof focus === "string" && !prefsSubmenus.has(owner) && control?.k === "choice" && !row?.disabled) {
+        prefsSubmenus.set(owner, { rowId: focus, kind: "choice" });
+        terminalSubmenus.add(owner);
+      }
+    } else if (terminalSubmenus.has(owner)) {
+      terminalSubmenus.delete(owner);
+      prefsSubmenus.delete(owner);
+    }
     const currentPage = typeof props.page === "string" ? props.page : "";
     const query = typeof props.query === "string" ? props.query : "";
     const items: (DialogItem & { values?: string[]; hasSubmenu?: boolean; shortcut?: boolean })[] = [];
     // The current page's label is the subtitle; its lead text is the notice, which a search replaces.
     const allPages = Array.isArray(props.pages) ? (props.pages as readonly PrefsPageLike[]) : [];
-    const currentLabel = tspText(allPages.find((page) => isObject(page) && page.id === currentPage)?.label).trim();
+    // A search names the matching tabs with their counts; the page it left is not the header.
+    const header = query
+      ? prefsSearchCounts(props)
+      : tspText(allPages.find((page) => isObject(page) && page.id === currentPage)?.label).trim();
     const lead = query ? "" : tspText(props.lead).trim();
     // While a search is active the host filters rows across every page, so the
     // page shortcuts would only push the results off the first page: show the
@@ -1368,7 +1474,7 @@ export const tspPrefsAdapter: DialogAdapter = {
       kind: "settings",
       title: typeof props.title === "string" ? props.title : "Settings",
       items,
-      ...(currentLabel ? { subtitle: currentLabel } : {}),
+      ...(header ? { subtitle: header } : {}),
       ...(lead ? { notice: lead } : {}),
       ...(submenu ? { submenu } : { search }),
     };
@@ -1462,6 +1568,8 @@ export const tspPrefsAdapter: DialogAdapter = {
  * line OMP's login dialog puts above the field. */
 type PromptScan = {
   input: NodeFound<"input">;
+  /** The field sits in the login sheet's prompt row (see {@link secretOAuthField}). */
+  loginField?: boolean;
   label?: string;
   detail?: string;
   /** The step title of a wizard step (`omp.mcpAdd.title`), when the host marks one. */
@@ -1472,6 +1580,8 @@ type PromptScan = {
 
 type ScanState = {
   lastText?: string;
+  /** How many login prompt rows (`omp.login.prompt`) the scan is inside of right now. */
+  loginDepth: number;
   detail: string[];
   detailSeen: Set<object>;
   heading?: string;
@@ -1488,6 +1598,23 @@ const PROMPT_DETAIL_ROLES = new Set([
   "omp.login.shortcut",
   "omp.mcpAdd.lead",
 ]);
+
+/** The login sheet's row holding one prompt's label and field (`LoginDialogComponent`'s `omp.login.prompt`). */
+const LOGIN_PROMPT_ROLE = "omp.login.prompt";
+
+/** The device code row of the login sheet (`LoginDialogComponent`'s `omp.login.code`); a device-code sheet is not a paste. */
+const LOGIN_CODE_ROLE = "omp.login.code";
+
+/**
+ * The OAuth manual code field: a field in the login sheet's prompt row of a sign-in that has no device code.
+ * pi treats everything its login dialog asks as a secret (pi-login.ts); on OMP only the browser-OAuth paste
+ * (`showManualInput`, which carries the sign-in link and no device code) is masked, so the device-code flow
+ * keeps its own plain answer.
+ */
+function secretOAuthField(component: object, found: PromptScan): boolean {
+  if (found.loginField !== true) return false;
+  return findDescribedNode(component, (node) => isObject(node.p) && node.p.role === LOGIN_CODE_ROLE) === undefined;
+}
 
 /** The MCP add wizard's phase strip, its step title and the tone of the step on screen. */
 const WIZARD_PROGRESS_ROLE = "omp.mcpAdd.progress";
@@ -1553,7 +1680,8 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
   if (props) {
     const detail = state.detail.length > 0 ? state.detail.join("\n") : undefined;
     return {
-      input: { owner, keypath: "", props },
+      input: { owner, keypath: "", props, node },
+      ...(state.loginDepth > 0 ? { loginField: true } : {}),
       ...(state.lastText === undefined ? {} : { label: state.lastText }),
       ...(detail === undefined ? {} : { detail }),
       ...(state.heading === undefined ? {} : { heading: state.heading }),
@@ -1567,33 +1695,50 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
     return undefined;
   }
   if (node.k === "text" && isObject(node.p)) {
-    const text = tspText(node.p.text).trim();
+    // A text node carries its words as `text` or as `spans` (the hook input's title line is spans).
+    const text = nodeText(node).trim();
     if (text) state.lastText = text;
     if (role === WIZARD_TITLE_ROLE && text) state.heading = text;
   }
   if (isObject(node.p) && typeof node.p.role === "string" && PROMPT_DETAIL_ROLES.has(node.p.role)) {
     collectPromptDetail(node, state);
   }
-  const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
-  if (!children) return undefined;
-  for (const child of children) {
-    if (!isObject(child)) continue;
-    const component = describableChild(child);
-    if (component) {
-      const found = scanPromptRoot(component, depth + 1, visited, state);
+  const loginPrompt = role === LOGIN_PROMPT_ROLE;
+  if (loginPrompt) state.loginDepth += 1;
+  try {
+    const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
+    if (!children) return undefined;
+    for (const child of children) {
+      if (!isObject(child)) continue;
+      const component = describableChild(child);
+      if (component) {
+        const found = scanPromptRoot(component, depth + 1, visited, state);
+        if (found) return found;
+        continue;
+      }
+      if (visited.has(child)) continue;
+      visited.add(child);
+      const found = scanPromptNode(child as NativeNodeLike, owner, depth, visited, state);
       if (found) return found;
-      continue;
     }
-    if (visited.has(child)) continue;
-    visited.add(child);
-    const found = scanPromptNode(child as NativeNodeLike, owner, depth, visited, state);
-    if (found) return found;
+    return undefined;
+  } finally {
+    if (loginPrompt) state.loginDepth -= 1;
   }
-  return undefined;
+}
+
+/** The wizard's constraint under its field (`omp.mcpAdd.note`, a plain text): the terminal draws it in brackets under the field. */
+const WIZARD_NOTE_ROLE = "omp.mcpAdd.note";
+
+/** The field's note, in the brackets the terminal puts round it; the note sits after the field, so the prompt scan does not reach it. */
+function promptNote(component: object): string | undefined {
+  const hit = findDescribedNode(component, (node) => isObject(node.p) && node.p.role === WIZARD_NOTE_ROLE && typeof node.p.text === "string");
+  const text = hit ? nodeText(hit.node).trim() : "";
+  return text === "" ? undefined : `[${text}]`;
 }
 
 function findPrompt(component: object): PromptScan | undefined {
-  return scanPromptRoot(component, 0, new Set<object>(), { detail: [], detailSeen: new Set<object>() });
+  return scanPromptRoot(component, 0, new Set<object>(), { detail: [], detailSeen: new Set<object>(), loginDepth: 0 });
 }
 
 /** Trailing hints the terminal needs but Telegram does not ("…, then press
@@ -1870,15 +2015,16 @@ export const tspInputAdapter: DialogAdapter = {
       return { kind: "unsupported", what: "OMP text prompt closed or no longer an input" };
     }
     const title = found.heading ?? promptTitle(found.label) ?? "Input";
-    const secret = ownerMasks(found.input.owner) || SECRET_TITLE.test(title);
+    const secret = ownerMasks(found.input.owner) || SECRET_TITLE.test(title) || secretOAuthField(component, found);
     const placeholder = tspText(found.input.props.placeholder).trim();
+    const detail = [found.detail, promptNote(component)].filter((part): part is string => part !== undefined && part !== "").join("\n");
     // An optional step may be left empty: its footer's label (Continue) or "Skip" answers that.
     const skip = wizardOptional(component) ? [{ label: wizardNextLabel(component) ?? "Skip", key: WIZARD_SKIP_KEY }] : undefined;
     return {
       kind: "input",
       title,
       ...(placeholder ? { placeholder } : {}),
-      ...(found.detail === undefined ? {} : { detail: found.detail }),
+      ...(detail === "" ? {} : { detail }),
       ...(found.steps === undefined ? {} : { steps: found.steps }),
       ...(skip === undefined ? {} : { extraActions: skip }),
       secret,

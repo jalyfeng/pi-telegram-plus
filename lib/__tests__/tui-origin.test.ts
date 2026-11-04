@@ -101,3 +101,45 @@ describe("a new Telegram prompt supersedes a finished command's idle window", ()
     expect(tracker.supersede()).toBe(false);
   });
 });
+
+describe("a Telegram command's draft is restored when the host has taken the command (#59)", () => {
+  it("restores the draft right after the submit completes, not when the scope ends", () => {
+    let editor = "my draft";
+    const writeDraft = vi.fn((text: string) => {
+      editor = text;
+      return true;
+    });
+    const tracker = new OriginTracker({
+      isEditorFocused: () => true,
+      readDraft: () => editor,
+      writeDraft,
+    });
+    const scope = tracker.begin(origin, "plan", "/plan", "my draft");
+    // The host takes the command text from the editor on submit.
+    editor = "/plan";
+    tracker.markSubmitDone(scope);
+    expect(writeDraft).toHaveBeenCalledWith("my draft");
+    expect(editor).toBe("my draft");
+    expect(scope.ended).toBe(false);
+    tracker.dispose();
+  });
+
+  it("keeps a shell (!) scope's restore at scope end, as #17 requires", () => {
+    let editor = "my draft";
+    const writeDraft = vi.fn((text: string) => {
+      editor = text;
+      return true;
+    });
+    const tracker = new OriginTracker({
+      isEditorFocused: () => true,
+      readDraft: () => editor,
+      writeDraft,
+    });
+    const scope = tracker.begin(origin, "!", commandText, "my draft");
+    editor = commandText;
+    tracker.markSubmitDone(scope);
+    expect(writeDraft).not.toHaveBeenCalled();
+    tracker.end(scope, "idle");
+    expect(writeDraft).toHaveBeenCalledWith("my draft");
+  });
+});

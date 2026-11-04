@@ -9,7 +9,7 @@ function setup(onMenuMessage?: (messageId: number) => void) {
   let nextId = 100;
   const renders: TelegramButton[][][] = [];
   const transport = {
-    sendText: vi.fn(async () => [{ message_id: nextId++ }]),
+    sendText: vi.fn(async (_chatId: number, _text: string) => [{ message_id: nextId++ }]),
     sendButtons: vi.fn(async (_chatId: number, _text: string, rows: TelegramButton[][]) => { renders.push(rows); return { message_id: nextId++ }; }),
     editText: vi.fn(async () => undefined),
     editButtons: vi.fn(async (_chatId: number, _messageId: number, _text: string, rows: TelegramButton[][]) => { renders.push(rows); }),
@@ -77,7 +77,7 @@ describe("telegram ui menu() edit-in-place", () => {
     expect(transport.removeInlineKeyboard).toHaveBeenCalledWith(CHAT, 100);
   });
 
-  it("another prompt releases the menu so the next menu renders as a new message", async () => {
+  it("another prompt stays on the menu message and the next menu edits it", async () => {
     const env = setup();
     const { transport, ui } = env;
 
@@ -86,15 +86,15 @@ describe("telegram ui menu() edit-in-place", () => {
     await first;
 
     const confirmed = ui.confirm("Sure?", "really");
-    expect(transport.removeInlineKeyboard).toHaveBeenCalledWith(CHAT, 100);
-    await press(env, 101, "Yes");
+    await press(env, 100, "Yes");
     expect(await confirmed).toBe(true);
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
 
     const again = ui.menu("Main", ["Remove"]);
-    await vi.waitFor(() => expect(transport.sendButtons).toHaveBeenCalledTimes(3));
-    expect(transport.editButtons).not.toHaveBeenCalled();
-    await press(env, 102, "Remove");
-    await again;
+    await press(env, 100, "Remove");
+    expect(await again).toBe("Remove");
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    expect(transport.removeInlineKeyboard).not.toHaveBeenCalledWith(CHAT, 100);
   });
 
   it("notify does not release the menu", async () => {
@@ -105,8 +105,9 @@ describe("telegram ui menu() edit-in-place", () => {
     await first;
     ui.notify("toggled");
     const second = ui.menu("Main", ["Toggle"]);
-    await vi.waitFor(() => expect(transport.editButtons).toHaveBeenCalledTimes(1));
-    expect(transport.editButtons.mock.calls[0][1]).toBe(100);
+    await vi.waitFor(() => expect(transport.editButtons).toHaveBeenCalledTimes(2));
+    expect(transport.editButtons.mock.calls.every((c) => c[1] === 100)).toBe(true);
+    expect(transport.editButtons.mock.calls[0][2]).toContain("toggled");
     await press(env, 100, "Toggle");
     await second;
   });
@@ -146,5 +147,190 @@ describe("telegram ui menu() edit-in-place", () => {
     expect(transport.removeInlineKeyboard).toHaveBeenCalledWith(CHAT, 100);
     await ui.closeMenu();
     expect(transport.removeInlineKeyboard).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("telegram ui notify() without a live menu", () => {
+  it("sends the text without a raw level label, with the emoji prefix for warnings and errors", async () => {
+    const env = setup();
+    const { transport, ui } = env;
+    ui.notify("Telegram disconnected for this folder.", "info");
+    ui.notify("Bot removed: omp", "warning");
+    ui.notify("Must be a number 0-10", "error");
+    await vi.waitFor(() => expect(transport.sendText).toHaveBeenCalledTimes(3));
+    const texts = transport.sendText.mock.calls.map((c) => c[1]);
+    expect(texts).toEqual([
+      "Telegram disconnected for this folder.",
+      "⚠️ Bot removed: omp",
+      "❌ Must be a number 0-10",
+    ]);
+    expect(texts.some((t) => /<b>(info|warning|error)<\/b>/.test(t))).toBe(false);
+  });
+});
+
+describe("telegram ui inside a live /tg menu", () => {
+  it("prompts, a result and the next menu stay on the one menu message", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+
+    const first = ui.menu("🤖 Bots", ["➕ Add bot", "Back"]);
+    await press(env, 100, "➕ Add bot");
+    expect(await first).toBe("➕ Add bot");
+
+    const name = ui.input("Bot name");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    runtime.resolveInput(CHAT, "work-bot");
+    expect(await name).toBe("work-bot");
+
+    const token = ui.inputSecret!("Telegram bot token");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    runtime.resolveInput(CHAT, "123456:ABCDEFGH");
+    expect(await token).toBe("123456:ABCDEFGH");
+
+    ui.notify("Bot added: work-bot");
+    const second = ui.menu("🤖 Bots", ["➕ Add bot", "Back"]);
+    await press(env, 100, "Back");
+    expect(await second).toBe("Back");
+
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    expect(transport.sendText).not.toHaveBeenCalled();
+    expect(transport.editButtons.mock.calls.every((c) => c[1] === 100)).toBe(true);
+    expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("Bot added: work-bot");
+    expect(transport.editButtons.mock.calls.at(-1)![2]).not.toContain("Telegram bot token");
+  });
+
+  it("an invalid answer shown on the menu message keeps the prompt open and clears once answered", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+    const first = ui.menu("🔄 Retry", ["Set"]);
+    await press(env, 100, "Set");
+    await first;
+
+    const answer = ui.input("Retry count (0-10)");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    ui.notify("Must be a number 0-10", "error");
+    await vi.waitFor(() => expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("❌ Must be a number 0-10"));
+    runtime.resolveInput(CHAT, "abc");
+    expect(await answer).toBe("abc");
+
+    const retry = ui.input("Retry count (0-10)");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(transport.editButtons.mock.calls.at(-1)![2]).not.toContain("Must be a number");
+    runtime.resolveInput(CHAT, "5");
+    await retry;
+    expect(transport.sendText).not.toHaveBeenCalled();
+  });
+
+  it("a confirm on the menu message records the answer under its question", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+    const first = ui.menu("📁 Project", ["Disconnect"]);
+    await press(env, 100, "Disconnect");
+    await first;
+
+    const answer = ui.confirm("Disconnect Telegram for this folder?", "Telegram will stop responding.");
+    await press(env, 100, "Yes");
+    expect(await answer).toBe(true);
+    await vi.waitFor(() => expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("✅ Yes"));
+    const recorded = transport.editButtons.mock.calls.at(-1)!;
+    expect(recorded[2]).toBe("<b>Disconnect Telegram for this folder?</b>\n\nTelegram will stop responding.\n\n✅ Yes");
+    expect(recorded[3]).toEqual([]);
+
+    // The notice a flow reports after the answer goes on the same message, under the record.
+    ui.notify("Telegram disconnected for this folder.");
+    await vi.waitFor(() => expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("✅ Yes\nTelegram disconnected"));
+    expect(transport.sendText).not.toHaveBeenCalled();
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+  });
+
+  it("Retry flow order: bad value, notice, re-prompt shows the reason; a good value clears it", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+    const first = ui.menu("⚙️ Telegram Config", ["🔄 Retry: 3"]);
+    await press(env, 100, "🔄 Retry: 3");
+    await first;
+
+    const bad = ui.input("Retry count (0-10)", "Current: 3");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    runtime.resolveInput(CHAT, "abc");
+    expect(await bad).toBe("abc");
+    // Same order as configRetryFlow: the reason first, then the prompt again.
+    ui.notify("Must be a number 0-10", "error");
+    const again = ui.input("Retry count (0-10)", "Current: 3");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    await vi.waitFor(() => {
+      const last = transport.editButtons.mock.calls.at(-1)![2];
+      expect(last).toContain("Retry count (0-10)");
+      expect(last).toContain("❌ Must be a number 0-10");
+    });
+
+    runtime.resolveInput(CHAT, "4");
+    expect(await again).toBe("4");
+    ui.notify("🔄 Retry count set to 4");
+    await vi.waitFor(() => {
+      const last = transport.editButtons.mock.calls.at(-1)![2];
+      expect(last).toContain("🔄 Retry count set to 4");
+      expect(last).not.toContain("Must be a number");
+    });
+    expect(transport.sendText).not.toHaveBeenCalled();
+  });
+
+  it("menuEnd ends the page with the answer and no keyboard; a later notice keeps that", async () => {
+    const env = setup();
+    const { transport, ui } = env;
+    const first = ui.menu("📁 Project", ["🟢 Connected → Disconnect"]);
+    await press(env, 100, "🟢 Connected → Disconnect");
+    await first;
+
+    await ui.menuEnd!("Disconnect Telegram for this folder?", "Telegram will stop responding.", "✅ Yes");
+    const ended = transport.editButtons.mock.calls.at(-1)!;
+    expect(ended[2]).toBe("<b>Disconnect Telegram for this folder?</b>\n\nTelegram will stop responding.\n\n✅ Yes");
+    expect(ended[3]).toEqual([]);
+
+    ui.notify("Telegram disconnected for this folder.");
+    await vi.waitFor(() => expect(transport.editButtons.mock.calls.at(-1)![2]).toContain("✅ Yes\nTelegram disconnected"));
+    expect(transport.editButtons.mock.calls.at(-1)![3]).toEqual([]);
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+  });
+
+  it("a select renders its options on the menu message", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+    const first = ui.menu("⚙️ Config", ["Tool"]);
+    await press(env, 100, "Tool");
+    await first;
+
+    const pick = ui.select("Tool rendering", ["  hidden", "● brief", "  full"]);
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+    const button = env.renders.at(-1)!.flat().find((b) => b.text === "  full")!;
+    runtime.resolveInput(CHAT, decodeUiCallback(button.value), 100, true);
+    expect(await pick).toBe("  full");
+    expect(transport.sendButtons).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("telegram ui secret prompts carry the secret-input hint", () => {
+  const HINT = "Secret input: send a message; the bot will not echo it.";
+
+  it("a secret prompt outside a menu says it is secret", async () => {
+    const env = setup();
+    const prompt = env.ui.inputSecret!("Telegram bot token (from @BotFather)");
+    await vi.waitFor(() => expect(env.runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(env.transport.sendButtons.mock.calls[0][1]).toContain(HINT);
+    env.runtime.resolveInput(CHAT, undefined);
+    await prompt;
+  });
+
+  it("a secret prompt on the live menu message says it is secret", async () => {
+    const env = setup();
+    const first = env.ui.menu("🤖 Bots", ["➕ Add bot"]);
+    await press(env, 100, "➕ Add bot");
+    await first;
+    const prompt = env.ui.inputSecret!("Telegram bot token (from @BotFather)");
+    await vi.waitFor(() => expect(env.runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(env.transport.editButtons.mock.calls.at(-1)![2]).toContain(HINT);
+    env.runtime.resolveInput(CHAT, undefined);
+    await prompt;
   });
 });

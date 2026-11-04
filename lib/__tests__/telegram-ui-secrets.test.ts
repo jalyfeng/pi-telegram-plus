@@ -68,7 +68,7 @@ describe("plugin secret prompts feed the SecretStore", () => {
     await vi.waitFor(() => expect(env.sentTexts).toHaveLength(1));
     // Redaction runs before escaping: the secret is gone in raw and escaped
     // form, surrounding markup is still HTML-escaped.
-    expect(env.sentTexts[0]).toBe("<b>info</b>\nvalue &lt;b&gt;***&lt;/b&gt; &amp; done");
+    expect(env.sentTexts[0]).toBe("value &lt;b&gt;***&lt;/b&gt; &amp; done");
   });
 
   it("clearAll() stops redaction for previously registered secrets", async () => {

@@ -1,8 +1,9 @@
 /**
  * OriginTracker: a Telegram-issued command owns the output produced while it
  * runs. A scope ends when the submit completed, focus is back in the editor and
- * no output arrived for IDLE_MS; the draft saved before submission is restored
- * exactly then — not when the host's submit handler returns.
+ * no output arrived for IDLE_MS. The draft saved before submission is restored
+ * as soon as the submit completes (the host has taken the command by then), and
+ * again at scope end for a shell (`!`) scope, whose editor stays busy (#59, #17).
  *
  * §4.3's second completion signal — watch the `session.prompt` the submit caused
  * and keep the scope alive until it returns — is not here yet, and it is not
@@ -122,6 +123,10 @@ export class OriginTracker {
     if (scope.ended) return;
     scope.submitDone = true;
     this.touch(scope);
+    // The host has taken the command text from the editor on submit, so the draft goes back
+    // now instead of when the idle window ends (#59). A shell (`!`) scope keeps its restore at
+    // scope end: its bash component owns the editor until then (#17).
+    if (scope.label !== "!") this.restoreDraft(scope, "submitted");
   }
 
   /** Called by the gateway when the host did not expose a submit result. */
@@ -186,7 +191,7 @@ export class OriginTracker {
     this.end(scope, "idle");
   }
 
-  private restoreDraft(scope: CommandScope, reason: ScopeEndReason): void {
+  private restoreDraft(scope: CommandScope, reason: ScopeEndReason | "submitted"): void {
     const current = this.deps.readDraft();
     // The user typed while the command ran: do not overwrite their input.
     if (current.trim().length > 0 && current !== scope.draft && current !== scope.commandText) {

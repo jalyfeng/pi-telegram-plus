@@ -174,6 +174,22 @@ describe("dynamic TUI catalog in BotMenu", () => {
     expect(commands.find((c) => c.command === "tg")?.description).toBe("Open the Telegram management menu");
   });
 
+  it("offers every command the plugin serves, as the /tg Commands list does (#54)", () => {
+    const commands = buildTelegramMenuCommands(
+      { getCommands: () => [] },
+      {
+        tuiCommands: [{ name: "settings", description: "Open settings", source: "builtin" }],
+        pluginDescriptions: new Map([
+          ["import", "Import a session JSONL file (path on server)"],
+          ["reload", "Reload extensions, skills, prompts, and themes"],
+        ]),
+      },
+    );
+    const names = new Set(commands.map((c) => c.command));
+    expect(names.has("import")).toBe(true);
+    expect(names.has("reload")).toBe(true);
+  });
+
   it("keeps plugin-served commands even when the host catalog lacks them", () => {
     const commands = buildTelegramMenuCommands(
       { getCommands: () => [] },
@@ -385,8 +401,15 @@ describe("/more overflow keyboard", () => {
 });
 
 describe("terminal-only commands in BotMenu", () => {
-  const terminalOnly = ["local", "dump", "open", "stats", "trace", "record", "live", "git"];
+  const terminalOnly = ["local", "dump", "open", "stats", "trace", "record", "live", "git", "tree", "copy", "mcp", "context"];
   const hostCatalog = (names: string[]) => names.map((name) => ({ name, description: `host ${name}`, source: "builtin" as const }));
+
+  it("does not list /tree or /copy in the curated menu when no host catalog is captured", () => {
+    const { commands, overflow } = buildTelegramMenuCommandsFull({ getCommands: () => [] }, { host: "pi" });
+    const names = new Set([...commands, ...overflow].map((c) => c.command));
+    expect(names.has("tree")).toBe(false);
+    expect(names.has("copy")).toBe(false);
+  });
 
   it("keeps terminal-only commands and OMP /cd out of the menu on OMP, but keeps /move", () => {
     const { commands, overflow } = buildTelegramMenuCommandsFull(
@@ -448,11 +471,11 @@ describe("menu descriptions come from the source that owns them", () => {
       { getCommands: () => [] },
       {
         host: "pi",
-        tuiCommands: [{ name: "copy", description: "Copy last agent message to clipboard", source: "autocomplete" }],
-        pluginDescriptions: new Map([["copy", "Send the last assistant reply as text"]]),
+        tuiCommands: [{ name: "hotkeys", description: "Show keyboard shortcuts", source: "autocomplete" }],
+        pluginDescriptions: new Map([["hotkeys", "How to use pi from Telegram"]]),
       },
     );
-    expect(commands.find((c) => c.command === "copy")?.description).toBe("Send the last assistant reply as text");
+    expect(commands.find((c) => c.command === "hotkeys")?.description).toBe("How to use pi from Telegram");
   });
 
   it("records the descriptions registered by the command modules and the menu uses them", () => {

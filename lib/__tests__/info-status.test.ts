@@ -101,7 +101,7 @@ describe("buildStatusSnapshot", () => {
     const html = buildStatusSnapshot(makeSession({
       contextUsage: { tokens: null, contextWindow: 200000, percent: null },
     }));
-    expect(html).toContain("?/200000");
+    expect(html).toContain("<b>context</b>  ? / 200K");
   });
 
   it("formats token counts using footer-like units", () => {
@@ -282,30 +282,12 @@ describe("registerInfoCommands /status handler", () => {
   });
 });
 
-describe("registerInfoCommands /copy handler", () => {
-  it("sends the last assistant text verbatim when a reply exists", async () => {
-    const session = makeSession({ lastAssistantText: "This is the previous reply.\nSecond line" });
+describe("registerInfoCommands does not register /copy", () => {
+  it("leaves /copy to the host, which is terminal-only on Telegram", () => {
     const { registry, handlers } = makeRegistry();
-    const { ui, notify } = makeUi();
-    registerInfoCommands(registry, { getSession: () => session });
+    registerInfoCommands(registry, { getSession: () => makeSession() });
 
-    const copy = handlers.get("copy");
-    expect(copy).toBeDefined();
-    await copy!.handler("", { ui });
-
-    expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify).toHaveBeenCalledWith("This is the previous reply.\nSecond line", "info");
-  });
-
-  it("shows the empty notice when there is no reply", async () => {
-    const session = makeSession({ lastAssistantText: undefined });
-    const { registry, handlers } = makeRegistry();
-    const { ui, notify } = makeUi();
-    registerInfoCommands(registry, { getSession: () => session });
-
-    await handlers.get("copy")!.handler("", { ui });
-
-    expect(notify).toHaveBeenCalledWith("Nothing to copy.", "info");
+    expect(handlers.has("copy")).toBe(false);
   });
 });
 
@@ -369,5 +351,27 @@ describe("formatDebugReport", () => {
     const { registry, handlers } = makeRegistry();
     registerInfoCommands(registry, { getSession: () => undefined });
     expect(handlers.has("debug")).toBe(false);
+  });
+});
+
+describe("buildStatusSnapshot queued and context lines", () => {
+  it("omits the queued line when the host does not report a count", () => {
+    const session = { ...makeSession(), pendingMessageCount: undefined } as unknown as CapturedAgentSession;
+    const html = buildStatusSnapshot(session);
+    expect(html).not.toContain("<b>queued</b>");
+    expect(html).not.toContain("undefined");
+  });
+
+  it("shows the queued count as a number", () => {
+    const html = buildStatusSnapshot(makeSession({ pendingMessageCount: 2 }));
+    expect(html).toContain("<b>queued</b>  2");
+  });
+
+  it("writes context as <used> / <total> (<percent>)", () => {
+    const html = buildStatusSnapshot(makeSession({
+      contextUsage: { tokens: 7800, contextWindow: 200000, percent: 3.9 },
+    }));
+    expect(html).toContain("<b>context</b>  7.8K / 200K (3.9%)");
+    expect(html).not.toContain("3.9%/");
   });
 });

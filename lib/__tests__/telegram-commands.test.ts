@@ -238,7 +238,7 @@ describe("Telegram management flows (bot registry + project binding)", () => {
     const bot = makeBot({ name: "mybot", token: "tok-x" });
     await addBot(bot);
     const ctx = makeCtx();
-    ctx.ui.input.mockResolvedValueOnce("allowedUserId");
+    ctx.ui.select.mockResolvedValueOnce("allowedUserId");
     ctx.ui.input.mockResolvedValueOnce("12345");
 
     await updateBotFlow(ctx.ui, deps, projectDir, bot.id);
@@ -247,11 +247,32 @@ describe("Telegram management flows (bot registry + project binding)", () => {
     expect(registry.bots[0].allowedUserId).toBe(12345);
   });
 
+  it("updateBotFlow reports a renamed bot under its new name", async () => {
+    const bot = makeBot({ name: "omp", token: "tok-rename" });
+    await addBot(bot);
+    const ctx = makeCtx();
+
+    await updateBotFlow(ctx.ui, deps, projectDir, bot.id, "name", "omp-renamed");
+
+    expect(ctx.ui.notify).toHaveBeenCalledWith(`Bot updated: omp-renamed (${bot.id.slice(0, 8)})`, "info");
+    expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("Bot updated: omp "), expect.anything());
+  });
+
+  it("notices show a bot name with & and < as typed, not escaped twice", async () => {
+    const bot = makeBot({ name: "a&b<bot", token: "tok-escape" });
+    await addBot(bot);
+    const ctx = makeCtx();
+
+    await updateBotFlow(ctx.ui, deps, projectDir, bot.id, "name", "a&b<bot-2");
+
+    expect(ctx.ui.notify).toHaveBeenCalledWith(`Bot updated: a&b<bot-2 (${bot.id.slice(0, 8)})`, "info");
+  });
+
   it("updateBotFlow rejects a non-integer allowedUserId", async () => {
     const bot: BotRecord = { id: crypto.randomUUID(), name: "mybot", token: "tok-x", allowedUserId: 1 };
     await addBot(bot);
     const ctx = makeCtx();
-    ctx.ui.input.mockResolvedValueOnce("allowedUserId");
+    ctx.ui.select.mockResolvedValueOnce("allowedUserId");
     ctx.ui.input.mockResolvedValueOnce("not-a-number");
 
     await updateBotFlow(ctx.ui, deps, projectDir, bot.id);

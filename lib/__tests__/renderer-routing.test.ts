@@ -1,9 +1,10 @@
+import { clearOnTerminalSubmit, createHostOriginTracker } from "../controller.ts";
 import { describe, expect, it, vi } from "vitest";
 import { registerTelegramRenderer } from "../renderer.ts";
 import { getCurrentTelegramTurn, runWithTelegramTurn } from "../turn-context.ts";
 import type { TelegramTransport, TelegramTurn } from "../types.ts";
 
-function createRendererHarness(options: { tool?: "hidden" | "brief" | "full" } = {}) {
+function createRendererHarness(options: { tool?: "hidden" | "brief" | "full"; activeTurn?: () => TelegramTurn | undefined; hasActiveTurns?: boolean } = {}) {
   const handlers = new Map<string, Array<(event: any) => Promise<void>>>();
   const sent: Array<{ chatId: number; text: string; messageThreadId?: number; replyToMessageId?: number; richMarkdown?: string }> = [];
   const actions: Array<{ chatId: number; action: string; messageThreadId?: number }> = [];
@@ -40,8 +41,8 @@ function createRendererHarness(options: { tool?: "hidden" | "brief" | "full" } =
   registerTelegramRenderer(pi as any, {
     getConfig: () => ({ botToken: "token", activeChatId: 111, tool: options.tool ?? "full", thinking: "brief" }),
     transport,
-    getActiveTurn: () => getCurrentTelegramTurn(),
-    hasActiveTurns: () => true,
+    getActiveTurn: options.activeTurn ?? (() => getCurrentTelegramTurn()),
+    hasActiveTurns: () => options.hasActiveTurns ?? true,
   });
 
   const emit = async (event: string, payload: any) => {
@@ -301,14 +302,65 @@ describe("Telegram tool-call lines are readable, one per call", () => {
     ["wait", {}, "🔧 wait"],
     ["ask", { i: "Asking", questions: [{ question: "Which branch?", options: ["a", "b"] }, { question: "Second?" }] }, "🔧 ask: Which branch? (+1 more)"],
     ["web_search", { i: "Searching web", query: "oh-my-pi hashline" }, "🔧 web_search: oh-my-pi hashline"],
-    ["task", { i: "Delegating", context: "shared", tasks: [{ name: "Scan", agent: "task", task: "scan the repo", solutionSpace: "x" }, { agent: "task", task: "second", solutionSpace: "y" }] }, "🔧 task: 2 tasks: Scan"],
-    ["task", { i: "Delegating", context: "shared", tasks: [{ agent: "task", task: "Review the diff", solutionSpace: "x" }] }, "🔧 task: 1 task: Review the diff"],
+    ["task", { i: "Delegating", context: "shared", tasks: [{ agent: "scan", task: "scan the repo", solutionSpace: "x" }, { agent: "review", task: "second", solutionSpace: "y" }] }, "🔧 task: 2 agents · scan, review"],
+    ["task", { i: "Delegating", context: "shared", tasks: [{ agent: "e2e-sub", task: "Review the diff", solutionSpace: "x" }] }, "🔧 task: 1 agent · e2e-sub"],
+    ["task", { i: "Delegating", agent: "e2e-sub", task: "Probe the tool" }, "🔧 task: 1 agent · e2e-sub"],
+    ["task", { i: "Delegating", task: "Probe the tool" }, "🔧 task: 1 task: Probe the tool"],
     ["custom_tool", { i: "Custom", target: "thing", count: 3 }, "🔧 custom_tool: thing"],
     ["custom_tool", { i: "Custom", count: 3 }, "🔧 custom_tool"],
   ])("%s %j -> one line", async (toolName, args, expected) => {
     const line = await briefLine(toolName, args);
     expect(line).toBe(expected);
     expect(line).not.toMatch(/[{}"]\s*:|\{ /);
+  });
+
+  it("puts the wait warning on the wait line when the wait had nothing to wait for", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "brief" });
+    await runWithTelegramTurn(turn, async () => {
+      await emit("tool_execution_start", { toolCallId: "wait-1", toolName: "wait", args: {} });
+      await emit("tool_execution_end", {
+        toolCallId: "wait-1",
+        toolName: "wait",
+        isError: false,
+        result: { content: [{ type: "text", text: "Nothing to wait for: no background jobs" }], details: { op: "wait", jobs: [] } },
+      });
+    });
+
+    // The harness records the edit of the start line in `sent` too.
+    expect(sent).toHaveLength(2);
+    expect(sent[1].text).toBe("<blockquote>🔧 wait — Nothing to wait for: no background jobs</blockquote>");
+  });
+
+  it("adds no notice to a wait that waited on a job", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "brief" });
+    await runWithTelegramTurn(turn, async () => {
+      await emit("tool_execution_start", { toolCallId: "wait-2", toolName: "wait", args: {} });
+      await emit("tool_execution_end", {
+        toolCallId: "wait-2",
+        toolName: "wait",
+        isError: false,
+        result: { content: [{ type: "text", text: "Job done" }], details: { op: "wait", jobs: [{ jobId: "a" }] } },
+      });
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toBe("<blockquote>🔧 wait</blockquote>");
+  });
+
+  it("sends a background task completion as a notice in the turn", async () => {
+    const { emit, sent } = createRendererHarness({ tool: "brief" });
+
+    await runWithTelegramTurn(turn, () => emit("message_end", {
+      message: {
+        role: "custom",
+        customType: "async-result",
+        display: true,
+        content: "Background job e2e-sub completed.",
+        details: { jobs: [{ jobId: "e2e-sub", type: "task", label: "e2e-sub", durationMs: 43 }] },
+      },
+    }));
+
+    expect(sent).toEqual([expect.objectContaining({ chatId: 111, text: "<blockquote>✅ Background job completed [task] e2e-sub (43ms)</blockquote>" })]);
   });
 
   it("does not echo raw JSON or the intent field for a tool whose args only hold intent", async () => {
@@ -380,7 +432,7 @@ describe("Telegram tool-call lines are readable, one per call", () => {
 });
 
 describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
-  function createFullModeHarness(options: { failStart?: boolean } = {}) {
+  function createFullModeHarness(options: { failStart?: boolean; sendDelayMs?: number } = {}) {
     const handlers = new Map<string, Array<(event: any) => Promise<void>>>();
     const sent: Array<{ chatId: number; text: string; messageId: number }> = [];
     const edits: Array<{ chatId: number; messageId: number; text: string }> = [];
@@ -393,6 +445,7 @@ describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
           startFailed = true;
           throw new Error("send failed");
         }
+        if (options.sendDelayMs) await new Promise((resolve) => setTimeout(resolve, options.sendDelayMs));
         const messageId = ++nextMessageId;
         sent.push({ chatId, text, messageId });
         return [{ message_id: messageId }];
@@ -421,10 +474,12 @@ describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
       getActiveTurn: () => getCurrentTelegramTurn(),
       hasActiveTurns: () => true,
     });
+    // The host does not await extension handlers: `dispatch` returns without waiting for them.
+    const dispatch = (event: string, payload: any) => Promise.all((handlers.get(event) ?? []).map((handler) => handler(payload)));
     const emit = async (event: string, payload: any) => {
-      await Promise.all((handlers.get(event) ?? []).map((handler) => handler(payload)));
+      await dispatch(event, payload);
     };
-    return { emit, sent, edits };
+    return { emit, dispatch, sent, edits };
   }
 
   const turn = (): TelegramTurn => ({ chatId: 111, queuedAttachments: [] });
@@ -500,6 +555,83 @@ describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
     expect(edits.at(-1)!.text).not.toContain("diff");
   });
 
+  it("edits the start message when the call ends before its start message is sent", async () => {
+    const { emit, dispatch, sent, edits } = createFullModeHarness({ sendDelayMs: 20 });
+
+    await runWithTelegramTurn(turn(), async () => {
+      // A fast write: the host emits its end while the start message is still being sent.
+      const starting = dispatch("tool_execution_start", { toolCallId: "write-1", toolName: "write", args: { path: "two.md", content: "one\n" } });
+      await emit("tool_execution_end", {
+        toolCallId: "write-1",
+        toolName: "write",
+        isError: false,
+        result: { content: [{ type: "text", text: "Successfully wrote 4 bytes to two.md" }], details: {} },
+      });
+      await starting;
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("🔧 write: two.md");
+    expect(edits).toHaveLength(1);
+    expect(edits[0].messageId).toBe(sent[0].messageId);
+    expect(edits[0].text).toContain("Successfully wrote 4 bytes to two.md");
+  });
+
+  it("drops the hashline header from a write result, shown with the call", async () => {
+    const { emit, edits } = createFullModeHarness();
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "write-2", toolName: "write", args: { path: "two.md", content: "one\n" } });
+      await emit("tool_execution_end", {
+        toolCallId: "write-2",
+        toolName: "write",
+        isError: false,
+        result: { content: [{ type: "text", text: "[two.md#B686]\nSuccessfully wrote 4 bytes to two.md" }], details: {} },
+      });
+    });
+
+    const final = edits.at(-1)!.text;
+    expect(final).toContain("Successfully wrote 4 bytes to two.md");
+    expect(final).not.toContain("[two.md#B686]");
+  });
+
+  it("keeps a bracketed line that is not an OMP hashline header in a bash result", async () => {
+    const { emit, edits } = createFullModeHarness();
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "bash-h", toolName: "bash", args: { command: "cat x" } });
+      await emit("tool_execution_end", {
+        toolCallId: "bash-h",
+        toolName: "bash",
+        isError: false,
+        result: { content: [{ type: "text", text: "[two.md#B686]" }] },
+      });
+    });
+
+    expect(edits.at(-1)!.text).toContain("[two.md#B686]");
+  });
+
+  it("renders the edit diff as its own code block even when the result text leaves a fence open", async () => {
+    const { emit, edits } = createFullModeHarness();
+    // An unclosed fence in the result text must not swallow or re-wrap the diff.
+    const diff = "-1|a | b\n+1|a | c\n 2|`";
+
+    await runWithTelegramTurn(turn(), async () => {
+      await emit("tool_execution_start", { toolCallId: "edit-f", toolName: "edit", args: { path: "notes.md" } });
+      await emit("tool_execution_end", {
+        toolCallId: "edit-f",
+        toolName: "edit",
+        isError: false,
+        result: { content: [{ type: "text", text: "Updated notes.md\n```" }], details: { diff } },
+      });
+    });
+
+    const final = edits.at(-1)!.text;
+    expect(final).toContain("<pre><code class=\"language-diff\">-1|a | b\n+1|a | c\n 2|`\n</code></pre>");
+    expect(final).not.toContain("```");
+    expect(final).not.toMatch(/^`$/m);
+  });
+
   it("sends the result as a new message when the start message could not be sent", async () => {
     const { emit, sent, edits } = createFullModeHarness({ failStart: true });
 
@@ -518,3 +650,34 @@ describe("full tool mode: one message per tool call (P2-2, P2-3)", () => {
     expect(sent[0].text).toContain("notes.md");
   });
 });
+
+describe("Telegram reply target for a host-started turn (#61, #60)", () => {
+  it("quotes the Telegram message that started the host turn when no Telegram turn is running", async () => {
+    // A forced turn, a /loop repeat or a /goal continuation: the host starts it, so no Telegram
+    // turn is active, but the message that started the activity is the reply target.
+    const origin: TelegramTurn = { chatId: 111, sourceMessageId: 77, queuedAttachments: [] };
+    const { emit, sent } = createRendererHarness({ activeTurn: () => origin });
+
+    await emit("message_end", { message: { role: "assistant", content: "forced turn answer" } });
+
+    expect(sent).toEqual([expect.objectContaining({ chatId: 111, replyToMessageId: 77, text: expect.stringContaining("forced turn answer") })]);
+  });
+});
+
+describe("a terminal prompt's reply does not quote a Telegram message (#61)", () => {
+  it("after a terminal submit the reply has no reply_to again", async () => {
+    const origins = createHostOriginTracker();
+    origins.note({ chatId: 111, sourceMessageId: 77 });
+    // No Telegram turn runs: the host reports no active turns, as index.ts does.
+    const { emit, sent } = createRendererHarness({ activeTurn: () => origins.turn(), hasActiveTurns: false });
+
+    await emit("message_end", { message: { role: "assistant", content: "host-started answer" } });
+    clearOnTerminalSubmit(origins, { source: "interactive" }, false);
+    await emit("message_end", { message: { role: "assistant", content: "terminal answer" } });
+
+    expect(sent[0]).toEqual(expect.objectContaining({ replyToMessageId: 77, text: expect.stringContaining("host-started answer") }));
+    expect(sent[1]).toEqual(expect.objectContaining({ chatId: 111, text: expect.stringContaining("terminal answer") }));
+    expect(sent[1]?.replyToMessageId).toBeUndefined();
+  });
+});
+

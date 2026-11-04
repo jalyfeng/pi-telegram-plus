@@ -244,18 +244,20 @@ describe("tsp picker read", () => {
     // The dashboard declares its kind column; facts show only for declared columns.
     const withColumns = { ...props, columns: [{ id: "kind", format: "dim" }] };
     const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: withColumns }), ctxFor()));
+    // The status glyph is the row's mark, not part of its label: a summary names the label alone.
     expect(model.items).toEqual([
-      { key: "iw4iz75jiyl7", label: "⦸ deskvnc", description: "kind: Skills", note: "kind: Skills", current: false, focused: false },
+      { key: "iw4iz75jiyl7", label: "deskvnc", mark: "⦸ ", description: "kind: Skills", note: "kind: Skills", current: false, focused: false },
       {
         key: "cmqiua1rv6z1",
-        label: "○ hf-cli",
+        label: "hf-cli",
+        mark: "○ ",
         description: "kind: Skills",
         note: "kind: Skills",
         badges: ["shadowed"],
         current: false,
         focused: false,
       },
-      { key: "1i3hwdoo7tpkv", label: "● go-add-cleanup", description: "kind: Rules", note: "kind: Rules", current: false, focused: false },
+      { key: "1i3hwdoo7tpkv", label: "go-add-cleanup", mark: "● ", description: "kind: Rules", note: "kind: Rules", current: false, focused: false },
     ]);
     const rendered = renderDialog(model, { sessionId: "s1", generation: 1 });
     expect(rendered.text).toContain("⦸ deskvnc");
@@ -458,7 +460,7 @@ describe("tsp picker tabs, scopes and action bar", () => {
     const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: treeProps }), ctxFor()));
     expect(model.extraActions).toEqual([
       { label: "Default", key: "tab:0" },
-      { label: "● No tools", key: "tab:1" },
+      { label: "No tools", mark: "● ", key: "tab:1" },
       { label: "All", key: "tab:2" },
     ]);
   });
@@ -486,7 +488,7 @@ describe("tsp picker tabs, scopes and action bar", () => {
     const model = asSelect(tspPickerAdapter.read(makeComponent({ k: "picker", p: props }), ctxFor()));
     expect(model.extraActions).toEqual([
       { label: "Current", key: "scope:0" },
-      { label: "● All", key: "scope:2" },
+      { label: "All", mark: "● ", key: "scope:2" },
     ]);
     const component = makeComponent({ k: "picker", p: props });
     expect(tspPickerAdapter.act(component, { type: "key", name: "scope:2" }, ctxFor())).toBe(true);
@@ -575,7 +577,7 @@ describe("tsp picker empty state with controls", () => {
     expect(model.items).toEqual([]);
     expect(model.total).toBe(0);
     expect(model.extraActions).toEqual([
-      { label: "● Default", key: "tab:0" },
+      { label: "Default", mark: "● ", key: "tab:0" },
       { label: "All", key: "tab:1" },
     ]);
   });
@@ -2293,5 +2295,336 @@ describe("tsp picker model browser (agents hub model override)", () => {
     const browser = modelBrowser();
     expect(tspPickerAdapter.act(agentsHub(browser), { type: "search", query: "mock" }, ctxFor())).toBe(true);
     expect(browser.setQuery).toHaveBeenCalledWith("mock");
+  });
+});
+
+describe("tsp settings row warning marker (#35)", () => {
+  it("carries the host's warning mark onto a row whose description has a warning", () => {
+    const props = {
+      title: "Settings",
+      pages: [],
+      page: "thinking",
+      sections: [
+        {
+          id: "s1",
+          title: "Thinking",
+          rows: [
+            { id: "external", label: "External Thinking", warning: "Sends thinking to a third party", control: { k: "switch", on: false } },
+            { id: "plain", label: "Show Thinking", control: { k: "switch", on: true } },
+          ],
+        },
+      ],
+    };
+    const model = asSettings(tspPrefsAdapter.read(makeComponent({ k: "prefs", p: props }), ctxFor()));
+    expect(model.items).toEqual([
+      { key: "external", label: "External Thinking ⚠", value: "Off", values: ["On", "Off"], group: "Thinking" },
+      { key: "plain", label: "Show Thinking", value: "On", values: ["On", "Off"], group: "Thinking" },
+    ]);
+  });
+});
+
+describe("tsp picker title from the host's own title field (#37)", () => {
+  it("uses the component's title when the picker describes none (the session picker)", () => {
+    const tree = { k: "picker", p: { items: [{ id: "a", label: "alpha" }], order: ["a"], query: "" } };
+    const component = { ...makeComponent(tree), title: "Resume Session (current folder)" };
+    const model = asSelect(tspPickerAdapter.read(component, ctxFor()));
+    expect(model.title).toBe("Resume Session (current folder)");
+  });
+
+  it("keeps the picker's own title over the component field", () => {
+    const tree = { k: "picker", p: { title: "Models", items: [{ id: "a", label: "alpha" }] } };
+    const component = { ...makeComponent(tree), title: "Something else" };
+    expect(asSelect(tspPickerAdapter.read(component, ctxFor())).title).toBe("Models");
+  });
+
+  it("falls back to Select when neither the picker nor the component names a title", () => {
+    const tree = { k: "picker", p: { items: [{ id: "a", label: "alpha" }] } };
+    expect(asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor())).title).toBe("Select");
+  });
+});
+
+describe("tsp picker pin marker (#38)", () => {
+  it("shows the pin mark the host puts on a pinned row's icon", () => {
+    const tree = {
+      k: "picker",
+      p: {
+        items: [
+          { id: "a", label: "pinned one", icon: "pin" },
+          { id: "b", label: "plain one" },
+        ],
+      },
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.items.map((item) => item.label)).toEqual(["pinned one", "plain one"]);
+    expect(model.items.map((item) => item.mark)).toEqual(["📌 ", undefined]);
+  });
+});
+
+describe("tsp settings search header and per-tab counts (#36)", () => {
+  it("names the matching tabs with their counts instead of the page being left", () => {
+    const props = {
+      title: "omp settings",
+      pages: [
+        { id: "model", label: "Model" },
+        { id: "appearance", label: "Appearance" },
+        { id: "providers", label: "Providers" },
+      ],
+      page: "appearance",
+      query: "thinking",
+      sections: [
+        {
+          id: "model/think",
+          title: "Thinking",
+          page: "model",
+          rows: [
+            { id: "model.think", label: "Thinking", control: { k: "switch", on: true } },
+            { id: "model.external", label: "External Thinking", control: { k: "switch", on: false } },
+          ],
+        },
+        {
+          id: "appearance/think",
+          title: "Thinking",
+          page: "appearance",
+          rows: [{ id: "appearance.think", label: "Show Thinking", control: { k: "switch", on: true } }],
+        },
+      ],
+    };
+    const model = asSettings(tspPrefsAdapter.read(makeComponent({ k: "prefs", p: props }), ctxFor()));
+    expect(model.subtitle).toBe("Model (2) · Appearance (1)");
+    expect(model.search).toEqual({ query: "thinking" });
+  });
+
+  it("keeps the current page label when no search is active", () => {
+    const props = {
+      title: "omp settings",
+      pages: [{ id: "appearance", label: "Appearance" }],
+      page: "appearance",
+      query: "",
+      sections: [],
+    };
+    const model = asSettings(tspPrefsAdapter.read(makeComponent({ k: "prefs", p: props }), ctxFor()));
+    expect(model.subtitle).toBe("Appearance");
+  });
+});
+
+describe("tsp input title from styled spans (#68)", () => {
+  it("reads the hook input's title line when the host sends it as spans", () => {
+    const field = {
+      describe: () => ({ k: "input", p: { text: "", placeholder: 'e.g. "ts errors"' } }),
+      handleNativeEvent: () => undefined,
+    };
+    const component = makeComponent({
+      k: "col",
+      c: [
+        { k: "text", p: { role: "omp.hook-input.title", spans: [{ t: "Describe what to detect and fix" }] } },
+        field,
+      ],
+    });
+    expect(tspInputAdapter.read(component, ctxFor())).toMatchObject({
+      kind: "input",
+      title: "Describe what to detect and fix",
+      placeholder: 'e.g. "ts errors"',
+    });
+  });
+});
+
+describe("tsp login field is secret (#71)", () => {
+  it("masks a field the login sheet puts in its prompt row, as pi does for every login prompt", () => {
+    const field = {
+      describe: () => ({ k: "input", p: { text: "", placeholder: undefined } }),
+      handleInput: () => undefined,
+    };
+    const sheet = makeComponent({
+      k: "overlay",
+      p: { role: "omp.overlay.login", head: "Sign in to MockAuth" },
+      c: [
+        {
+          k: "col",
+          p: { role: "omp.login.prompt" },
+          c: [{ k: "text", p: { role: "omp.login.label", text: "Paste the authorization code, then press Enter" } }, field],
+        },
+      ],
+    });
+    expect(tspLoginAdapter.read(sheet, ctxFor())).toMatchObject({
+      kind: "input",
+      title: "Paste the authorization code",
+      secret: true,
+    });
+  });
+});
+
+describe("tsp wizard name step note (#67)", () => {
+  it("shows the wizard's input rule under the field, in brackets as the terminal draws it", () => {
+    const field = {
+      describe: () => ({ k: "input", p: { text: "github", placeholder: "github" } }),
+      handleNativeEvent: () => undefined,
+    };
+    const component = makeComponent({
+      k: "col",
+      c: [
+        { k: "text", p: { role: "omp.mcpAdd.lead", text: "A unique name: it labels the server in /mcp." } },
+        { k: "text", p: { role: "omp.mcpAdd.title", text: "Name the server" } },
+        field,
+        { k: "text", p: { role: "omp.mcpAdd.note", text: "Letters, numbers, dash, underscore, dot and colon" } },
+      ],
+    });
+    expect(tspInputAdapter.read(component, ctxFor())).toMatchObject({
+      kind: "input",
+      title: "Name the server",
+      detail: "A unique name: it labels the server in /mcp.\n[Letters, numbers, dash, underscore, dot and colon]",
+    });
+  });
+});
+
+describe("tsp picker confirm button duplicates the tappable row (#65, #60)", () => {
+  it("drops the confirm action button: tapping the row does the same", () => {
+    const tree = {
+      k: "picker",
+      p: {
+        title: "Sign in",
+        subtitle: "Pick a provider",
+        items: [{ id: "a", label: "alpha" }],
+        actions: [
+          { id: "confirm", label: "Sign in", primary: true },
+          { id: "close", label: "Close", end: true },
+        ],
+      },
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.title).toBe("Sign in");
+    expect(model.subtitle).toBe("Pick a provider");
+    expect(model.extraActions).toBeUndefined();
+  });
+
+  it("keeps the other action buttons beside the list", () => {
+    const tree = {
+      k: "picker",
+      p: {
+        items: [{ id: "a", label: "alpha" }],
+        actions: [
+          { id: "confirm", label: "Select", primary: true },
+          { id: "delete", label: "Delete" },
+        ],
+      },
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.extraActions).toEqual([{ label: "Delete", key: "act:1" }]);
+  });
+});
+
+describe("tsp picker preview of the highlighted item (#64)", () => {
+  it("shows the compact preview's facts and role chips as text under the list head, one block per child", () => {
+    const tree = {
+      k: "picker",
+      p: { items: [{ id: "m", label: "mock-model" }], selected: "m" },
+      c: [
+        { k: "text", p: { text: "mock-model", role: "omp.picker.title" } },
+        {
+          k: "kv",
+          p: {
+            items: [
+              { k: "ctx", v: "200k" },
+              { k: "out", v: "4.1k" },
+              { k: "price", v: "free" },
+            ],
+            layout: "inline",
+          },
+        },
+        { k: "row", c: [{ k: "badge", p: { text: "default" } }, { k: "badge", p: { text: "smol" } }] },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.subtitle).toBe("mock-model\nctx: 200k · out: 4.1k · price: free\n[default] [smol]");
+    expect(model.notice).toBeUndefined();
+  });
+
+  it("puts each item of a grid of facts on its own line, the title on its own line", () => {
+    const tree = {
+      k: "picker",
+      p: { items: [{ id: "m", label: "mock-model" }], selected: "m", subtitle: "Models" },
+      c: [
+        { k: "text", p: { text: "Mock Model", role: "omp.picker.title" } },
+        {
+          k: "kv",
+          p: {
+            items: [
+              { k: [{ t: "Context" }], v: [{ t: "200,000" }] },
+              { k: [{ t: "Compacts at" }], v: [{ t: "170,000 · 85% of window" }] },
+              { k: [{ t: "Max output" }], v: [{ t: "4,096" }] },
+            ],
+          },
+        },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.subtitle).toBe(
+      "Models\nMock Model\nContext: 200,000\nCompacts at: 170,000 · 85% of window\nMax output: 4,096",
+    );
+  });
+
+  it("shows nothing extra when the picker has no preview", () => {
+    const tree = { k: "picker", p: { items: [{ id: "m", label: "mock-model" }] } };
+    expect(asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor())).subtitle).toBeUndefined();
+  });
+});
+describe("tsp prefs submenu opened in the terminal (#34)", () => {
+  const editorNode = { k: "col", p: { role: "omp.prefs.editor" }, c: [{ k: "list", p: { selected: "dark" }, c: [] }] };
+
+  function terminalSubmenuHost(props: Record<string, unknown>, editorOpen: boolean) {
+    const events: unknown[] = [];
+    return {
+      events,
+      describe: () => ({ k: "prefs", p: props, c: editorOpen ? [editorNode] : [] }),
+      handleNativeEvent: (event: unknown) => {
+        events.push(event);
+        const change = event as { type?: string; item?: unknown; value?: unknown };
+        if (change.type === "change" && typeof change.item === "string") applyPrefsChange(props, change.item, change.value);
+      },
+    };
+  }
+
+  it("shows the editor the terminal opened as the same submenu Telegram opens for that row", () => {
+    const props = { ...pageProps(), focus: "theme" };
+    const host = terminalSubmenuHost(props, true);
+    const model = asSettings(tspPrefsAdapter.read(host, ctxFor()));
+    expect(model.submenu?.itemKey).toBe("theme");
+    expect(model.submenu?.model).toMatchObject({ kind: "select", title: "Theme" });
+    expect(model.submenu?.model.kind === "select" ? model.submenu.model.items.map((item) => item.key) : []).toEqual(["dark", "light"]);
+  });
+
+  it("sends the same change event for a choice the user takes in the terminal's editor", () => {
+    const props = { ...pageProps(), focus: "theme" };
+    const host = terminalSubmenuHost(props, true);
+    tspPrefsAdapter.read(host, ctxFor());
+    expect(tspPrefsAdapter.act(host, { type: "choose", key: "light" }, ctxFor())).toBe(true);
+    expect(host.events).toEqual([{ type: "change", key: "", item: "theme", value: "light" }]);
+  });
+
+  it("drops the submenu once the terminal closes its editor", () => {
+    const props = { ...pageProps(), focus: "theme" };
+    const host = terminalSubmenuHost(props, true);
+    tspPrefsAdapter.read(host, ctxFor());
+    const closed = terminalSubmenuHost(props, false);
+    expect(asSettings(tspPrefsAdapter.read(closed, ctxFor())).submenu).toBeUndefined();
+  });
+});
+
+describe("tsp prefs submenu as the host really describes it (#34, real dump)", () => {
+  it("reads an open submenu that the page holds as a bare described component child", () => {
+    const props = { ...pageProps(), focus: "theme" };
+    const submenu = { describe: () => ({ k: "col", c: [{ k: "list", p: { selected: "dark" }, c: [] }] }), handleNativeEvent: () => undefined };
+    const events: unknown[] = [];
+    const host = {
+      events,
+      describe: () => ({ k: "prefs", p: props, c: [submenu, { k: "col", p: { role: "omp.prefs.preview.status" }, c: [] }] }),
+      handleNativeEvent: (event: unknown) => {
+        events.push(event);
+        const change = event as { type?: string; item?: unknown; value?: unknown };
+        if (change.type === "change" && typeof change.item === "string") applyPrefsChange(props, change.item, change.value);
+      },
+    };
+    const model = asSettings(tspPrefsAdapter.read(host, ctxFor()));
+    expect(model.submenu?.itemKey).toBe("theme");
+    expect(model.submenu?.model.kind === "select" ? model.submenu.model.items.map((item) => item.key) : []).toEqual(["dark", "light"]);
   });
 });

@@ -304,8 +304,13 @@ function renderNode(node: NativeNodeLike, keypath: string, owner: object, walk: 
         .map((item) => `${escapeHtml(walk.redact(tspText(item.k)))}: ${escapeHtml(walk.redact(tspText(item.v)))}`)
         .join("\n");
     }
-    case "meter":
+    case "meter": {
+      // A bare drawing (no label, parts or marks) only repeats a value the panel prints beside it.
+      const parts = Array.isArray(props.parts) ? props.parts : [];
+      const marks = Array.isArray(props.marks) ? props.marks : [];
+      if (parts.length === 0 && marks.length === 0 && tspText(props.label) === "") return null;
       return renderMeter(props, walk);
+    }
     case "progress":
       return escapeHtml(walk.redact(meterText(props)));
     case "list":
@@ -326,8 +331,11 @@ function renderNode(node: NativeNodeLike, keypath: string, owner: object, walk: 
       const body = children(node, keypath, owner, walk, depth);
       return [heading, body].filter((part): part is string => part !== null && part !== "").join("\n");
     }
-    case "row":
-      return children(node, keypath, owner, walk, depth, " ");
+    case "row": {
+      // Columns are blocks of lines: side by side they would run the last line of one into the first of the next.
+      const stacked = Array.isArray(node.c) && (node.c as unknown[]).some((child) => isObject(child) && child.k === "col");
+      return children(node, keypath, owner, walk, depth, stacked ? "\n" : " ");
+    }
     case "col":
       return children(node, keypath, owner, walk, depth);
     default: {

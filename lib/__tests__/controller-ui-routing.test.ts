@@ -126,10 +126,9 @@ describe("Telegram controller UI routing", () => {
     ]));
     expect(sent.find((item) => item.chatId === 111 && item.text.includes("B "))).toBeUndefined();
     expect(sent.find((item) => item.chatId === 222 && item.text.includes("A "))).toBeUndefined();
-    // Host mode prints notifications on the terminal as well as in the chat by
-    // design (see createHostPromptUi); the isolation point is that each copy
-    // reaches its OWN chat and never the other one.
-    expect(tuiNotifications).toEqual(["A start", "B start", "A end", "B end"]);
+    // A Telegram-issued command's notices reach only its own chat: none is forwarded to the
+    // host terminal UI (see createHostPromptUi).
+    expect(tuiNotifications).toEqual([]);
     expect(currentUi).toBe(tuiUi);
     expect(activeMode).toBe("tui");
   });
@@ -1027,5 +1026,53 @@ class Pi085RunnerDouble {
     expect(probe.text).not.toContain("Maximum call stack");
     expect(probe.text).toContain("theme:function");
     expect(probe.text).toContain("spread:function");
+  });
+});
+
+describe("a Telegram-issued command's notices stay out of the terminal", () => {
+  it.each([
+    ["tg", "Bot added: demo"],
+    ["hotkeys", "Terminal shortcuts only work in the terminal. In Telegram:"],
+  ])("/%s notify reaches the chat only, not the host terminal UI", async (name, notice) => {
+    const sent: Array<{ chatId: number; text: string; rows?: Array<Array<{ text: string; value: string }>>; messageThreadId?: number; replyToMessageId?: number; message_id?: number }> = [];
+    const transport = createTransport(sent);
+    const tuiUi = { notify: vi.fn(async (..._args: unknown[]) => undefined) };
+    const commandCtx = { ui: tuiUi, isIdle: () => false, waitForIdle: async () => undefined };
+    // OMP runner shape (no setUIContext): the command runs in host prompt mode.
+    const session = {
+      extensionRunner: {
+        getUIContext: () => tuiUi,
+        createContext: () => ({ ui: tuiUi }),
+        createCommandContext: () => commandCtx,
+        getCommand: () => undefined,
+      },
+    } as unknown as CapturedAgentSession;
+    const uiRuntime = createTelegramUiRuntime({ getSession: () => session, transport });
+    const commands = new Map<string, TelegramCommandHandler>([
+      [name, async (_args, ctx) => { await ctx.ui.notify(notice, "info"); }],
+    ]);
+    const controller = createTelegramController({
+      getSession: () => session,
+      transport,
+      ui: uiRuntime,
+      authorizeUser: async () => true,
+      setActiveChatId: async () => undefined,
+      getBotUsername: () => "test-bot",
+      telegramCommands: commands,
+      tuiBridge: availableBridge(),
+      getActiveTurn: () => undefined,
+      beginTelegramTurn: (chatId) => ({ chatId, queuedAttachments: [] }),
+      endTelegramTurn: () => undefined,
+    });
+
+    await controller.handleMessage({ message_id: 1, chat: { id: 777 }, from: { id: 1 }, text: `/${name}` });
+    // The notice lands on the chat either as its own message or as an edit of the command's ack.
+    const edits = (transport.editText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const reachedChat = () => sent.some((item) => item.text.includes(notice))
+      || edits.some((call) => String(call[2] ?? "").includes(notice));
+    await vi.waitFor(() => expect(reachedChat()).toBe(true));
+
+    const forwarded = tuiUi.notify.mock.calls.filter((args) => String(args[0]).includes(notice));
+    expect(forwarded).toEqual([]);
   });
 });

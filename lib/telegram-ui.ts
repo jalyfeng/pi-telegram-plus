@@ -2,9 +2,13 @@ import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { routeCommandNotice } from "./tui/command-context.ts";
 import { encodeUiCallback } from "./callback-protocol.ts";
 import { escapeHtml } from "./html.ts";
+import { log } from "./logger.ts";
+import { SECRET_INPUT_HINT } from "./tui/render-telegram.ts";
 import { hostUiBehindRouted } from "./pi-compat.ts";
 import type { SecretStore } from "./tui/secrets.ts";
-import type { CapturedAgentSession, PendingInputResolver, TelegramTransport } from "./types.ts";
+import type { CapturedAgentSession, PendingInputResolver, TelegramButton, TelegramTransport } from "./types.ts";
+
+const uiLog = log.child("telegram-ui");
 
 const MAX_BUTTON_TEXT = 60;
 const PAGE_SIZE = 10;
@@ -26,6 +30,8 @@ export type TelegramUiContext = ExtensionUIContext & {
   closeMenu: () => Promise<void>;
   /** Id of the live menu message, while its keyboard is still attached. */
   menuMessageId: () => number | undefined;
+  /** End the live menu page: the question and the answer stay on it, the keyboard goes. */
+  menuEnd: (title: string, body?: string, answer?: string) => Promise<void>;
 };
 
 export type TelegramUiRuntime = {
@@ -103,6 +109,14 @@ export function createTelegramUiRuntime(deps: {
     return deps.transport.sendButtons(chatId, text, rows, messageThreadId, sourceMessageId);
   };
 
+  /** Telegram text of a page: the bold title, the body, then the notices of the live menu. */
+  const pageText = (title: string, body: string | undefined, notices: string[]) => {
+    const parts = [`<b>${escapeHtml(title)}</b>`];
+    if (body) parts.push(escapeHtml(body));
+    if (notices.length > 0) parts.push(notices.map((notice) => escapeHtml(notice)).join("\n"));
+    return parts.join("\n\n");
+  };
+
   /** Track the currently active flow for each chat/thread (for sendOrReplace lookups). */
   const activeFlowByTarget = new Map<string, string>();
 
@@ -116,8 +130,7 @@ export function createTelegramUiRuntime(deps: {
     if (page < pageCount - 1) nav.push({ text: "Next ▶", value: cb(flowId, `p:${page + 1}`) });
     nav.push({ text: "Cancel", value: cb(flowId, "cancel") }); rows.push(nav);
     const suffix = pageCount > 1 ? ` (${page + 1}/${pageCount})` : "";
-    const head = `<b>${escapeHtml(title + suffix)}</b>`;
-    return { text: body ? `${head}\n\n${escapeHtml(body)}` : head, rows, pageCount };
+    return { title: title + suffix, body, rows, pageCount };
   };
 
   return {
@@ -137,21 +150,77 @@ export function createTelegramUiRuntime(deps: {
         // Inside a command's call chain the line belongs to that command's message
         // (one command, one message); otherwise it is a message of its own.
         const prefix = level === "error" ? "❌ " : level === "warning" ? "⚠️ " : "";
-        if (routeCommandNotice(`${prefix}${escapeHtml(redact(message))}`)) return;
+        const line = `${prefix}${redact(message)}`;
+        if (routeCommandNotice(escapeHtml(line))) return;
+        if (menuMessageId !== undefined) {
+          // A live /tg menu keeps the result on its own message, under the page.
+          menuNotices.push(line);
+          if (menuView) void drawMenu(menuView.title, menuView.body, menuView.rows).catch(uiLog.swallow("warn", "notice on menu message failed", { chatId }));
+          return;
+        }
         const fid = activeFlowByTarget.get(target);
-        void sendOrReplaceText(chatId, messageThreadId, sourceMessageId, `<b>${escapeHtml(String(level))}</b>\n${escapeHtml(redact(message))}`, fid);
+        void sendOrReplaceText(chatId, messageThreadId, sourceMessageId, escapeHtml(line), fid);
       };
 
-      // Live menu message (keyboard still attached). Successive menu() calls edit it
-      // in place so nested navigation stays on one message. Any other interactive
-      // prompt releases it, so the next menu() renders fresh below that prompt.
-      // notify() does not release: the menu keeps updating where the user tapped.
+      // Live menu message (keyboard still attached). While it is live, the menu's
+      // whole flow stays on it: successive menu() calls, the prompts, selects and
+      // confirms of this UI, and the notices they report are all drawn on that one
+      // message (edited in place). Notices stay under the page until the user answers.
       let menuMessageId: number | undefined;
+      /** The last page drawn on the menu message (title, body, keyboard). */
+      let menuView: { title: string; body?: string; rows: TelegramButton[][] } | undefined;
+      /** Notices drawn under the menu page; cleared when the user answers. */
+      let menuNotices: string[] = [];
+      /** Menu-message edits run one after another, so the last page drawn is the last one sent. */
+      let menuWrites: Promise<void> = Promise.resolve();
+      const drawMenu = (title: string, body: string | undefined, rows: TelegramButton[][]): Promise<void> => {
+        const id = menuMessageId;
+        if (id === undefined) return Promise.resolve();
+        menuView = { title, body, rows };
+        const text = pageText(title, body, menuNotices);
+        menuWrites = menuWrites.catch(() => undefined).then(() => deps.transport.editButtons(chatId, id, text, rows));
+        return menuWrites;
+      };
       const releaseMenu = () => {
         if (menuMessageId === undefined) return;
-        const id = menuMessageId; menuMessageId = undefined;
+        const id = menuMessageId; menuMessageId = undefined; menuView = undefined; menuNotices = [];
         void deps.transport.removeInlineKeyboard(chatId, id);
       };
+      /** A prompt answered on the menu message: its keyboard goes, its text stays. The
+       *  answer's own line (if any) becomes the only notice; the earlier notices are answered. */
+      const settleMenuAnswer = (answerLine?: string) => {
+        menuNotices = answerLine === undefined ? [] : [answerLine];
+        if (menuView) void drawMenu(menuView.title, menuView.body, []).catch(uiLog.swallow("warn", "settling menu prompt failed", { chatId }));
+      };
+
+      /** One text or button prompt. On a live menu it is drawn on the menu message; otherwise it is a message of its own. */
+      const prompt = async (
+        flowId: string,
+        legacyText: string,
+        title: string,
+        body: string | undefined,
+        rows: TelegramButton[][],
+        sensitive: boolean,
+        acceptsText: boolean,
+        onShown?: (messageId: number) => void,
+        answerLine?: (value: string | boolean | undefined) => string | undefined,
+      ) => {
+        activeFlowByTarget.set(target, flowId);
+        let promptMessageId: number;
+        if (menuMessageId !== undefined) {
+          await drawMenu(title, body, rows);
+          promptMessageId = menuMessageId;
+        } else {
+          promptMessageId = (await sendOrReplaceButtons(chatId, messageThreadId, sourceMessageId, legacyText, rows, flowId)).message_id;
+        }
+        onShown?.(promptMessageId);
+        const value = await waitInput(chatId, messageThreadId, flowId, sensitive, acceptsText, promptMessageId);
+        activeFlowByTarget.delete(target);
+        if (menuMessageId !== undefined && promptMessageId === menuMessageId) settleMenuAnswer(answerLine?.(value));
+        else void deps.transport.removeInlineKeyboard(chatId, promptMessageId);
+        return value;
+      };
+      const cancelRow = (flowId: string): TelegramButton[][] => [[{ text: "Cancel", value: cb(flowId, "cancel") }]];
 
       const created: TelegramUiContext = {
         chatId,
@@ -166,36 +235,37 @@ export function createTelegramUiRuntime(deps: {
         // enter it either.
         notify: notifyFn,
         confirm: async (title, message) => {
-          releaseMenu();
           const flowId = beginFlow();
-          activeFlowByTarget.set(target, flowId);
-          const sent = await sendOrReplaceButtons(chatId, messageThreadId, sourceMessageId, `<b>${escapeHtml(redact(title))}</b>\n${escapeHtml(redact(message))}`, [[
-            { text: "Yes", value: cb(flowId, "yes") }, { text: "No", value: cb(flowId, "no") },
-          ]], flowId);
-          onConfirmMessage?.(sent.message_id);
-          const value = await waitInput(chatId, messageThreadId, flowId, false, false, sent.message_id);
-          activeFlowByTarget.delete(target);
-          void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
+          const value = await prompt(
+            flowId,
+            `<b>${escapeHtml(redact(title))}</b>\n${escapeHtml(redact(message))}`,
+            redact(title), redact(message),
+            [[{ text: "Yes", value: cb(flowId, "yes") }, { text: "No", value: cb(flowId, "no") }]],
+            false, false,
+            (messageId) => onConfirmMessage?.(messageId),
+            (answer) => (answer === true ? "✅ Yes" : answer === false ? "❌ No" : undefined),
+          );
           return value === true || value === "yes";
         },
         input: async (title, placeholder) => {
-          releaseMenu();
           const flowId = beginFlow();
-          activeFlowByTarget.set(target, flowId);
-          const sent = await sendOrReplaceButtons(chatId, messageThreadId, sourceMessageId, `<b>${escapeHtml(redact(title))}</b>${placeholder ? `\n${escapeHtml(redact(placeholder))}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
-          const value = await waitInput(chatId, messageThreadId, flowId, false, true, sent.message_id);
-          activeFlowByTarget.delete(target);
-          void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
+          const value = await prompt(
+            flowId,
+            `<b>${escapeHtml(redact(title))}</b>${placeholder ? `\n${escapeHtml(redact(placeholder))}` : ""}`,
+            redact(title), placeholder ? redact(placeholder) : undefined,
+            cancelRow(flowId), false, true,
+          );
           return typeof value === "string" ? value : undefined;
         },
         inputSecret: async (title: string, placeholder?: string) => {
-          releaseMenu();
           const flowId = beginFlow();
-          activeFlowByTarget.set(target, flowId);
-          const sent = await sendOrReplaceButtons(chatId, messageThreadId, sourceMessageId, `<b>${escapeHtml(redact(title))}</b>${placeholder ? `\n${escapeHtml(redact(placeholder))}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
-          const value = await waitInput(chatId, messageThreadId, flowId, true, true, sent.message_id);
-          activeFlowByTarget.delete(target);
-          void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
+          const hint = `${placeholder ? `${redact(placeholder)}\n` : ""}${SECRET_INPUT_HINT}`;
+          const value = await prompt(
+            flowId,
+            `<b>${escapeHtml(redact(title))}</b>\n${escapeHtml(hint)}`,
+            redact(title), hint,
+            cancelRow(flowId), true, true,
+          );
           if (typeof value === "string") deps.secrets?.remember(target, flowId, value);
           return typeof value === "string" ? value : undefined;
         },
@@ -203,29 +273,40 @@ export function createTelegramUiRuntime(deps: {
           releaseMenu();
           const flowId = beginFlow();
           activeFlowByTarget.set(target, flowId);
-          const sent = await sendOrReplaceButtons(chatId, messageThreadId, sourceMessageId, `<b>${escapeHtml(redact(title))}</b>${prefill ? `\n${escapeHtml(redact(prefill))}` : ""}`, [[{ text: "Cancel", value: cb(flowId, "cancel") }]], flowId);
+          const sent = await sendOrReplaceButtons(chatId, messageThreadId, sourceMessageId, `<b>${escapeHtml(redact(title))}</b>${prefill ? `\n${escapeHtml(redact(prefill))}` : ""}`, cancelRow(flowId), flowId);
           const value = await waitInput(chatId, messageThreadId, flowId, false, true, sent.message_id);
           activeFlowByTarget.delete(target);
           void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
           return typeof value === "string" ? value : undefined;
         },
         select: async (title, options) => {
-          releaseMenu();
           if (options.length === 0) return undefined;
           let page = 0; const flowId = beginFlow();
           activeFlowByTarget.set(target, flowId);
           while (true) {
-            const { text, rows, pageCount } = buildSelectPage(flowId, redact(title), options.map(redact), page);
-            const sent = await sendOrReplaceButtons(chatId, messageThreadId, sourceMessageId, text, rows, flowId);
-            const value = await waitInput(chatId, messageThreadId, flowId, false, false, sent.message_id);
-            if (typeof value !== "string") { activeFlowByTarget.delete(target); void deps.transport.removeInlineKeyboard(chatId, sent.message_id); return undefined; }
-            if (value === "cancel") { activeFlowByTarget.delete(target); void deps.transport.removeInlineKeyboard(chatId, sent.message_id); return undefined; }
-            if (value.startsWith("p:")) { const next = parseInt(value.slice(2), 10); if (next >= 0 && next < pageCount) page = next; continue; }
-            if (value.startsWith("s:")) { const idx = parseInt(value.slice(2), 10); activeFlowByTarget.delete(target); void deps.transport.removeInlineKeyboard(chatId, sent.message_id); return idx >= 0 && idx < options.length ? options[idx] : undefined; }
-            if (options.includes(value)) { activeFlowByTarget.delete(target); void deps.transport.removeInlineKeyboard(chatId, sent.message_id); return value; }
+            const built = buildSelectPage(flowId, redact(title), options.map(redact), page);
+            let messageId: number;
+            if (menuMessageId !== undefined) {
+              await drawMenu(built.title, undefined, built.rows);
+              messageId = menuMessageId;
+            } else {
+              messageId = (await sendOrReplaceButtons(chatId, messageThreadId, sourceMessageId, pageText(built.title, undefined, []), built.rows, flowId)).message_id;
+            }
+            const value = await waitInput(chatId, messageThreadId, flowId, false, false, messageId);
+            if (typeof value === "string" && value.startsWith("p:")) {
+              const next = parseInt(value.slice(2), 10); if (next >= 0 && next < built.pageCount) page = next;
+              continue;
+            }
+            let picked: string | undefined;
+            if (typeof value === "string" && value.startsWith("s:")) {
+              const idx = parseInt(value.slice(2), 10); picked = idx >= 0 && idx < options.length ? options[idx] : undefined;
+            } else if (typeof value === "string" && value !== "cancel" && options.includes(value)) {
+              picked = value;
+            }
             activeFlowByTarget.delete(target);
-            void deps.transport.removeInlineKeyboard(chatId, sent.message_id);
-            return undefined;
+            if (menuMessageId !== undefined && messageId === menuMessageId) settleMenuAnswer();
+            else void deps.transport.removeInlineKeyboard(chatId, messageId);
+            return picked;
           }
         },
         menu: async (title: string, options: string[], body?: string) => {
@@ -233,31 +314,37 @@ export function createTelegramUiRuntime(deps: {
           let page = 0; const flowId = beginFlow();
           activeFlowByTarget.set(target, flowId);
           while (true) {
-            const { text, rows, pageCount } = buildSelectPage(flowId, redact(title), options.map(redact), page, body === undefined ? undefined : redact(body));
+            const built = buildSelectPage(flowId, redact(title), options.map(redact), page, body === undefined ? undefined : redact(body));
             if (menuMessageId !== undefined) {
-              await deps.transport.editButtons(chatId, menuMessageId, text, rows);
+              await drawMenu(built.title, built.body, built.rows);
             } else {
-              menuMessageId = (await deps.transport.sendButtons(chatId, text, rows, messageThreadId, sourceMessageId)).message_id;
+              menuView = { title: built.title, body: built.body, rows: built.rows };
+              menuMessageId = (await deps.transport.sendButtons(chatId, pageText(built.title, built.body, menuNotices), built.rows, messageThreadId, sourceMessageId)).message_id;
             }
-            onMenuMessage?.(menuMessageId);
+            onMenuMessage?.(menuMessageId!);
             const value = await waitInput(chatId, messageThreadId, flowId, false, false, menuMessageId);
             // Pages and the next level edit menuMessageId directly, not via the
             // per-flow replace target that resolveInput records.
             replaceNextMessageByFlow.delete(flowId);
             if (typeof value === "string" && value.startsWith("p:")) {
-              const next = parseInt(value.slice(2), 10); if (next >= 0 && next < pageCount) page = next; continue;
+              const next = parseInt(value.slice(2), 10); if (next >= 0 && next < built.pageCount) page = next; continue;
             }
             activeFlowByTarget.delete(target);
             // On a pick the keyboard stays: the next menu() call edits it, closeMenu() removes it.
             if (typeof value === "string" && value.startsWith("s:")) {
               const idx = parseInt(value.slice(2), 10);
-              if (idx >= 0 && idx < options.length) return options[idx];
+              if (idx >= 0 && idx < options.length) { menuNotices = []; return options[idx]; }
             }
             releaseMenu();
             return undefined;
           }
         },
         closeMenu: async () => { releaseMenu(); },
+        menuEnd: async (title, body, answer) => {
+          if (menuMessageId === undefined) return;
+          menuNotices = answer === undefined ? [] : [answer];
+          await drawMenu(redact(title), body === undefined ? undefined : redact(body), []);
+        },
         menuMessageId: () => menuMessageId,
         // custom: opaque host components are drawn by the host and presented to
         // this chat by the DialogBroker (§0.1 #4, decision 48). The plugin no longer

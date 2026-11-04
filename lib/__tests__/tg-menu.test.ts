@@ -122,7 +122,8 @@ describe("/tg multi-level menu", () => {
     resolvedConfig = undefined;
     pollingActive = false;
     mocks.getTelegramBotUsername.mockReset();
-    mocks.getTelegramBotUsername.mockResolvedValue("testbot");
+    // No username by default, so existing labels stay "no username"; tests that need one set it.
+    mocks.getTelegramBotUsername.mockResolvedValue(undefined);
     pairingMocks.createTelegramPairingCode.mockReset().mockReturnValue("654321");
 
     connectionStateValue = "disconnected";
@@ -222,6 +223,38 @@ describe("/tg multi-level menu", () => {
     await commands.get("tg")!("", makeCtx(ui));
     const botListCall = ui.select.mock.calls[2]; // 3rd select = Bot list (after main + Bots submenu)
     expect(botListCall[1]).toContain(botChoiceFull(bot, true));
+  });
+
+  it("Bots → Bot list stores the getMe username of a bot that has none, once", async () => {
+    const bot = makeBot({ name: "legacy", token: "legacy-token" });
+    await addBot(bot);
+    mocks.getTelegramBotUsername.mockResolvedValue("testbot");
+    const { ui } = makeScriptedUi({ select: ["🤖 Bots", "Bot list", "⬅️ Back", "⬅️ Back"] });
+    await commands.get("tg")!("", makeCtx(ui));
+
+    const registry = await readBotRegistry();
+    expect(registry.bots[0].botUsername).toBe("testbot");
+    expect(mocks.getTelegramBotUsername).toHaveBeenCalledTimes(1);
+    expect(mocks.getTelegramBotUsername).toHaveBeenCalledWith("legacy-token", undefined);
+    // The label the list shows now carries the stored username.
+    expect(ui.select.mock.calls[2][1]).toContain(botChoiceFull({ ...bot, botUsername: "testbot" }, true));
+  });
+
+  it("Bots → Bot list → bot → Update picks the field from four buttons, then asks for its value", async () => {
+    const bot = makeBot({ name: "upd", token: "t-upd" });
+    await addBot(bot);
+    const { ui, notifyCalls } = makeScriptedUi({
+      select: ["🤖 Bots", "Bot list", botChoiceFull(bot, true), "Update", "name", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
+      input: ["upd-renamed"],
+    });
+    await commands.get("tg")!("", makeCtx(ui));
+
+    const fieldCall = ui.select.mock.calls.find((call) => call[0] === "Field to update");
+    expect(fieldCall?.[1]).toEqual(["token", "name", "allowedUserId", "apiBase"]);
+    expect(ui.input).toHaveBeenCalledTimes(1);
+    expect(ui.input).toHaveBeenCalledWith("New value for name", undefined);
+    expect((await readBotRegistry()).bots[0].name).toBe("upd-renamed");
+    expect(notifyCalls.some((c) => c.message.includes("Bot updated: upd-renamed"))).toBe(true);
   });
 
   it("Bots → Add bot → adds bot to registry", async () => {
@@ -375,8 +408,8 @@ describe("/tg multi-level menu", () => {
     await addBot(bot);
     const botChoice = botChoiceFull(bot, true);
     const { ui } = makeScriptedUi({
-      select: ["🤖 Bots", "Bot list", botChoice, "Update", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
-      input: ["allowedUserId", "99999"],
+      select: ["🤖 Bots", "Bot list", botChoice, "Update", "allowedUserId", "⬅️ Back", "⬅️ Back", "⬅️ Back"],
+      input: ["99999"],
     });
     await commands.get("tg")!("", makeCtx(ui));
     const registry = await readBotRegistry();
@@ -520,6 +553,22 @@ describe("/tg multi-level menu", () => {
     expect(notifyCalls.some((c) => c.message.includes("Telegram disconnected for this folder"))).toBe(true);
   });
 
+  it("Project → Disconnect → Yes ends the menu: no Project page is drawn after it", async () => {
+    const bot = makeBot({ name: "dc", token: "t-dc" });
+    await addBot(bot);
+    connectionStateValue = "connected";
+    const { ui, pages } = makeMenuUi(["📁 Project", "🟢 Connected → Disconnect"]);
+    const menuEnd = vi.fn(async () => undefined);
+    (ui as unknown as { menuEnd: typeof menuEnd }).menuEnd = menuEnd;
+    ui.confirm.mockResolvedValue(true);
+    await commands.get("tg")!("", makeCtx(ui));
+
+    expect(ui.confirm).toHaveBeenCalledTimes(1);
+    expect(menuEnd).toHaveBeenCalledWith("Disconnect Telegram for this folder?", "Telegram will stop responding. Reconnect only from the terminal with /tg.", "✅ Yes");
+    expect(pages.map((page) => page.title)).toEqual(["Telegram Management", "📁 Project"]);
+    expect(ui.closeMenu).toHaveBeenCalled();
+  });
+
   it("Project → Disconnect confirm cancel does not disable", async () => {
     const bot = makeBot({ name: "dis-bot", token: "t-d" });
     await addBot(bot);
@@ -580,6 +629,23 @@ describe("/tg multi-level menu", () => {
 
     expect(config.thinking).toBe("hidden");
     expect(notifyCalls.some((c) => c.message.includes("Thinking") && c.message.includes("hidden"))).toBe(true);
+  });
+
+  it("Config → Retry with an invalid value keeps the prompt open, explains why, then accepts a valid value", async () => {
+    const { ui, notifyCalls } = makeScriptedUi({
+      select: ["⚙️ Config", "🔄 Retry: 3", "⬅️ Back"],
+      input: ["abc", "7"],
+    });
+    await commands.get("tg")!("", makeCtx(ui));
+
+    expect(ui.input).toHaveBeenCalledTimes(2);
+    expect(ui.input.mock.calls[1][0]).toBe("Retry count (0-10)");
+    // The reason is on the re-opened prompt itself: host prompts draw over the menu message,
+    // so a notice before them would not stay visible.
+    expect(ui.input.mock.calls[1][1]).toContain("Must be a number 0-10");
+    expect(ui.input.mock.calls[1][1]).toContain("abc");
+    expect(config.retryCount).toBe(7);
+    expect(notifyCalls.filter((c) => c.message.startsWith("🔄 Retry count set to"))).toHaveLength(1);
   });
 
   it("Config → Retry → sets retry count", async () => {

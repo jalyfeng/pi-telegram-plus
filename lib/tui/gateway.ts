@@ -8,7 +8,7 @@
 import { escapeHtml } from "../html.ts";
 import { log } from "../logger.ts";
 import type { TelegramTransport } from "../types.ts";
-import { queuePendingNotice } from "../pending-notices.ts";
+import { queueDurablePendingNotice, queuePendingNotice } from "../pending-notices.ts";
 import type { TuiBridgeAdapter } from "../tui-bridge.ts";
 import type { Origin, OriginTracker } from "./origin.ts";
 import type { OutputCapture } from "./output.ts";
@@ -97,7 +97,9 @@ export class CommandGateway {
     }
     if (!(await this.hostReady(request.name))) return false;
     const commandText = `/${request.name}${request.args.trim() ? ` ${request.args.trim()}` : ""}`;
-    return this.submitScoped(commandText, request.name, request.origin, request.transport);
+    // /restart replaces the runtime: its result is written by the replacement runtime (#62).
+    const resultOnReplace = request.name === "restart" ? "✅ Restarted." : undefined;
+    return this.submitScoped(commandText, request.name, request.origin, request.transport, undefined, resultOnReplace);
   }
 
   /** Raw editor text (D3b: the Telegram `!`/`!!` shell path). The host editor
@@ -125,13 +127,15 @@ export class CommandGateway {
   /** Shared submit path (run/runText): ack the text, open the scope under
    * `label`, bind the output, submit to the editor, and let the scope settle
    * on its own. With `reuseMessageId` the ack edits that message instead of
-   * sending a new one. */
+   * sending a new one. `resultOnReplace` is the result line of a command that
+   * replaces the runtime: it is queued on the ack for the replacement runtime. */
   private async submitScoped(
     commandText: string,
     label: string,
     origin: Origin,
     transport: GatewayRequest["transport"],
     reuseMessageId?: number,
+    resultOnReplace?: string,
   ): Promise<boolean> {
     const draft = (this.deps.readDraft ?? readEditorText)();
     const ackHtml = `<b>▶️ ${escapeHtml(commandText)}</b>`;
@@ -154,6 +158,18 @@ export class CommandGateway {
       messageId = sent?.[0]?.message_id;
     }
     if (messageId === undefined) return true;
+    if (resultOnReplace !== undefined) {
+      // The host replaces its process for this command, so the record must be on disk (#62).
+      queueDurablePendingNotice({
+        chatId: origin.chatId,
+        messageThreadId: origin.messageThreadId,
+        editMessageId: messageId,
+        html: `${ackHtml}
+
+${resultOnReplace}`,
+        createdAt: Date.now(),
+      });
+    }
 
     const scope = this.deps.origin.begin(origin, label, commandText, draft);
     // One command, one message: a dialog the command opens is drawn on this ack.

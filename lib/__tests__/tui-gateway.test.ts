@@ -7,6 +7,9 @@ import type { CommandScope } from "../tui/origin.ts";
 import { FocusTracker } from "../tui/focus.ts";
 import type { TuiBridgeAdapter } from "../tui-bridge.ts";
 import { takePendingNotices } from "../pending-notices.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 
 afterEach(() => {
@@ -895,5 +898,67 @@ describe("command gateway /new across a runtime replacement", () => {
 
     expect(transport.edits.at(-1)?.text).toContain("Could not start a new session");
     expect(takePendingNotices()).toEqual([]);
+  });
+});
+
+describe("/restart result (#62)", () => {
+  it("survives the runtime's replacement: the notice is persisted and drained by the new process", async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "ptp-restart-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      takePendingNotices();
+      const transport = fakeTransport();
+      const origin = new OriginTracker({ isEditorFocused: () => true, readDraft: () => "", writeDraft: () => true });
+      const gateway = new CommandGateway({
+        bridge: fakeBridge(Promise.resolve()),
+        origin,
+        output: new OutputCapture(transport, origin),
+        focus: new FocusTracker(),
+        isEnabled: () => true,
+        hostName: () => "omp",
+        hostState: () => ({ host: "omp", mode: {}, editor: {} }),
+        readDraft: () => "",
+      });
+      gateway.start();
+
+      // The real order: /restart re-execs the host, so this runtime is disposed about 1 ms after its submit.
+      await gateway.run({ name: "restart", args: "", origin: { chatId: 7 }, transport });
+      gateway.dispose();
+
+      // The replacement process starts with empty memory; only the disk record survives.
+      (globalThis as Record<symbol, unknown>)[Symbol.for("pi-telegram-plus.pending-notices")] = [];
+      const notices = takePendingNotices();
+      expect(notices).toEqual([expect.objectContaining({
+        chatId: 7,
+        editMessageId: 1,
+        html: "<b>▶️ /restart</b>\n\n✅ Restarted.",
+      })]);
+      expect(takePendingNotices()).toEqual([]);
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+      rmSync(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("another instance's record is never taken: a record is read only by the process that wrote it", async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), "ptp-restart-other-"));
+    const previousDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      takePendingNotices();
+      // A record another process wrote to the shared agent dir, and one under another PID.
+      const other = { chatId: 9, editMessageId: 3, html: "other instance", createdAt: Date.now() };
+      writeFileSync(join(agentDir, "pending-notices.json"), JSON.stringify([other]));
+      mkdirSync(join(agentDir, "pending-notices"), { recursive: true });
+      writeFileSync(join(agentDir, "pending-notices", "99999.json"), JSON.stringify([other]));
+
+      expect(takePendingNotices()).toEqual([]);
+    } finally {
+      if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousDir;
+      rmSync(agentDir, { recursive: true, force: true });
+    }
   });
 });

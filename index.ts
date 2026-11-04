@@ -212,7 +212,7 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     getTransport: () => transport,
     getActiveChatId: () => config.activeChatId,
     getActiveTurn: getCurrentActiveTurn,
-  });
+  }, { transport });
 
   // /tg multi-level menu — the single entry point for bot / project /
   // instance management (Bots / Project / Commands / Config / Switch instance).
@@ -293,7 +293,9 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     transport,
     getActiveTurn: (chatId?: number, messageThreadId?: number) => {
       if (chatId !== undefined) return activeTurns.get(activeTurnKey(chatId, messageThreadId));
-      return getCurrentActiveTurn();
+      // A host-started turn (forced turn, /loop repeat, /goal continuation) has no Telegram turn of
+      // its own: it belongs to the message that started the host activity (#61, #60).
+      return getCurrentActiveTurn() ?? controller.hostOriginTurn();
     },
     hasActiveTurns: () => activeTurns.size > 0,
     getSession: getActiveSession,
@@ -875,6 +877,11 @@ export default function piTelegramPlus(rawPi: ExtensionAPI): void {
     heartbeat.startStatusHeartbeat(refreshStatus);
     refreshStatus();
   }));
+
+  // A prompt typed in the terminal ends the host origin (see clearOnTerminalSubmit in controller.ts).
+  pi.on("input", (event) => {
+    controller.terminalInput(event);
+  });
 
   pi.on("session_shutdown", () => {
     disposeRuntime();

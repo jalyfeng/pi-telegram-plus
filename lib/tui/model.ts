@@ -13,7 +13,10 @@ import type { RaceHandle } from "./race.ts";
 export type DialogItem = {
   /** Stable inside one adapter: value/id when present, else "index + label". */
   key: string;
+  /** The item's name alone: a closing summary says this, never the row's mark. */
   label: string;
+  /** A glyph or icon the host draws before the label (a status dot, a pin): on the row, never in a summary. */
+  mark?: string;
   description?: string;
   /** Current value of a settings row. */
   value?: string;
@@ -43,6 +46,8 @@ export type Question = {
   /** A free-text answer is accepted for this question. */
   allowCustom: boolean;
   answered: boolean;
+  /** What is answered so far: the chosen option labels, or the typed text. Read from the adapter's own record, not the rows. */
+  answers?: string[];
 };
 
 export type DialogModel =
@@ -54,7 +59,8 @@ export type DialogModel =
       total: number;
       search?: SearchModel;
       multi?: boolean;
-      extraActions?: { label: string; key: string }[];
+      /** `mark`: a glyph drawn before the label on the button, never in a summary (as DialogItem.mark). */
+      extraActions?: { label: string; mark?: string; key: string }[];
       /** Host subtitle under the title (e.g. "Pick a provider"). */
       subtitle?: string;
       /** Host text shown in the body when the list is empty (or as its note). */
@@ -92,7 +98,7 @@ export type DialogModel =
       /** A multi-step wizard's step list, with the step on screen marked `current`. */
       steps?: { label: string; current: boolean }[];
       /** Buttons under the field (e.g. a wizard's Skip on an optional step); each one's tap is a `key` action with its `key`. */
-      extraActions?: { label: string; key: string }[];
+      extraActions?: { label: string; mark?: string; key: string }[];
     }
   | { kind: "editor"; title: string; prefill?: string }
   | { kind: "progress"; text: string; cancellable: boolean }
@@ -276,6 +282,11 @@ export type DialogSession = {
    */
   /** `key`: the button's action key when the tap ran a button (a close or back key is navigation, not an answer). */
   telegramAction?: { cancelled: boolean; drawn?: string; summary?: string; key?: string };
+  /**
+   * Summary lines of Telegram answers that moved the dialog on: the dialog they left behind is closed
+   * by the terminal, so its line is kept here and written with the close that follows.
+   */
+  tapLines?: string[];
 };
 
 /**

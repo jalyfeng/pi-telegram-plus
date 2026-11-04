@@ -407,7 +407,7 @@ describe("Host capability routing", () => {
   });
 
   it("still reports to the chat for a command that only notifies while the host owns prompts", async () => {
-    // /copy (and the other terminal-only mappings) answer with a single notify and
+    // /hotkeys (a native-handler mapping) answers with a single notify and
     // no dialog. With the host owning prompts the command context used to carry the
     // host's raw ui, whose notify only prints in the terminal - so the remote user
     // got nothing at all and the command looked like a hang.
@@ -434,19 +434,19 @@ describe("Host capability routing", () => {
       config: { bashConfirm: "dangerous", activeChatId: 42 },
       notifySendsToChat: true,
       telegramCommands: new Map<string, any>([
-        ["copy", async (_args: string, ctx: any) => {
+        ["hotkeys", async (_args: string, ctx: any) => {
           await ctx.ui.notify("Changelog: https://example.test/releases", "info");
         }],
       ]),
     });
 
-    await send(harness, "/copy");
+    await send(harness, "/hotkeys");
 
     await vi.waitFor(() => {
       expect(harness.calls.some((call) => call.text?.includes("Changelog: https://example.test"))).toBe(true);
     });
-    // The terminal user still sees the notification the host printed.
-    expect(terminalPrints).toContain("Changelog: https://example.test/releases");
+    // The notice belongs to the Telegram chat that issued the command: the terminal does not print it.
+    expect(terminalPrints).toEqual([]);
   });
 
   const send = async (harness: { controller: { handleMessage(m: unknown): Promise<void> } }, text: string) => {

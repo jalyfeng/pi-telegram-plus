@@ -119,15 +119,31 @@ export function extractToolResultParts(result: unknown): {
 
 /**
  * The display diff a host's edit result carries in `details.diff` (pi and OMP both
- * do), as a markdown code block. Empty when the host gives none; never computed here.
+ * do), as a Telegram code block. Empty when the host gives none; never computed here.
+ * Built as HTML, not as markdown: the diff is not re-parsed, so a fence or a pipe in the
+ * result text around it cannot change its layout.
  */
-function editDiffMarkdown(result: unknown): string {
+function editDiffHtml(result: unknown, redact: (text: string) => string): string {
   const diff = (result as { details?: { diff?: unknown } } | null | undefined)?.details?.diff;
   if (typeof diff !== "string" || !diff.trim()) return "";
   const truncated = diff.length > EDIT_DIFF_LIMIT;
-  const shown = truncated ? diff.slice(0, EDIT_DIFF_LIMIT) : diff;
-  const fence = shown.includes("```") ? "````" : "```";
-  return `${fence}diff\n${shown}${truncated ? "\n(diff truncated)" : ""}\n${fence}`;
+  const shown = (truncated ? diff.slice(0, EDIT_DIFF_LIMIT) : diff).replace(/\n+$/, "");
+  const text = truncated ? `${shown}\n(diff truncated)` : shown;
+  return `<pre><code class="language-diff">${escapeHtml(redact(text))}\n</code></pre>`;
+}
+
+/**
+ * The `[path#TAG]` line OMP puts on its own line in read, write, and edit results: the
+ * reference the model cites for a later edit (`hashlineFormatHeader` in the native
+ * module: a path, then a 4-hex content tag). It is model-facing, not part of the outcome.
+ */
+const HASHLINE_RESULT_HEADER = /^\[[^[\]\n]+#[0-9A-Fa-f]{4}\]$/;
+const HASHLINE_RESULT_TOOLS = new Set(["read", "write", "edit"]);
+
+/** The result text with OMP's hashline header lines removed, for the tools that emit them. */
+function withoutHashlineHeaders(toolName: string, text: string): string {
+  if (!HASHLINE_RESULT_TOOLS.has(toolName)) return text;
+  return text.split("\n").filter((line) => !HASHLINE_RESULT_HEADER.test(line.replace(/\r$/, ""))).join("\n");
 }
 
 function stringifyShort(value: unknown, max = 900): string {
@@ -206,6 +222,22 @@ function firstLine(text: string): string {
   return text.split(/\r?\n/, 1)[0].replace(/\s+/g, " ").trim();
 }
 
+/**
+ * The one line a `wait` result adds in brief mode: a wait that had no job to wait on (`jobs` is
+ * empty), such as "Nothing to wait for". A wait that waited on a job adds nothing.
+ */
+function waitResultNotice(toolName: string, result: unknown): string | undefined {
+  if (toolName !== "wait") return undefined;
+  const details = (result as { details?: { op?: unknown; jobs?: unknown } } | null | undefined)?.details;
+  if (details?.op !== "wait" || !Array.isArray(details.jobs) || details.jobs.length > 0) return undefined;
+  const line = firstLine(extractToolResultParts(result).body);
+  return line ? shortenSummary(line, 200) : undefined;
+}
+
+function formatDurationMs(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
 function shortenSummary(text: string, max: number): string {
   if (!text || text === "{}") return "";
   return text.length <= max ? text : text.slice(0, max - 1) + "…";
@@ -262,17 +294,21 @@ function summarizeAsk(a: ToolArgs): string {
   return questions.length > 1 ? `${first} (+${questions.length - 1} more)` : first;
 }
 
+/**
+ * OMP's task call names its agents: `agent` at the top level for one spawn, or `tasks[].agent`
+ * for a batch. The agent names are the summary; without one, the first task's text.
+ */
 function summarizeTask(a: ToolArgs): string {
-  const tasks = Array.isArray(a.tasks) ? (a.tasks as Array<{ name?: unknown; task?: unknown }>) : [];
-  if (tasks.length === 0) return "";
-  const first = tasks[0];
-  const label = firstLine(
-    typeof first.name === "string" && first.name.trim()
-      ? first.name
-      : typeof first.task === "string" ? first.task : "",
-  );
-  const count = `${tasks.length} task${tasks.length === 1 ? "" : "s"}`;
-  return label ? `${count}: ${label}` : count;
+  const items = Array.isArray(a.tasks) ? (a.tasks as Array<{ agent?: unknown; task?: unknown } | undefined>) : [];
+  const count = items.length > 0 ? items.length : 1;
+  const agents = [...new Set((items.length > 0 ? items.map((item) => item?.agent) : [a.agent])
+    .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+    .map((name) => name.trim()))];
+  if (agents.length > 0) return `${count} ${count === 1 ? "agent" : "agents"} · ${summarizeFileNames(agents)}`;
+  const first = items[0] ?? a;
+  const label = firstLine(typeof first?.task === "string" ? first.task : "");
+  const noun = `${count} task${count === 1 ? "" : "s"}`;
+  return label ? `${noun}: ${label}` : noun;
 }
 
 /** First string argument, skipping the intent field `i`. Used for unknown tools. */
@@ -423,6 +459,11 @@ export function registerTelegramRenderer(
   const toolArgs = new Map<string, unknown>();
   /** Full mode: the one message each tool call is shown in, edited as the call progresses. */
   const fullToolCalls = new Map<string, { chatId: number; messageId: number; summaryHtml: string }>();
+  /**
+   * Full mode: the send of each call's start message. The host does not await the start
+   * handler, so a fast call can end while its start message is still being sent.
+   */
+  const fullToolStarts = new Map<string, Promise<void>>();
 
   /** §4.7.4: replace this chat's tracked secrets before any escaping happens. */
   const redactFor = (turn: TelegramTurn | undefined, text: string): string => {
@@ -538,29 +579,71 @@ export function registerTelegramRenderer(
     }
   };
 
-  const sendInlineEvent = async (event: string) => {
+  /** One line of a background job's completion: the terminal's "Background job completed" row. */
+  const backgroundJobNotices = (message: { customType?: unknown; details?: unknown }): string[] => {
+    if (message.customType !== "async-result" || !message.details || typeof message.details !== "object") return [];
+    const details = message.details as { jobs?: unknown; jobId?: unknown; type?: unknown; label?: unknown; durationMs?: unknown };
+    const jobs = Array.isArray(details.jobs) && details.jobs.length > 0 ? details.jobs as Array<Record<string, unknown>> : [details as Record<string, unknown>];
+    return jobs.map((job) => {
+      const jobId = typeof job.jobId === "string" && job.jobId ? job.jobId : "unknown";
+      const type = typeof job.type === "string" && job.type ? job.type : "job";
+      const took = typeof job.durationMs === "number" ? ` (${formatDurationMs(job.durationMs)})` : "";
+      return `✅ Background job completed [${type}] ${jobId}${took}`;
+    });
+  };
+
+  /** Sends an inline event; resolves to the id of the message it went into, when known. */
+  const sendInlineEvent = async (event: string): Promise<number | undefined> => {
     const keyPrefix = eventTargetKey();
-    if (!event || !keyPrefix) return;
+    if (!event || !keyPrefix) return undefined;
     // Inline events quote tool arguments and thinking text — exactly where a
     // pasted key reappears, so redact before `escapeHtml` (§4.7.4).
     const text = redactFor(deps.getActiveTurn(), event);
     const key = `${keyPrefix}:${text}`;
-    if (sentInlineEvents.has(key)) return;
+    if (sentInlineEvents.has(key)) return undefined;
     sentInlineEvents.add(key);
-    await sendToTurn(`<blockquote>${escapeHtml(text)}</blockquote>`);
+    return sendToTurn(`<blockquote>${escapeHtml(text)}</blockquote>`);
+  };
+
+  /**
+   * Brief mode: the line each call's start was sent as, so a result notice can go on that line.
+   * Resolves to undefined when the line was not sent (deduplicated, or the send failed).
+   */
+  const briefToolLines = new Map<string, Promise<{ chatId: number; messageId: number } | undefined>>();
+
+  /** Adds a result notice after the call's brief line, or sends it as a line of its own. */
+  const addBriefNotice = async (
+    line: { chatId: number; messageId: number } | undefined,
+    brief: string,
+    notice: string,
+  ): Promise<void> => {
+    const text = `${brief} — ${notice}`;
+    if (line) {
+      try {
+        await deps.transport.editText(line.chatId, line.messageId, `<blockquote>${escapeHtml(redactFor(deps.getActiveTurn(), text))}</blockquote>`);
+        return;
+      } catch (err) {
+        renderLog.debug("brief tool line edit failed; sending a new line", { err });
+      }
+    }
+    await sendInlineEvent(text);
   };
 
   /**
    * Full mode: the call's start message is its one message. Sent without the inline
    * dedupe, which is keyed on text and would hide a repeated call.
    */
-  const sendFullToolStart = async (toolCallId: string, brief: string): Promise<void> => {
+  const sendFullToolStart = (toolCallId: string, brief: string): Promise<void> => {
     const turn = deps.getActiveTurn();
     const chatId = turn?.chatId ?? defaultChats()[0];
     const summaryHtml = escapeHtml(redactFor(turn, brief));
-    const messageId = await sendToTurn(summaryHtml);
-    if (chatId === undefined || messageId === undefined) return;
-    fullToolCalls.set(toolCallId, { chatId, messageId, summaryHtml });
+    const started = (async () => {
+      const messageId = await sendToTurn(summaryHtml);
+      if (chatId === undefined || messageId === undefined) return;
+      fullToolCalls.set(toolCallId, { chatId, messageId, summaryHtml });
+    })();
+    fullToolStarts.set(toolCallId, started);
+    return started;
   };
 
   /**
@@ -794,6 +877,8 @@ export function registerTelegramRenderer(
     toolArgs.clear();
     toolUpdateAt.clear();
     fullToolCalls.clear();
+    fullToolStarts.clear();
+    briefToolLines.clear();
     workflowNoticeSent = false;
     pendingError = undefined;
     attachRetryEvents();
@@ -823,10 +908,15 @@ export function registerTelegramRenderer(
     toolArgs.set(event.toolCallId, event.args);
     const brief = formatToolBrief(event.toolName, event.args);
     if (level === "full") {
-      await sendFullToolStart(event.toolCallId, brief);
+      await sendFullToolStart(event.toolCallId, brief).catch(renderLog.swallow("warn", "tool start send failed", { toolCallId: event.toolCallId }));
       return;
     }
-    await sendInlineEvent(brief);
+    const chatId = deps.getActiveTurn()?.chatId ?? defaultChats()[0];
+    const line = sendInlineEvent(brief)
+      .then((messageId) => (chatId !== undefined && messageId !== undefined ? { chatId, messageId } : undefined))
+      .catch(renderLog.swallow("warn", "brief tool line send failed", { toolCallId: event.toolCallId }));
+    briefToolLines.set(event.toolCallId, line);
+    await line;
     } catch (err) { renderLog.warn("render tool_execution_start handler failed", { err }); }
   });
 
@@ -862,14 +952,25 @@ export function registerTelegramRenderer(
     }
     const level = renderLevel(deps.getConfig(), "tool");
     toolUpdateAt.delete(event.toolCallId);
+    const starting = fullToolStarts.get(event.toolCallId);
+    fullToolStarts.delete(event.toolCallId);
+    // A failed start send was logged by the start handler; the call then has no message to edit.
+    await starting?.catch(() => undefined);
     const call = fullToolCalls.get(event.toolCallId);
     fullToolCalls.delete(event.toolCallId);
     const args = toolArgs.get(event.toolCallId);
     toolArgs.delete(event.toolCallId);
+    const briefLine = briefToolLines.get(event.toolCallId);
+    briefToolLines.delete(event.toolCallId);
     if (level === "hidden") return;
     if (event.isError) rememberToolFailure(deps.getActiveTurn(), event.result);
     const status = event.isError ? "❌ Tool failed" : "✅ Tool finished";
     if (level === "brief") {
+      const notice = waitResultNotice(event.toolName, event.result);
+      if (notice) {
+        await addBriefNotice(await briefLine, formatToolBrief(event.toolName, args), notice);
+        return;
+      }
       if (!event.isError) return;
       await sendInlineEvent(formatToolFailureBrief(event.toolName, event.result, args));
       return;
@@ -879,11 +980,13 @@ export function registerTelegramRenderer(
     // from the "never fold" rule, so long ones use an expandable blockquote.
     const parts = extractToolResultParts(event.result);
     const header = `${event.isError ? "❌" : "✅"} <b>${escapeHtml(event.toolName)}</b>`;
-    const diff = event.toolName === "edit" ? editDiffMarkdown(event.result) : "";
-    const resultSource = [parts.body, diff].filter((text) => text.trim()).join("\n\n");
+    const turnForRedaction = deps.getActiveTurn();
+    const body = withoutHashlineHeaders(event.toolName, parts.body);
+    const bodyHtml = body.trim() ? markdownToTelegramHtml(redactFor(turnForRedaction, body)) : "";
+    const diffHtml = event.toolName === "edit" ? editDiffHtml(event.result, (text) => redactFor(turnForRedaction, text)) : "";
+    const rendered = [bodyHtml, diffHtml].filter((html) => html.trim()).join("\n\n");
     let resultHtml: string;
-    if (resultSource.trim()) {
-      const rendered = markdownToTelegramHtml(redactFor(deps.getActiveTurn(), resultSource));
+    if (rendered.trim()) {
       const expandable = rendered.length > 600 || rendered.split("\n").length > 8;
       const tag = expandable ? "<blockquote expandable>" : "<blockquote>";
       resultHtml = `${tag}${header}\n${rendered}</blockquote>`;
@@ -926,6 +1029,12 @@ export function registerTelegramRenderer(
     const message = event.message as AnyMessage;
     if (message.role === "user") {
       adoptSteeredReplyTarget(message);
+      return;
+    }
+    // A background job's completion is delivered to the session as a custom message. It is
+    // a notice in the turn it arrives in, whether or not the main loop is busy.
+    if (message.role === "custom") {
+      await sendInlineEvents(backgroundJobNotices(message as { customType?: unknown; details?: unknown }));
       return;
     }
     if (message.role !== "assistant") return;

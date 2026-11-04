@@ -69,7 +69,7 @@ describe("dialog rendering redacts secrets before HTML (§4.7.4)", () => {
     // lacks the raw value, so only the substitution proves pre-escape redaction.
     expect(rendered.text).toContain("***");
     expect(rendered.text).not.toContain(SECRET);
-    expect(rendered.text).toContain("<pre>");
+    expect(rendered.text).not.toContain("<pre>");
     expectHtmlIntact(rendered.text);
   });
 

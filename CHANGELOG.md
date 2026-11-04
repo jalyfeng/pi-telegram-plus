@@ -16,6 +16,47 @@ missing or mislabelled cannot be published.
 
 ## [Unreleased]
 
+### Changed
+
+- **`/tree`, `/copy`, `/mcp` and `/context` are terminal-only.** None of them is available from Telegram on pi or OMP: they are
+  left out of the `/` menu and `/tg`, and sending one from Telegram (including `/mcp add`) returns a hint. The
+  plugin's own `/copy` is removed.
+- **Confirms offer Yes and No only.** The Telegram confirm has no separate Cancel button, and a picker's extra
+  confirm button is gone, because tapping the highlighted row already does the same.
+- **The bot menu matches `/tg`.** It lists every command the plugin serves, the same set as `/tg` → Commands,
+  with the 100-entry cap and the overflow behind `/more`.
+
+### Fixed
+
+- **`/tg` runs on one menu message.** Add, update and remove a bot, configure, and disconnect all stay on the
+  menu message. Update asks which field to change with four buttons. An invalid value is explained in the
+  prompt, which asks again. A renamed bot shows its new name, and a bot's username is shown even when it was
+  not saved at registration. Names are escaped once, so `&` and `<` show correctly. Notices carry no
+  `*info*` label; warnings and errors keep their emoji. Disconnect's answer stays on the menu, which ends there.
+  The plugin's own secret prompts are marked as secret input.
+- **Command replies quote the message that started them.** A `/force`, `/loop` or `/goal` reply quotes the
+  Telegram message that started it, and `Loop limit reached` reaches Telegram. Replies to a prompt typed in
+  the terminal quote nothing.
+- **OMP dialogs match the terminal.** Settings submenus, including ones opened in the terminal, appear in
+  Telegram, and settings warnings show their mark. Settings search lists the matching tabs with their counts.
+  A tab, scope or row's active marker is not written into the closing summary. Pickers show the preview text of
+  the highlighted item (model facts, role chips), and `/resume` shows its title and the pin on pinned sessions.
+  Panel text keeps stacked columns apart and drops bare meters (`/session`). The prompt title and the input
+  placeholder show as plain text. The OAuth paste code is secret input. `/cleanse` shows its prompt title.
+- **Questionnaires and inputs end with their answers.** A submitted questionnaire lists each question's answer.
+  A typed answer to `ask` is written as the answer text; a plain input keeps "Sent an answer", and secret input
+  stays hidden. A list closed in the terminal after a Telegram answer keeps that answer and adds
+  "Answered in the terminal".
+- **Dialog notices stay tidy.** The "A dialog is waiting" notice is removed when its dialog closes. A Telegram
+  command's notices no longer print in the terminal. The terminal input no longer keeps the Telegram command's
+  text: your draft comes back as soon as the command is taken.
+- **Tools.** In full mode, `write` shows one message per call, and read, write and edit results no longer
+  show OMP's `[path#TAG]` reference lines. A `task` call names its agents, and a background task's completion
+  appears in the turn. `wait` with nothing to wait for says so.
+- **`/status`** shows a numeric queued count (no `undefined`) and context as `used / total (percent)`.
+- **`/restart` and `/quit` report their result.** `/restart`'s result survives the process replacement, and
+  `/quit` writes its answer and a stopped line before exiting.
+
 ## [0.0.13] — 2026-11-04
 
 Telegram now behaves like the host's own terminal: host commands run in the host, host dialogs appear in

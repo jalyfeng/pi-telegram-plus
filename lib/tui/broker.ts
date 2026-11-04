@@ -169,6 +169,25 @@ function confirmButtonLabel(model: DialogModel, yes: boolean): string {
   return yes ? "Yes" : "No";
 }
 
+/** A questionnaire's answers as summary lines: one `Question: answer, answer` line per answered question. */
+function answerLines(model: DialogModel): string[] {
+  if (model.kind !== "questionnaire") return [];
+  return model.questions
+    .filter((question) => (question.answers?.length ?? 0) > 0)
+    .map((question) => `${question.prompt}: ${(question.answers ?? []).join(", ")}`);
+}
+
+/** A typed answer as the closing summary names it: its text on one line, cut short when it is long. */
+function typedAnswerLabel(text: string): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  if (line === "") return "Sent an answer";
+  return line.length > TYPED_ANSWER_MAX ? `${line.slice(0, TYPED_ANSWER_MAX - 1)}…` : line;
+}
+
+/** Actions that answer a step: the dialog they leave behind is a new one, and its close is not this tap's. */
+const ANSWER_ACTIONS: ReadonlySet<DialogAction["type"]> = new Set(["confirm", "choose", "approve", "submit"]);
+const TYPED_ANSWER_MAX = 200;
+
 /** An item's label as one line of plain text: no edge whitespace, no runs of spaces. */
 const plainLabel = (label: string): string => label.replace(/\s+/g, " ").trim();
 
@@ -500,7 +519,11 @@ export class DialogBroker {
       // The message is handed to the next dialog, so an answer Telegram already gave must leave its
       // line in the command's summaries now. A dialog nobody answered leaves none.
       const scope = this.scopes.get(session);
-      if (byTelegram && scope) scope.dialogSummaries.push(escapeHtml(this.redact(session, this.telegramSummary(session))));
+      if (scope) {
+        const lines = this.earlierLines(session);
+        if (byTelegram) lines.push(escapeHtml(this.redact(session, this.telegramSummary(session))));
+        if (lines.length > 0) scope.dialogSummaries.push(lines.join("\n"));
+      }
       return session.closedBy;
     }
 
@@ -518,6 +541,18 @@ export class DialogBroker {
    * there is nothing to report (an upload that finished, a spinner that stopped).
    */
   private closeSummary(session: DialogSession, byTelegram: boolean): string | null {
+    const own = this.ownCloseSummary(session, byTelegram);
+    const earlier = this.earlierLines(session);
+    if (earlier.length === 0) return own;
+    return [...earlier, ...(own === null ? [] : [own])].join("\n");
+  }
+
+  /** The answers that moved the dialog on before this close, as Telegram HTML, one line each. */
+  private earlierLines(session: DialogSession): string[] {
+    return (session.tapLines ?? []).map((line) => escapeHtml(this.redact(session, line)));
+  }
+
+  private ownCloseSummary(session: DialogSession, byTelegram: boolean): string | null {
     const redact = (text: string) => this.redact(session, text);
     // A panel button the user ran (not Close, which is a cancel tap) is an answer: its line is the
     // button's label, and the panel's text is not kept.
@@ -750,7 +785,15 @@ export class DialogBroker {
     // The baseline (`drawn`) is taken after the act, from the model it leaves behind: what the act
     // itself changes is part of this tap. Until then the marker has no baseline and no draw judges it.
     const buttonKey = resolved.action.type === "key" ? resolved.action.name : resolved.action.type === "choose" ? resolved.action.key : undefined;
-    session.telegramAction = { cancelled, ...(buttonKey !== undefined ? { key: buttonKey } : {}) };
+    // A questionnaire's submit names each question and its answer, which the dialog no longer shows once it closes.
+    const submitted = resolved.action.type === "submit" ? answerLines(model) : [];
+    const summary = submitted.length > 0 ? [`✅ ${resolved.label}`, ...submitted].join("\n") : undefined;
+    session.telegramAction = {
+      cancelled,
+      ...(buttonKey !== undefined ? { key: buttonKey } : {}),
+      ...(summary !== undefined ? { summary } : {}),
+    };
+    const kindBefore = session.model.kind;
     const done = this.inOwnerScope(session, () => this.act(subject, resolved.action, ctx));
     if (!done) {
       session.telegramAction = previousAction;
@@ -773,7 +816,9 @@ export class DialogBroker {
         if (resolved.action.type === "toggle" || resolved.action.type === "cycle" || resolved.action.type === "submenu") {
           session.telegramAction = undefined;
         }
-        this.redrawAnswered(session);
+        const type = resolved.action.type;
+        const change = ANSWER_ACTIONS.has(type) ? "answer" : type === "key" || type === "question" ? "navigation" : undefined;
+        this.redrawAnswered(session, change, kindBefore);
       } else {
         this.retire(session, this.deps.focus.current());
       }
@@ -812,6 +857,7 @@ export class DialogBroker {
     // put back if the write is refused.
     const answered = purpose === "input" || purpose === "editor";
     const before = { telegramAction: session.telegramAction, lastAction: session.lastAction, answeredSecret: session.answeredSecret };
+    const kindBefore = session.model.kind;
     if (answered) {
       // Text sent to a tool approval denies the call and becomes the next instruction: the card says so.
       const summary = session.model.kind === "approval" ? DENIED_BY_TEXT : undefined;
@@ -819,7 +865,9 @@ export class DialogBroker {
       // Decided here, while the input is still the secret field: by the time the dialog closes,
       // the model may already show the progress that the submit started.
       session.answeredSecret = secret;
-      session.lastAction = secret ? "Submitted (hidden)" : "Sent an answer";
+      // The ask dialog's typed answer is the model's answer, so its text is the summary's line; an input's text
+      // is whatever the user typed into an ordinary field, and stays out of the summary.
+      session.lastAction = secret ? "Submitted (hidden)" : session.model.kind === "questionnaire" ? typedAnswerLabel(text) : "Sent an answer";
     }
     const driven = this.inOwnerScope(session, () => purpose === "input" || purpose === "editor"
       ? this.act(subject, { type: "submit", text }, ctx)
@@ -846,7 +894,7 @@ export class DialogBroker {
       return { handled: true, toast: "The host did not accept this input" };
     }
     if (this.session === session && session.state !== "closed") {
-      if (this.canDrive(session)) this.redrawAnswered(session);
+      if (this.canDrive(session)) this.redrawAnswered(session, answered ? "answer" : undefined, kindBefore);
       else this.retire(session, this.deps.focus.current());
     }
     return { handled: true };
@@ -857,15 +905,26 @@ export class DialogBroker {
    * set aside while the model is re-read and drawn, then re-anchored to what this draw says: a later
    * draw that says something different is the dialog moving on.
    */
-  private redrawAnswered(session: DialogSession): void {
+  private redrawAnswered(session: DialogSession, change: "answer" | "navigation" | undefined, kindBefore: string): void {
     const action = session.telegramAction;
     if (action === undefined) {
       this.redraw(session);
       return;
     }
+    const line = this.telegramSummary(session);
     session.telegramAction = undefined;
     this.redraw(session);
-    if (session.state !== "closed") session.telegramAction = { ...action, drawn: this.contentOf(session) };
+    if (session.state === "closed") return;
+    // The tap is consumed once the dialog is published again with its keyboard, so the user is waiting on it,
+    // when the tap was navigation (a tab, a scope, a page) or when an answer brought a different kind of dialog
+    // back (a confirm's No brings the list). Only an answer keeps a line; the close that follows is the terminal's.
+    const keyboard = renderDialog(session.model, { sessionId: session.id, generation: session.generation, page: session.page }).rows.length > 0;
+    const consumed = change === "navigation" || (change === "answer" && session.model.kind !== kindBefore);
+    if (change !== undefined && consumed && keyboard) {
+      if (change === "answer") session.tapLines = [...(session.tapLines ?? []), line];
+      return;
+    }
+    session.telegramAction = { ...action, drawn: this.contentOf(session) };
   }
 
   /** `/stop` (§4.5 rule 6): cancel the dialog this chat owns, if any. */
@@ -1045,6 +1104,7 @@ export class DialogBroker {
       sessionId: session.id,
       generation: session.generation,
       page: session.page,
+      awaitingText: session.pendingInput !== undefined,
       redact: this.deps.secrets ? (text) => this.redact(session, text) : undefined,
     }));
     if (surface !== session.surface) session.generation += 1;
@@ -1196,6 +1256,7 @@ export class DialogBroker {
       sessionId: session.id,
       generation: session.generation,
       page: session.page,
+      awaitingText: session.pendingInput !== undefined,
       redact: this.deps.secrets ? (text) => this.redact(session, text) : undefined,
     });
     session.surface = this.surfaceOf(rendered);
