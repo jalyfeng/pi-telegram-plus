@@ -764,10 +764,11 @@ async function holdThroughEnqueuedTurns(ctx: unknown, wasIdle: boolean): Promise
 // Host-control and terminal-only mappings (§9 decisions 21/22, §4.8): these run the
 // plugin's native handler instead of submitting to the host editor - editor
 // submission reloads the extension runtime outside pi's withSession sequencing.
-// copy/hotkeys/quit/exit are terminal-only mappings (stage 4 revisits them).
+// hotkeys/quit/exit are terminal-only mappings (stage 4 revisits them). /copy is
+// terminal-only too (terminal-only-commands.ts), so it never reaches this table.
 const NATIVE_HANDLER_COMMANDS: Record<string, true> = {
   new: true, reload: true, import: true,
-  copy: true, hotkeys: true, quit: true, exit: true,
+  hotkeys: true, quit: true, exit: true,
 };
 
 /** Plugin-owned bot-management commands: reachable even when the host bridge is down (v6 decision 48). */
@@ -1412,7 +1413,7 @@ export function createTelegramController(deps: {
     //
     // Host mode still has to hand the command context a *routed* ui: the context's own `ui`
     // is the host's raw one, whose `notify` only prints in the terminal, so a command that
-    // just reports something (`/changelog`, `/copy`, `/debug`) left the chat with nothing at
+    // just reports something (`/changelog`, `/debug`) left the chat with nothing at
     // all. The routed proxy keeps every prompt with the host and copies notifications to the
     // chat, which is the whole point of running the command here.
     const hostCommandUi = (ctx as { ui?: unknown }).ui;
