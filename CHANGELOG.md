@@ -16,6 +16,8 @@ missing or mislabelled cannot be published.
 
 ## [Unreleased]
 
+## [0.0.13] — 2026-11-04
+
 Telegram now behaves like the host's own terminal: host commands run in the host, host dialogs appear in
 the chat as buttons, and either side can answer them. This release drops a large amount of plugin-side
 reimplementation and several settings, so read **Breaking changes** before upgrading.
@@ -453,7 +455,8 @@ reimplementation and several settings, so read **Breaking changes** before upgra
 - Initial release: Telegram control of the pi coding agent, with command bridging,
   interactive UI, and streaming output.
 
-[Unreleased]: https://github.com/jalyfeng/pi-telegram-plus/compare/v0.0.12...HEAD
+[Unreleased]: https://github.com/jalyfeng/pi-telegram-plus/compare/v0.0.13...HEAD
+[0.0.13]: https://github.com/jalyfeng/pi-telegram-plus/compare/v0.0.12...v0.0.13
 [0.0.12]: https://github.com/jalyfeng/pi-telegram-plus/compare/v0.0.11...v0.0.12
 [0.0.11]: https://github.com/jalyfeng/pi-telegram-plus/compare/v0.0.10...v0.0.11
 [0.0.10]: https://github.com/jalyfeng/pi-telegram-plus/compare/v0.0.9...v0.0.10
@@ -468,8 +471,8 @@ reimplementation and several settings, so read **Breaking changes** before upgra
 [0.0.1]: https://github.com/jalyfeng/pi-telegram-plus/tree/fffc6f5
 
 <!--
-     Versions linked by tag: v0.0.8, v0.0.9, v0.0.10, v0.0.11, v0.0.12; versions
-     without a tag are compared by commit SHA. The v0.0.1 tag points at the
-     initial commit, whose package.json still read 0.1.0, so it is linked as a
-     tree, not a range. The v0.0.8 tag (bb69f57) sits one commit past the 0.0.8
-     release commit (f65e372). -->
+     Versions linked by tag: v0.0.8, v0.0.9, v0.0.10, v0.0.11, v0.0.12, v0.0.13;
+     versions without a tag are compared by commit SHA. The v0.0.1 tag points at
+     the initial commit, whose package.json still read 0.1.0, so it is linked as
+     a tree, not a range. The v0.0.8 tag (bb69f57) sits one commit past the
+     0.0.8 release commit (f65e372). -->
