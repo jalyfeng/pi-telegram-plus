@@ -2356,3 +2356,50 @@ describe("tsp picker pin marker (#38)", () => {
     expect(model.items.map((item) => item.label)).toEqual(["📌 pinned one", "plain one"]);
   });
 });
+
+describe("tsp settings search header and per-tab counts (#36)", () => {
+  it("names the matching tabs with their counts instead of the page being left", () => {
+    const props = {
+      title: "omp settings",
+      pages: [
+        { id: "model", label: "Model" },
+        { id: "appearance", label: "Appearance" },
+        { id: "providers", label: "Providers" },
+      ],
+      page: "appearance",
+      query: "thinking",
+      sections: [
+        {
+          id: "model/think",
+          title: "Thinking",
+          page: "model",
+          rows: [
+            { id: "model.think", label: "Thinking", control: { k: "switch", on: true } },
+            { id: "model.external", label: "External Thinking", control: { k: "switch", on: false } },
+          ],
+        },
+        {
+          id: "appearance/think",
+          title: "Thinking",
+          page: "appearance",
+          rows: [{ id: "appearance.think", label: "Show Thinking", control: { k: "switch", on: true } }],
+        },
+      ],
+    };
+    const model = asSettings(tspPrefsAdapter.read(makeComponent({ k: "prefs", p: props }), ctxFor()));
+    expect(model.subtitle).toBe("Model (2) · Appearance (1)");
+    expect(model.search).toEqual({ query: "thinking" });
+  });
+
+  it("keeps the current page label when no search is active", () => {
+    const props = {
+      title: "omp settings",
+      pages: [{ id: "appearance", label: "Appearance" }],
+      page: "appearance",
+      query: "",
+      sections: [],
+    };
+    const model = asSettings(tspPrefsAdapter.read(makeComponent({ k: "prefs", p: props }), ctxFor()));
+    expect(model.subtitle).toBe("Appearance");
+  });
+});

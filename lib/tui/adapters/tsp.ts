@@ -121,12 +121,12 @@ type PrefsProps = {
 
 type PrefsPageLike = { id?: unknown; label?: unknown; disabled?: unknown };
 
-type PrefsSectionLike = { id?: unknown; title?: unknown; rows?: unknown };
+type PrefsSectionLike = { id?: unknown; title?: unknown; page?: unknown; rows?: unknown };
 
 type PrefsRowLike = { id?: unknown; label?: unknown; hint?: unknown; warning?: unknown; disabled?: unknown; control?: unknown };
 
 /** A settings page's section: the heading its rows sit under (`TspPrefsSection.title`). */
-type PrefsGroupedRow = { row: PrefsRowLike; group?: string };
+type PrefsGroupedRow = { row: PrefsRowLike; group?: string; page?: string };
 
 /** The text-field props this adapter reads (`TspInputProps` in pi-wire):
  * what the field holds (mask dots when the host masks it) and the placeholder. */
@@ -996,18 +996,39 @@ function prefsRows(props: PrefsProps): PrefsRowLike[] {
   return prefsGroupedRows(props).map((entry) => entry.row);
 }
 
-/** The live page's rows with the title of the section each sits under. */
+/** The live page's rows with the title of the section each sits under, and (in a search) the page that section belongs to. */
 function prefsGroupedRows(props: PrefsProps): PrefsGroupedRow[] {
   const sections = Array.isArray(props.sections) ? (props.sections as readonly PrefsSectionLike[]) : [];
   const rows: PrefsGroupedRow[] = [];
   for (const section of sections) {
     if (!isObject(section) || !Array.isArray(section.rows)) continue;
     const group = tspText(section.title).trim() || undefined;
+    const page = typeof section.page === "string" && section.page !== "" ? section.page : undefined;
     for (const row of section.rows as readonly unknown[]) {
-      if (isObject(row) && typeof (row as PrefsRowLike).id === "string") rows.push({ row: row as PrefsRowLike, group });
+      if (isObject(row) && typeof (row as PrefsRowLike).id === "string") rows.push({ row: row as PrefsRowLike, group, page });
     }
   }
   return rows;
+}
+
+/**
+ * The search results' per-tab counts as header text (`Model (8) · Appearance (2)`), in the
+ * page order the host lists its tabs in. A page with no matching row is left out.
+ */
+function prefsSearchCounts(props: PrefsProps): string {
+  const pages = Array.isArray(props.pages) ? (props.pages as readonly PrefsPageLike[]) : [];
+  const counts = new Map<string, number>();
+  for (const { row, page } of prefsGroupedRows(props)) {
+    if (!page || row.disabled) continue;
+    counts.set(page, (counts.get(page) ?? 0) + 1);
+  }
+  const parts: string[] = [];
+  for (const page of pages) {
+    if (!isObject(page) || typeof page.id !== "string") continue;
+    const count = counts.get(page.id);
+    if (count) parts.push(`${tspText(page.label).trim()} (${count})`);
+  }
+  return parts.join(" · ");
 }
 
 /** A choice control's usable options: entries carrying a string `value`. */
@@ -1353,7 +1374,10 @@ export const tspPrefsAdapter: DialogAdapter = {
     const items: (DialogItem & { values?: string[]; hasSubmenu?: boolean; shortcut?: boolean })[] = [];
     // The current page's label is the subtitle; its lead text is the notice, which a search replaces.
     const allPages = Array.isArray(props.pages) ? (props.pages as readonly PrefsPageLike[]) : [];
-    const currentLabel = tspText(allPages.find((page) => isObject(page) && page.id === currentPage)?.label).trim();
+    // A search names the matching tabs with their counts; the page it left is not the header.
+    const header = query
+      ? prefsSearchCounts(props)
+      : tspText(allPages.find((page) => isObject(page) && page.id === currentPage)?.label).trim();
     const lead = query ? "" : tspText(props.lead).trim();
     // While a search is active the host filters rows across every page, so the
     // page shortcuts would only push the results off the first page: show the
@@ -1378,7 +1402,7 @@ export const tspPrefsAdapter: DialogAdapter = {
       kind: "settings",
       title: typeof props.title === "string" ? props.title : "Settings",
       items,
-      ...(currentLabel ? { subtitle: currentLabel } : {}),
+      ...(header ? { subtitle: header } : {}),
       ...(lead ? { notice: lead } : {}),
       ...(submenu ? { submenu } : { search }),
     };
