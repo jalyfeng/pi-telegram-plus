@@ -243,6 +243,38 @@ describe("telegram ui inside a live /tg menu", () => {
     expect(transport.sendButtons).toHaveBeenCalledTimes(1);
   });
 
+  it("Retry flow order: bad value, notice, re-prompt shows the reason; a good value clears it", async () => {
+    const env = setup();
+    const { transport, ui, runtime } = env;
+    const first = ui.menu("⚙️ Telegram Config", ["🔄 Retry: 3"]);
+    await press(env, 100, "🔄 Retry: 3");
+    await first;
+
+    const bad = ui.input("Retry count (0-10)", "Current: 3");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    runtime.resolveInput(CHAT, "abc");
+    expect(await bad).toBe("abc");
+    // Same order as configRetryFlow: the reason first, then the prompt again.
+    ui.notify("Must be a number 0-10", "error");
+    const again = ui.input("Retry count (0-10)", "Current: 3");
+    await vi.waitFor(() => expect(runtime.hasPendingInput(CHAT)).toBe(true));
+    await vi.waitFor(() => {
+      const last = transport.editButtons.mock.calls.at(-1)![2];
+      expect(last).toContain("Retry count (0-10)");
+      expect(last).toContain("❌ Must be a number 0-10");
+    });
+
+    runtime.resolveInput(CHAT, "4");
+    expect(await again).toBe("4");
+    ui.notify("🔄 Retry count set to 4");
+    await vi.waitFor(() => {
+      const last = transport.editButtons.mock.calls.at(-1)![2];
+      expect(last).toContain("🔄 Retry count set to 4");
+      expect(last).not.toContain("Must be a number");
+    });
+    expect(transport.sendText).not.toHaveBeenCalled();
+  });
+
   it("a select renders its options on the menu message", async () => {
     const env = setup();
     const { transport, ui, runtime } = env;

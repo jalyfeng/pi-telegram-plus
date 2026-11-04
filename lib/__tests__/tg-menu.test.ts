@@ -637,8 +637,10 @@ describe("/tg multi-level menu", () => {
 
     expect(ui.input).toHaveBeenCalledTimes(2);
     expect(ui.input.mock.calls[1][0]).toBe("Retry count (0-10)");
-    const explained = notifyCalls.findIndex((c) => c.message === "Must be a number 0-10" && c.level === "error");
-    expect(explained).toBeGreaterThanOrEqual(0);
+    // The reason is on the re-opened prompt itself: host prompts draw over the menu message,
+    // so a notice before them would not stay visible.
+    expect(ui.input.mock.calls[1][1]).toContain("Must be a number 0-10");
+    expect(ui.input.mock.calls[1][1]).toContain("abc");
     expect(config.retryCount).toBe(7);
     expect(notifyCalls.filter((c) => c.message.startsWith("🔄 Retry count set to"))).toHaveLength(1);
   });

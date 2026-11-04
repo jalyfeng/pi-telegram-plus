@@ -77,9 +77,13 @@ export async function configRetryFlow(
       ui.notify(`${KEY_LABELS.retry} set to ${n}`, "info");
       return;
     }
-    ui.notify("Must be a number 0-10", "error");
-    if (value !== undefined) return;
-    inputValue = await ui.input("Retry count (0-10)", `Current: ${currentRetry}`);
+    // A value passed in is not asked again: the reason goes to the caller as a notice.
+    if (value !== undefined) {
+      ui.notify("Must be a number 0-10", "error");
+      return;
+    }
+    // The reason is the re-opened prompt's own placeholder, so it stays visible on the menu message.
+    inputValue = await ui.input("Retry count (0-10)", `Must be a number 0-10 (you sent "${inputValue}"). Current: ${currentRetry}`);
   }
 }
 
