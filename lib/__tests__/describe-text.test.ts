@@ -51,12 +51,12 @@ describe("describedText content mapping", () => {
     expect(result.html).toContain("Model: gpt-x\nTokens: 1200");
   });
 
-  it("renders a usage meter as `label 42%`", () => {
+  it("skips a bare meter drawing: a meter without label, parts or marks adds no text", () => {
     const tree: N = {
       k: "row",
       c: [text("Context"), { k: "meter", p: { value: 0.42, style: "bar" } }],
     };
-    expect(describedText(tree as never, identity, owner).html).toBe("Context 42%");
+    expect(describedText(tree as never, identity, owner).html).toBe("Context");
   });
 
   it("uses a meter's own label text when it has one", () => {
@@ -455,5 +455,35 @@ describe("describedText context drill-down (OMP context viewer entries)", () => 
       ["[bash] 361 tokens", "open-entry", "entries/content/list/built-in-tools/1", undefined],
     ]);
     expect(actions[0]!.owner).toBe(nativeOwner);
+  });
+});
+
+describe("describedText drops a bare visual meter and separates columns (#42)", () => {
+  it("skips a meter that has no label, parts or marks: it is only a drawing of a value shown elsewhere", () => {
+    const tree: N = {
+      k: "col",
+      c: [text("Context window"), { k: "meter", p: { value: 0.04 } }],
+    };
+    const { html } = describedText(tree, identity, owner);
+    expect(html).toBe("Context window");
+  });
+
+  it("keeps a meter that carries its own label", () => {
+    const tree: N = { k: "col", c: [{ k: "meter", p: { value: 0.74, label: "74%" } }] };
+    expect(describedText(tree, identity, owner).html).toBe("74%");
+  });
+
+  it("puts two stacked columns on separate lines, so the first column's last line does not run into the next heading", () => {
+    const tree: N = {
+      k: "row",
+      p: { role: "omp.info.stats" },
+      c: [
+        { k: "col", c: [text("Total: 2")] },
+        { k: "col", c: [{ k: "section", p: { head: "Tokens" }, c: [text("Input: 5")] }] },
+      ],
+    };
+    const { html } = describedText(tree, identity, owner);
+    expect(html).toContain("Total: 2\n");
+    expect(html).not.toContain("Total: 2 <b>Tokens</b>");
   });
 });
