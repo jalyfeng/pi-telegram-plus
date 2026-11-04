@@ -338,6 +338,29 @@ describe("Terminal-only commands from Telegram", () => {
     run.mockRestore();
   });
 
+  it("answers /tree and /copy with the terminal hint and never reaches the host", async () => {
+    const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
+    const submit = vi.fn(() => true);
+    const harness = createHarness({
+      bridge: createBridge({
+        submit,
+        getCommands: async () => [
+          { name: "tree", description: "Navigate session tree", source: "builtin" as const },
+          { name: "copy", description: "Copy last message", source: "builtin" as const },
+        ],
+      }),
+    });
+
+    await send(harness.controller, "/tree");
+    await send(harness.controller, "/copy");
+
+    expect(harness.calls.filter((call) => call.text === "/tree only works in the terminal.")).toHaveLength(1);
+    expect(harness.calls.filter((call) => call.text === "/copy only works in the terminal.")).toHaveLength(1);
+    expect(run).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    run.mockRestore();
+  });
+
   it("answers /cd on OMP with the /move hint and does not dispatch it", async () => {
     const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
     const submit = vi.fn(() => true);

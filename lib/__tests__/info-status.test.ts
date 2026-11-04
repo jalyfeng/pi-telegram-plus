@@ -282,30 +282,12 @@ describe("registerInfoCommands /status handler", () => {
   });
 });
 
-describe("registerInfoCommands /copy handler", () => {
-  it("sends the last assistant text verbatim when a reply exists", async () => {
-    const session = makeSession({ lastAssistantText: "This is the previous reply.\nSecond line" });
+describe("registerInfoCommands does not register /copy", () => {
+  it("leaves /copy to the host, which is terminal-only on Telegram", () => {
     const { registry, handlers } = makeRegistry();
-    const { ui, notify } = makeUi();
-    registerInfoCommands(registry, { getSession: () => session });
+    registerInfoCommands(registry, { getSession: () => makeSession() });
 
-    const copy = handlers.get("copy");
-    expect(copy).toBeDefined();
-    await copy!.handler("", { ui });
-
-    expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify).toHaveBeenCalledWith("This is the previous reply.\nSecond line", "info");
-  });
-
-  it("shows the empty notice when there is no reply", async () => {
-    const session = makeSession({ lastAssistantText: undefined });
-    const { registry, handlers } = makeRegistry();
-    const { ui, notify } = makeUi();
-    registerInfoCommands(registry, { getSession: () => session });
-
-    await handlers.get("copy")!.handler("", { ui });
-
-    expect(notify).toHaveBeenCalledWith("Nothing to copy.", "info");
+    expect(handlers.has("copy")).toBe(false);
   });
 });
 

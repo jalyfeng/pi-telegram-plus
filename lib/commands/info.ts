@@ -116,21 +116,6 @@ export function registerInfoCommands(
     getActiveTurn?: () => TelegramTurn | undefined;
   },
 ): void {
-  // ── /copy ──────────────────────────────────────────────────────────────
-  registry.registerCommand("copy", {
-    description: "Send the last assistant reply as text",
-    handler: async (_args, ctx) => {
-      const ui = ctx.ui;
-      const session = deps.getSession();
-      if (!session) {
-        ui.notify("No active session", "error");
-        return;
-      }
-      const text = session.getLastAssistantText();
-      ui.notify(text ? text : "Nothing to copy.", "info");
-    },
-  });
-
   // ── /status ───────────────────────────────────────────────────────────
   registry.registerCommand("status", {
     description: "Show runtime snapshot (workspace, model, context, messages)",
