@@ -43,6 +43,35 @@ type HostRecord = Record<string, unknown>;
 /** A described node, matched by shape only (the host may load its own copy). */
 export type NativeNodeLike = HostRecord & { k?: unknown; p?: unknown; c?: unknown; key?: unknown };
 
+/**
+ * The text of a picker's preview children (the selected item's preview): a `kv` as `k: v` pairs on one
+ * line, a `badge` in brackets, a `text` as its words, a `row` of its children on one line, a column's
+ * children one line each. Nested components are not followed; a preview that holds none adds nothing.
+ */
+function previewLines(children: readonly unknown[]): string[] {
+  const lines: string[] = [];
+  for (const child of children) {
+    if (!isObject(child) || describableChild(child)) continue;
+    const node = child as NativeNodeLike;
+    if (node.k === "kv" && isObject(node.p) && Array.isArray(node.p.items)) {
+      const pairs = (node.p.items as unknown[])
+        .filter(isObject)
+        .map((item) => `${tspText(item.k)}: ${tspText(item.v)}`)
+        .filter((pair) => pair !== ": ");
+      if (pairs.length > 0) lines.push(pairs.join(" · "));
+    } else if (node.k === "badge" && isObject(node.p) && tspText(node.p.text) !== "") {
+      lines.push(`[${tspText(node.p.text)}]`);
+    } else if (node.k === "text") {
+      const text = nodeText(node).trim();
+      if (text !== "") lines.push(text);
+    } else if (node.k === "row" || node.k === "col") {
+      const inner = previewLines(Array.isArray(node.c) ? (node.c as unknown[]) : []);
+      if (inner.length > 0) lines.push(node.k === "row" ? inner.join(" ") : inner.join("\n"));
+    }
+  }
+  return lines;
+}
+
 /** The picker props this adapter reads (`TspPickerProps` in pi-wire). */
 type PickerProps = {
   title?: unknown;
@@ -137,7 +166,7 @@ type NodePropsByKind = { picker: PickerProps; prefs: PrefsProps; input: InputPro
 
 type NodeKind = keyof NodePropsByKind;
 
-type NodeFound<K extends NodeKind> = { owner: object; keypath: string; props: NodePropsByKind[K] };
+type NodeFound<K extends NodeKind> = { owner: object; keypath: string; props: NodePropsByKind[K]; node: NativeNodeLike };
 
 type Describable = object & {
   describe(cx: unknown): unknown;
@@ -212,7 +241,7 @@ export function childKeypath(parent: string, child: NativeNodeLike, index: numbe
 
 function walkNode<K extends NodeKind>(node: NativeNodeLike, keypath: string, owner: object, kind: K, depth: number, visited: Set<object>): NodeFound<K> | undefined {
   const props = nodeProps(node, kind);
-  if (props) return { owner, keypath, props };
+  if (props) return { owner, keypath, props, node };
   const children = Array.isArray(node.c) ? (node.c as unknown[]) : undefined;
   if (!children) return undefined;
   for (let i = 0; i < children.length; i++) {
@@ -757,12 +786,15 @@ export const tspPickerAdapter: DialogAdapter = {
         ...(extraActions.length > 0 ? { extraActions } : {}),
       };
     }
+    // The highlighted item's preview (`compact` facts and role chips) is text under the list's head.
+    const preview = previewLines(Array.isArray(found.node.c) ? (found.node.c as unknown[]) : []).join("\n");
     return {
       kind: "select",
       title,
       items,
       total: typeof props.total === "number" ? props.total : items.length,
       ...(subtitle ? { subtitle } : {}),
+      ...(preview !== "" ? { notice: preview } : {}),
       ...(search ? { search } : {}),
       ...(extraActions.length > 0 ? { extraActions } : {}),
     };
@@ -1611,7 +1643,7 @@ function scanPromptNode(node: NativeNodeLike, owner: object, depth: number, visi
   if (props) {
     const detail = state.detail.length > 0 ? state.detail.join("\n") : undefined;
     return {
-      input: { owner, keypath: "", props },
+      input: { owner, keypath: "", props, node },
       ...(state.loginDepth > 0 ? { loginField: true } : {}),
       ...(state.lastText === undefined ? {} : { label: state.lastText }),
       ...(detail === undefined ? {} : { detail }),

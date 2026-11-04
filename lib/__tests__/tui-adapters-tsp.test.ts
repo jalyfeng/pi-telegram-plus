@@ -2508,3 +2508,33 @@ describe("tsp picker confirm button duplicates the tappable row (#65, #60)", () 
     expect(model.extraActions).toEqual([{ label: "Delete", key: "act:1" }]);
   });
 });
+
+describe("tsp picker preview of the highlighted item (#64)", () => {
+  it("shows the compact preview's facts and role chips as text under the list", () => {
+    const tree = {
+      k: "picker",
+      p: { items: [{ id: "m", label: "mock-model" }], selected: "m" },
+      c: [
+        {
+          k: "kv",
+          p: {
+            items: [
+              { k: "ctx", v: "200k" },
+              { k: "out", v: "4.1k" },
+              { k: "price", v: "free" },
+            ],
+            layout: "inline",
+          },
+        },
+        { k: "row", c: [{ k: "badge", p: { text: "default" } }, { k: "badge", p: { text: "smol" } }] },
+      ],
+    };
+    const model = asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor()));
+    expect(model.notice).toBe("ctx: 200k · out: 4.1k · price: free\n[default] [smol]");
+  });
+
+  it("shows nothing extra when the picker has no preview", () => {
+    const tree = { k: "picker", p: { items: [{ id: "m", label: "mock-model" }] } };
+    expect(asSelect(tspPickerAdapter.read(makeComponent(tree), ctxFor())).notice).toBeUndefined();
+  });
+});
