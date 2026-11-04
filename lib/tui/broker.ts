@@ -169,6 +169,15 @@ function confirmButtonLabel(model: DialogModel, yes: boolean): string {
   return yes ? "Yes" : "No";
 }
 
+/** A typed answer as the closing summary names it: its text on one line, cut short when it is long. */
+function typedAnswerLabel(text: string): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  if (line === "") return "Sent an answer";
+  return line.length > TYPED_ANSWER_MAX ? `${line.slice(0, TYPED_ANSWER_MAX - 1)}…` : line;
+}
+
+const TYPED_ANSWER_MAX = 200;
+
 /** An item's label as one line of plain text: no edge whitespace, no runs of spaces. */
 const plainLabel = (label: string): string => label.replace(/\s+/g, " ").trim();
 
@@ -819,7 +828,7 @@ export class DialogBroker {
       // Decided here, while the input is still the secret field: by the time the dialog closes,
       // the model may already show the progress that the submit started.
       session.answeredSecret = secret;
-      session.lastAction = secret ? "Submitted (hidden)" : "Sent an answer";
+      session.lastAction = secret ? "Submitted (hidden)" : typedAnswerLabel(text);
     }
     const driven = this.inOwnerScope(session, () => purpose === "input" || purpose === "editor"
       ? this.act(subject, { type: "submit", text }, ctx)
@@ -1045,6 +1054,7 @@ export class DialogBroker {
       sessionId: session.id,
       generation: session.generation,
       page: session.page,
+      awaitingText: session.pendingInput !== undefined,
       redact: this.deps.secrets ? (text) => this.redact(session, text) : undefined,
     }));
     if (surface !== session.surface) session.generation += 1;
@@ -1196,6 +1206,7 @@ export class DialogBroker {
       sessionId: session.id,
       generation: session.generation,
       page: session.page,
+      awaitingText: session.pendingInput !== undefined,
       redact: this.deps.secrets ? (text) => this.redact(session, text) : undefined,
     });
     session.surface = this.surfaceOf(rendered);

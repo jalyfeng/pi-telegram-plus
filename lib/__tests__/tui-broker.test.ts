@@ -967,7 +967,7 @@ describe("who closed a dialog and what they tapped", () => {
       focus.closeToEditor();
       await settle();
 
-      expect(lastText(transport)).toContain("✅ Sent an answer");
+      expect(lastText(transport)).toContain("✅ sk-test-123");
       expect(lastText(transport)).not.toContain("Answered in the terminal");
     } finally {
       vi.useRealTimers();
@@ -995,7 +995,7 @@ describe("who closed a dialog and what they tapped", () => {
     expect(broker.handleText(session, "sk-test-123", 57)).toEqual({ handled: true });
     await settle();
 
-    expect(lastText(transport)).toContain("✅ Sent an answer");
+    expect(lastText(transport)).toContain("✅ sk-test-123");
     expect(lastText(transport)).not.toContain("Answered in the terminal");
   });
 
@@ -1527,5 +1527,65 @@ describe("a read-only panel that closes keeps the page it showed", () => {
 
     expect(lastEdit(transport)?.text).toContain("✅ alpha");
     expect(lastEdit(transport)?.text).not.toContain("Closed");
+  });
+});
+
+describe("the questionnaire's answers and typed answers in the closing summary (#57, #58)", () => {
+  async function questionnaire(model: DialogModel) {
+    const { broker, transport, focus } = makeBroker({ turns: [turn(42)] });
+    focus.openDialog({});
+    await settle();
+    const session = broker.current()!;
+    const acts: DialogAction[] = [];
+    session.adapter = {
+      id: "scripted",
+      detect: () => true,
+      read: () => model,
+      act: (_component, action) => {
+        acts.push(action);
+        if (action.type === "submit") focus.closeToEditor();
+        return true;
+      },
+    };
+    session.model = model;
+    return { broker, transport, focus, session, acts };
+  }
+  const lastText = (transport: { edits: Array<{ text: string }> }) => transport.edits.at(-1)?.text ?? "";
+
+  it("says the message waits for a typed answer once Type an answer is tapped", async () => {
+    const { broker, transport, session } = await questionnaire({
+      kind: "questionnaire",
+      title: "Colour",
+      active: 0,
+      canSubmit: false,
+      questions: [{ id: "c", prompt: "Pick a colour", multi: false, allowCustom: true, answered: false, items: [{ key: "red", label: "red" }] }],
+    });
+    broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "i" });
+    await settle();
+
+    expect(lastText(transport)).toContain("Send a message as the answer");
+  });
+
+  it("ends a typed answer to a single question with the answer's text", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+    try {
+      const { broker, transport, session } = await questionnaire({
+        kind: "questionnaire",
+        title: "Colour",
+        active: 0,
+        canSubmit: false,
+        questions: [{ id: "c", prompt: "Pick a colour", multi: false, allowCustom: true, answered: false, items: [{ key: "red", label: "red" }] }],
+      });
+      broker.handleCallback(42, undefined, { sessionId: session.id, generation: 0, op: "i" });
+      await settle();
+      expect(broker.handleText(session, "purple please", 57)).toEqual({ handled: true });
+      await settle();
+      await vi.advanceTimersByTimeAsync(EDIT_THROTTLE_MS);
+
+      expect(lastText(transport)).toContain("✅ purple please");
+      expect(lastText(transport)).not.toContain("Sent an answer");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

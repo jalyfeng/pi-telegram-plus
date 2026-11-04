@@ -204,6 +204,18 @@ describe("host detail shown as message text (Y-2)", () => {
     expect(texts(rows)).toEqual([["✅ Yes", "❌ No"]]);
   });
 
+  it("says a questionnaire waits for a typed answer while Type an answer is pending", () => {
+    const model: DialogModel = {
+      kind: "questionnaire",
+      title: "Colour",
+      active: 0,
+      canSubmit: false,
+      questions: [{ id: "c", prompt: "Pick a colour", multi: false, allowCustom: true, answered: false, items: [] }],
+    };
+    const { text } = renderDialog(model, { ...CTX, awaitingText: true });
+    expect(text).toContain("Send a message as the answer");
+  });
+
   it("draws an item's mark before its label, on the button and in the body", () => {
     const model: DialogModel = { kind: "select", title: "Logout", items: [{ key: "a", label: "MockAuth", mark: "● " }], total: 1 };
     const { rows, text } = renderDialog(model, CTX);

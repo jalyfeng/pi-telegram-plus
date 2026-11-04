@@ -44,6 +44,8 @@ export type RenderContext = {
   sessionId: string;
   generation: number;
   page?: number;
+  /** The next message from the chat is this dialog's typed answer (the Broker set it on a text button). */
+  awaitingText?: boolean;
   /** §4.7.4: applied to every string of the model *before* anything is escaped. */
   redact?: (text: string) => string;
 };
@@ -316,6 +318,8 @@ function renderSettings(model: Extract<DialogModel, { kind: "settings" }>, ctx: 
   };
 }
 
+const TYPED_ANSWER_HINT = "Send a message as the answer, or tap Cancel.";
+
 function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire" }>, ctx: RenderContext): RenderedDialog {
   const activeIndex = Math.max(0, Math.min(model.active, model.questions.length - 1));
   const active = model.questions[activeIndex];
@@ -328,7 +332,9 @@ function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire"
   const status = multiple
     ? `Question ${activeIndex + 1} of ${model.questions.length} · answered: ${answeredCount}`
     : undefined;
-  const body = `${escapeHtml(shorten(active.prompt, 300))}\n`;
+  const body = [`${escapeHtml(shorten(active.prompt, 300))}\n`];
+  // The same wording the input dialogs use for their text, so a typed answer is asked for the same way.
+  if (ctx.awaitingText) body.push(`${escapeHtml(TYPED_ANSWER_HINT)}\n`);
   const { rows, keyMap } = itemButtons(active.items, 0, ctx, active.multi ? "t" : "c");
   if (multiple) {
     const switchRow = keep([
@@ -349,7 +355,7 @@ function renderQuestionnaire(model: Extract<DialogModel, { kind: "questionnaire"
   }
   actions.push(...cancelRow(ctx));
   rows.push(...chunk(actions));
-  return { text: header(model.title, status, [body]), rows, keyMap, page: 0, pages: 1 };
+  return { text: header(model.title, status, body), rows, keyMap, page: 0, pages: 1 };
 }
 
 /** What a tool-approval card says about typed text: a message denies the call and gives the new instructions. */
