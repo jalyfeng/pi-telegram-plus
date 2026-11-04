@@ -233,8 +233,10 @@ reimplementation and several settings, so read **Breaking changes** before upgra
   dialogs still reach Telegram (#32).
 - **pi `/login` (OAuth) links are whole and tappable.** The sign-in link and its instructions are shown in full, the
   terminal key hints no longer appear, and the login-method step stays in the command's final message.
-- **OMP panels are read in full.** `/debug` shows its title once and its actions answer the dialog; `/context`
-  entries can be opened; `/extensions` shows each row's status dot and category; disabled `/agents` rows stay listed
+- **OMP panels are read in full.** Lists, meters and nested parts reach the chat as text: `/marketplace` shows its
+  entries (or its empty-list hint), and `/context` shows each category with its share and the auto-compaction mark.
+  A closed panel keeps its title and the page last shown. `/debug` shows its title once and its actions answer the
+  dialog; `/context` entries can be opened; `/extensions` shows each row's status dot and category; disabled `/agents` rows stay listed
   and marked; `/collab`'s QR code is shown as its link; `/share`'s upload is a wait that Cancel stops, and Cancel says
   `✖ Cancelled`.
 - **Pickers page and search like the terminal.** OMP pickers page by the rows left after filtering, a search gets a
@@ -244,8 +246,8 @@ reimplementation and several settings, so read **Breaking changes** before upgra
 - **Host-control commands send one message.** `/new`, `/reload`, `/import`, `/copy`, `/hotkeys`, `/quit` and `/exit`
   write their confirmation and result onto the `▶️ /<name>` message. OMP's `/btw`, `/omfg` and `/cleanse` results
   come back to the command message instead of showing only "Done".
-- **Terminal test runs no longer open a browser.** pi's login opened the desktop browser on every `npm test`; the
-  unit tests now record and fake such launches.
+- **`npm test` no longer opens a browser.** A pi login test opened the desktop browser on every run; the unit tests
+  now block and record such launches.
 - **Several smaller fixes.** OMP todo reminders appear, and a host warning that repeats a tool failure is dropped;
   `/tg` pages, bot details (without the token) and debug info stay on the menu message; OMP's agent picker can set
   a model override.
