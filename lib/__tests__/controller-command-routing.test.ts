@@ -338,6 +338,25 @@ describe("Terminal-only commands from Telegram", () => {
     run.mockRestore();
   });
 
+  it("answers /mcp and /mcp add with the terminal hint and never reaches the host", async () => {
+    const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
+    const submit = vi.fn(() => true);
+    const harness = createHarness({
+      bridge: createBridge({
+        submit,
+        getCommands: async () => [{ name: "mcp", description: "Manage MCP servers", source: "builtin" as const }],
+      }),
+    });
+
+    await send(harness.controller, "/mcp");
+    await send(harness.controller, "/mcp add");
+
+    expect(harness.calls.filter((call) => call.text === "/mcp only works in the terminal.")).toHaveLength(2);
+    expect(run).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    run.mockRestore();
+  });
+
   it("answers /tree and /copy with the terminal hint and never reaches the host", async () => {
     const run = vi.spyOn(CommandGateway.prototype, "run").mockResolvedValue(true);
     const submit = vi.fn(() => true);

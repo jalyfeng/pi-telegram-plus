@@ -48,7 +48,7 @@ const TELEGRAM_MENU_COMMANDS: Array<{ command: string; description?: string }> =
  * (unbounded) TUI catalog.
  */
 const CORE_COMMAND_PRIORITY = [
-  "tools", "mcp", "agents", "permissions", "hooks", "skills", "plugins", "marketplace",
+  "tools", "agents", "permissions", "hooks", "skills", "plugins", "marketplace",
   "plan", "goal", "review", "theme", "trust", "init", "help", "commands",
   "clear", "cost", "context", "diff", "undo", "redo",
 ];

@@ -17,6 +17,7 @@ export const TERMINAL_ONLY_COMMANDS: ReadonlySet<string> = new Set([
   "git",
   "tree",
   "copy",
+  "mcp",
 ]);
 
 const toCommandName = (name: string): string => name.replace(/_/g, "-").toLowerCase();
