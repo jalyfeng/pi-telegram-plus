@@ -121,7 +121,7 @@ type PrefsPageLike = { id?: unknown; label?: unknown; disabled?: unknown };
 
 type PrefsSectionLike = { id?: unknown; title?: unknown; rows?: unknown };
 
-type PrefsRowLike = { id?: unknown; label?: unknown; hint?: unknown; disabled?: unknown; control?: unknown };
+type PrefsRowLike = { id?: unknown; label?: unknown; hint?: unknown; warning?: unknown; disabled?: unknown; control?: unknown };
 
 /** A settings page's section: the heading its rows sit under (`TspPrefsSection.title`). */
 type PrefsGroupedRow = { row: PrefsRowLike; group?: string };
@@ -1121,7 +1121,10 @@ function prefsRowItem(row: PrefsRowLike, group?: string): DialogItem & { values?
   const item = prefsControlItem(row);
   const control = isObject(row.control) ? row.control : undefined;
   const note = prefsRowNote(row, control);
-  return { ...item, ...(note ? { note } : {}), ...(group ? { group } : {}) };
+  // The terminal marks a row whose description carries a `warning` with a glyph after its label.
+  const warned = typeof row.warning === "string" && row.warning !== "";
+  const label = warned ? `${item.label} ⚠` : item.label;
+  return { ...item, label, ...(note ? { note } : {}), ...(group ? { group } : {}) };
 }
 
 /** The row's label, value and submenu flag, from its control. */

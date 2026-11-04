@@ -2295,3 +2295,28 @@ describe("tsp picker model browser (agents hub model override)", () => {
     expect(browser.setQuery).toHaveBeenCalledWith("mock");
   });
 });
+
+describe("tsp settings row warning marker (#35)", () => {
+  it("carries the host's warning mark onto a row whose description has a warning", () => {
+    const props = {
+      title: "Settings",
+      pages: [],
+      page: "thinking",
+      sections: [
+        {
+          id: "s1",
+          title: "Thinking",
+          rows: [
+            { id: "external", label: "External Thinking", warning: "Sends thinking to a third party", control: { k: "switch", on: false } },
+            { id: "plain", label: "Show Thinking", control: { k: "switch", on: true } },
+          ],
+        },
+      ],
+    };
+    const model = asSettings(tspPrefsAdapter.read(makeComponent({ k: "prefs", p: props }), ctxFor()));
+    expect(model.items).toEqual([
+      { key: "external", label: "External Thinking ⚠", value: "Off", values: ["On", "Off"], group: "Thinking" },
+      { key: "plain", label: "Show Thinking", value: "On", values: ["On", "Off"], group: "Thinking" },
+    ]);
+  });
+});
