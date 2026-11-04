@@ -17,6 +17,8 @@ import { confirmDeclineLabel } from "./model.ts";
 import type { DialogItem, DialogModel, SearchModel } from "./model.ts";
 
 /** §4.7.2: ten items per page, one button per row. */
+/** The hint every secret prompt carries; plugin prompts outside the host dialogs use it too. */
+export const SECRET_INPUT_HINT = "Secret input: send a message; the bot will not echo it.";
 export const PAGE_SIZE = 10;
 export const BUTTONS_PER_ROW = 3;
 const MAX_LABEL = 45;
@@ -426,7 +428,7 @@ function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: Render
     detail ? `${escapeHtml(detail)}\n` : "",
     // The host's placeholder is plain text, as the host writes it (not a code block).
     model.placeholder ? `${escapeHtml(shorten(model.placeholder, 300))}\n` : "",
-    model.secret ? "<i>Secret input: send a message; the bot will not echo it.</i>\n" : "",
+    model.secret ? `<i>${escapeHtml(SECRET_INPUT_HINT)}</i>\n` : "",
     "Send a message as the input, or tap Cancel.",
   ];
   // The input's extra buttons (e.g. Skip) sit above Cancel, as a select's do.

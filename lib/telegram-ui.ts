@@ -3,6 +3,7 @@ import { routeCommandNotice } from "./tui/command-context.ts";
 import { encodeUiCallback } from "./callback-protocol.ts";
 import { escapeHtml } from "./html.ts";
 import { log } from "./logger.ts";
+import { SECRET_INPUT_HINT } from "./tui/render-telegram.ts";
 import { hostUiBehindRouted } from "./pi-compat.ts";
 import type { SecretStore } from "./tui/secrets.ts";
 import type { CapturedAgentSession, PendingInputResolver, TelegramButton, TelegramTransport } from "./types.ts";
@@ -256,10 +257,11 @@ export function createTelegramUiRuntime(deps: {
         },
         inputSecret: async (title: string, placeholder?: string) => {
           const flowId = beginFlow();
+          const hint = `${placeholder ? `${redact(placeholder)}\n` : ""}${SECRET_INPUT_HINT}`;
           const value = await prompt(
             flowId,
-            `<b>${escapeHtml(redact(title))}</b>${placeholder ? `\n${escapeHtml(redact(placeholder))}` : ""}`,
-            redact(title), placeholder ? redact(placeholder) : undefined,
+            `<b>${escapeHtml(redact(title))}</b>\n${escapeHtml(hint)}`,
+            redact(title), hint,
             cancelRow(flowId), true, true,
           );
           if (typeof value === "string") deps.secrets?.remember(target, flowId, value);

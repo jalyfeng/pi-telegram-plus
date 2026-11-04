@@ -291,3 +291,28 @@ describe("telegram ui inside a live /tg menu", () => {
     expect(transport.sendButtons).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("telegram ui secret prompts carry the secret-input hint", () => {
+  const HINT = "Secret input: send a message; the bot will not echo it.";
+
+  it("a secret prompt outside a menu says it is secret", async () => {
+    const env = setup();
+    const prompt = env.ui.inputSecret!("Telegram bot token (from @BotFather)");
+    await vi.waitFor(() => expect(env.runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(env.transport.sendButtons.mock.calls[0][1]).toContain(HINT);
+    env.runtime.resolveInput(CHAT, undefined);
+    await prompt;
+  });
+
+  it("a secret prompt on the live menu message says it is secret", async () => {
+    const env = setup();
+    const first = env.ui.menu("🤖 Bots", ["➕ Add bot"]);
+    await press(env, 100, "➕ Add bot");
+    await first;
+    const prompt = env.ui.inputSecret!("Telegram bot token (from @BotFather)");
+    await vi.waitFor(() => expect(env.runtime.hasPendingInput(CHAT)).toBe(true));
+    expect(env.transport.editButtons.mock.calls.at(-1)![2]).toContain(HINT);
+    env.runtime.resolveInput(CHAT, undefined);
+    await prompt;
+  });
+});
