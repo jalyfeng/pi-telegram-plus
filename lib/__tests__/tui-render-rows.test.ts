@@ -85,7 +85,7 @@ describe("input dialog shows the login body as plain text", () => {
   it("renders without detail exactly as before", () => {
     const model: DialogModel = { kind: "input", title: "Paste your API key", placeholder: "sk-...", secret: false };
     expect(renderDialog(model, CTX).text).toBe(
-      "<b>Paste your API key</b>\n<pre>sk-...</pre>\nSend a message as the input, or tap Cancel.",
+      "<b>Paste your API key</b>\nsk-...\nSend a message as the input, or tap Cancel.",
     );
   });
 });

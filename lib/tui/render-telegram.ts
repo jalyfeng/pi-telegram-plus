@@ -424,7 +424,8 @@ function renderInput(model: Extract<DialogModel, { kind: "input" }>, ctx: Render
   const body = [
     ...steps,
     detail ? `${escapeHtml(detail)}\n` : "",
-    model.placeholder ? `<pre>${escapeHtml(shorten(model.placeholder, 300))}</pre>\n` : "",
+    // The host's placeholder is plain text, as the host writes it (not a code block).
+    model.placeholder ? `${escapeHtml(shorten(model.placeholder, 300))}\n` : "",
     model.secret ? "<i>Secret input: send a message; the bot will not echo it.</i>\n" : "",
     "Send a message as the input, or tap Cancel.",
   ];
